@@ -653,7 +653,19 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
         .max_active_ms
         .saturating_sub(current.active_ms)
         .min(current.deadline_ms.saturating_sub(check_started))
-        .clamp(1, 120_000);
+        .min(120_000);
+    if check_budget == 0 {
+        current.status = Status::Blocked;
+        current.active = None;
+        current.error = Some(Error::new(
+            "limit_reached",
+            "/gate",
+            "execution budget exhausted before domain check",
+        ));
+        current.progress = json!({"phase":"blocked"});
+        inner.save(&check_row, &current, false, None, &[])?;
+        return Ok(());
+    }
     let checked = tokio::select! {
         _=cancel.cancelled()=>CheckResult::unavailable("check cancelled"),
         result=tokio::time::timeout(std::time::Duration::from_millis(check_budget),AssertUnwindSafe(gate.check(context)).catch_unwind())=>match result {Ok(Ok(v))=>v,_=>CheckResult::unavailable("gate failed or timed out")}

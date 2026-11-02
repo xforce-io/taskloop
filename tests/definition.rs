@@ -1,3 +1,4 @@
+mod common;
 use std::collections::BTreeMap;
 use taskloop::{Definition, parse_unique};
 fn root() -> std::path::PathBuf {
@@ -198,4 +199,60 @@ async fn two_businesses_start_through_public_api_with_distinct_inputs() {
         rt.cancel(&id, "cleanup", &Caller::local()).await.unwrap();
     }
     rt.shutdown().await.unwrap();
+}
+
+#[test]
+fn invalid_output_slots_fail_static_loading() {
+    for name in ["bad/slot".to_string(), String::new(), "a".repeat(161)] {
+        let f = common::Fixture::new(false);
+        let p = f.root.path().join("flow.json");
+        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        let slots = v["entries"]["test.work"]["outputs"]
+            .as_object_mut()
+            .unwrap();
+        let output = slots.remove("result").unwrap();
+        slots.insert(name, output);
+        v["flow"]["states"]["done"]["requires"] = serde_json::json!([]);
+        std::fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(
+            Definition::load(
+                &p,
+                &BTreeMap::from([("demo-skill@0.1.0".into(), f.root.path().join("demo-skill"))])
+            )
+            .is_err()
+        );
+    }
+}
+#[test]
+fn definition_filename_without_parent_is_supported() {
+    if let Some(root) =
+        std::env::var_os("TASKLOOP_RELATIVE_DEFINITION_ROOT").map(std::path::PathBuf::from)
+    {
+        assert!(
+            Definition::load(
+                "flow.json",
+                &BTreeMap::from([("demo-skill@0.1.0".into(), root.join("demo-skill"))])
+            )
+            .unwrap()
+            .report()
+            .valid
+        );
+        return;
+    }
+    let f = common::Fixture::new(false);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "definition_filename_without_parent_is_supported",
+            "--nocapture",
+        ])
+        .current_dir(f.root.path())
+        .env("TASKLOOP_RELATIVE_DEFINITION_ROOT", f.root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }

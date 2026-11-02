@@ -132,7 +132,8 @@ impl Definition {
         let file = bundle_path.as_ref();
         let root = file
             .parent()
-            .ok_or_else(|| Error::new("definition_invalid", "/", "missing resource root"))?
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
             .canonicalize()?;
         let raw = safe_read(
             &root,

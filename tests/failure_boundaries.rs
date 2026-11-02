@@ -383,3 +383,75 @@ async fn orphaned_cancel_after_commit_conflict_is_eventually_reconciled() {
     assert!(s.accepted_artifacts.is_empty());
     rt.shutdown().await.unwrap();
 }
+
+struct BudgetConsumedExecutor;
+#[async_trait]
+impl Executor for BudgetConsumedExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        inv: Invocation,
+        bridge: Arc<dyn ToolBridge>,
+        _: CancellationToken,
+    ) -> ExecutionOutcome {
+        bridge
+            .call(
+                "artifact.write",
+                serde_json::json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}}),
+            )
+            .await
+            .unwrap();
+        // A ready future may finish synchronous cleanup after its timer expired.
+        std::thread::sleep(Duration::from_millis(50));
+        ExecutionOutcome::Completed {
+            usage: serde_json::json!({"kind":"deterministic"}),
+        }
+    }
+    async fn stop_or_confirm(&self, _: &str) -> StopState {
+        StopState::Confirmed
+    }
+}
+struct CountingGate(Arc<std::sync::atomic::AtomicUsize>);
+#[async_trait]
+impl DomainGate for CountingGate {
+    async fn check(&self, c: GateContext) -> CheckResult {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        CheckResult::pass("ready", vec![c.check_evidence_ref])
+    }
+}
+#[tokio::test]
+async fn exhausted_budget_does_not_start_domain_gate() {
+    let f = Fixture::new(false);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut bindings = f.bindings("pass");
+    bindings
+        .executors
+        .insert("test.executor".into(), Arc::new(BudgetConsumedExecutor));
+    bindings
+        .gates
+        .insert("test.gate".into(), Arc::new(CountingGate(calls.clone())));
+    let rt = Runtime::open(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        bindings,
+    )
+    .await
+    .unwrap();
+    let mut request = f.request("budget", "A", false);
+    request.limits.max_active_ms = 20;
+    let id = rt.start(request, &Caller::local()).await.unwrap();
+    let s = wait_for(&rt, &id, |s| {
+        s.status.terminal() || s.status == Status::Blocked
+    })
+    .await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a domain gate started after execution consumed its budget"
+    );
+    assert_eq!(s.status, Status::Blocked);
+    assert_eq!(s.error.unwrap().code, "limit_reached");
+    rt.shutdown().await.unwrap();
+}
