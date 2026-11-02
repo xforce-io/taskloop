@@ -455,3 +455,98 @@ async fn exhausted_budget_does_not_start_domain_gate() {
     assert_eq!(s.error.unwrap().code, "limit_reached");
     rt.shutdown().await.unwrap();
 }
+
+struct ConcurrentStopExecutor {
+    entered: Arc<tokio::sync::Notify>,
+    enabled: Arc<AtomicBool>,
+    stop_entered: Arc<tokio::sync::Notify>,
+    barrier: Arc<tokio::sync::Barrier>,
+}
+#[async_trait]
+impl Executor for ConcurrentStopExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        _: Invocation,
+        _: Arc<dyn ToolBridge>,
+        cancel: CancellationToken,
+    ) -> ExecutionOutcome {
+        self.entered.notify_one();
+        cancel.cancelled().await;
+        ExecutionOutcome::StopUnknown {
+            message: "awaiting explicit stop confirmation".into(),
+        }
+    }
+    async fn stop_or_confirm(&self, _: &str) -> StopState {
+        if !self.enabled.load(Ordering::SeqCst) {
+            return StopState::Unknown;
+        }
+        self.stop_entered.notify_one();
+        self.barrier.wait().await;
+        StopState::Confirmed
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_stop_confirmations_do_not_leak_internal_revision_conflicts() {
+    let f = Fixture::new(false);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let enabled = Arc::new(AtomicBool::new(false));
+    let stop_entered = Arc::new(tokio::sync::Notify::new());
+    let mut bindings = f.bindings("pass");
+    bindings.executors.insert(
+        "test.executor".into(),
+        Arc::new(ConcurrentStopExecutor {
+            entered: entered.clone(),
+            enabled: enabled.clone(),
+            stop_entered: stop_entered.clone(),
+            barrier: Arc::new(tokio::sync::Barrier::new(3)),
+        }),
+    );
+    let rt = Runtime::open(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        bindings,
+    )
+    .await
+    .unwrap();
+    let id = rt
+        .start(f.request("one", "A", false), &Caller::local())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    rt.cancel(&id, "initial", &Caller::local()).await.unwrap();
+    wait_for(&rt, &id, |s| {
+        s.error
+            .as_ref()
+            .is_some_and(|e| e.code == "stop_unconfirmed")
+    })
+    .await;
+    enabled.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(3), stop_entered.notified())
+        .await
+        .unwrap();
+    let caller = Caller::local();
+    let (a, b) = tokio::join!(
+        rt.cancel(&id, "confirm-a", &caller),
+        rt.cancel(&id, "confirm-b", &caller)
+    );
+    assert!(
+        a.is_ok(),
+        "accepted cancel must not fail after another stop commit: {a:?}"
+    );
+    assert!(
+        b.is_ok(),
+        "accepted cancel must not fail after another stop commit: {b:?}"
+    );
+    assert_eq!(
+        wait_for(&rt, &id, |s| s.status == Status::Cancelled)
+            .await
+            .status,
+        Status::Cancelled
+    );
+    rt.shutdown().await.unwrap();
+}

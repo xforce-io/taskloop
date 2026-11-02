@@ -514,7 +514,17 @@ impl Runtime {
             r.status = Status::Cancelled;
             r.active = None;
             r.stop_unknown = false;
-            let _ = self.inner.save(&row, &r, false, None, &[])?;
+            r.error = None;
+            r.business_outcome = None;
+            r.progress = json!({"phase":"cancelled"});
+            // The cancel command is already durable. A concurrent stop commit
+            // can win this CAS; return its fresh state instead of leaking an
+            // internal revision conflict to an API without expected_revision.
+            match self.inner.save(&row, &r, false, None, &[]) {
+                Ok(_) => {}
+                Err(e) if e.code == "revision_conflict" => {}
+                Err(e) => return Err(e),
+            }
         }
         self.inner.notify.notify_one();
         self.inner.snapshot(&self.inner.authorized(id, caller)?)
