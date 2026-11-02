@@ -42,3 +42,14 @@ Reviewer 按 ~/.config/keel/reviewer 绑定为 codex gpt-6.1-sol；用独立原�
 修复：协调 started 与取消句柄发布；核实未知停止后才能关闭，超时保留 JoinHandle 供重试；关闭后拒绝新工作；内部失败与取消意图区分；未知停止保留已受理的取消意图；显式 include_attachments 授权生产访问附件闭包；检查并传递实际阶段输入；临时文件同步后原子发布摘要路径。运行职责和领域边界不变。
 
 新增回归：failure_boundaries.rs、attachments.rs 和 Store 原子发布观察。附件覆盖默认拒绝/显式允许、latest/all、无关生产阶段、A/B 实例。真实执行器和流程输入发生变化，旧真实 Agent 依据不能直接作为修复候选通过；确定性检查通过后必须重跑相关实际方法/取消/隔离场景，再做完整合并差异的第二轮独立审查。最终交付、Inquiry 与研究质量目标仍未完成。
+
+
+## 第二轮独立审查与修复
+
+候选 fb9b6e53fc49c5e3256e384e750bc80b5dc8f0b3；同一绑定 Codex 原生独立只读 review，CHANGES_REQUESTED / human: required，272.80 秒，累计第 2 轮。剩余 3 项 P2：最终提交 CAS 与取消竞争后缺少状态收敛；重启覆盖 Cancelling；已排队到期仍调用执行器。
+
+问题依据保留在 work/verify/3-review-2/：queued-expiry-repro.log 实际观察到 B 已到期仍调用执行器 1 次；cancel-crash-repro.log 在实际取消回执后 kill 宿主，重启得到 Blocked 而非 Cancelling；orphaned-cancel-repro.log 为受控白盒注入审查指出的持久化孤立取消状态，观察到不收敛，并非伪称稳定重现全部线程时序。后续修复须对照这些原输入复验。
+
+修复统一停止收尾：phase 保留本次执行已确认停止的事实，提交竞争后重读并收敛取消；后台复核所有 pending cancelling，包括无句柄和重启场景，未知停止仍占容量；恢复时保留取消意图；在派发前和调用执行器前拒绝零预算。新增实际取消后强制终止/重开且无需第二次取消的回归。普通 Skill 可选标准字段类型同时补齐，未扩展业务功能。
+
+第三轮为当前默认允许的最后一轮独立审查；不能重置计数。当前仍未批准合入，Inquiry 产品实现和最终研究/UI 验证尚未完成。

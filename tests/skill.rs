@@ -36,3 +36,21 @@ fn invalid_frontmatter_and_symlink_are_rejected_without_execution() {
     std::os::unix::fs::symlink("/etc/passwd", path.join("escape")).unwrap();
     assert!(validate_skill(&path).is_err());
 }
+
+#[test]
+fn optional_standard_fields_reject_non_string_values() {
+    for field in ["license", "allowed-tools"] {
+        let (_temp, path) = package();
+        std::fs::write(
+            path.join("SKILL.md"),
+            format!(
+                "---\nname: normal-skill\ndescription: Test.\n{field}: [unexpected, list]\n---\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_skill(&path).unwrap_err().path,
+            format!("/SKILL.md/{field}")
+        );
+    }
+}

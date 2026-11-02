@@ -215,7 +215,9 @@ impl Runtime {
         for row in inner.store.all()? {
             let mut r = decode(&row)?;
             if !r.status.terminal() && r.active.as_ref().is_some_and(|a| a.started) {
-                r.status = Status::Blocked;
+                if r.status != Status::Cancelling {
+                    r.status = Status::Blocked;
+                }
                 r.stop_unknown = true;
                 r.epoch += 1;
                 r.error = Some(Error::new(
@@ -876,23 +878,30 @@ async fn worker_loop(inner: Arc<Inner>) {
             if r.status == Status::Waiting {
                 let _ = inner.expire(&row.id);
             }
-            if r.stop_unknown {
-                if let Some(a) = &r.active {
-                    if let Some(e) = inner.bindings.executors.get(&a.executor) {
-                        if e.stop_or_confirm(&a.id).await == StopState::Confirmed {
-                            r.stop_unknown = false;
-                            r.active = None;
-                            if r.status == Status::Cancelling {
-                                r.status = Status::Cancelled;
-                                r.error = None;
-                            }
-                            if inner.save(&row, &r, false, None, &[]).is_err() {
-                                blocked_capacity = true;
-                            }
-                        } else {
-                            blocked_capacity = true;
-                        }
+            if r.stop_unknown || r.status == Status::Cancelling {
+                // A cancelled phase can lose its final CAS after execution has returned.
+                // Reconcile all pending cancellation, including orphaned handles and restart.
+                let confirmed = if let Some(active) = &r.active {
+                    if !r.stop_unknown && !active.started {
+                        true
+                    } else if let Some(executor) = inner.bindings.executors.get(&active.executor) {
+                        executor.stop_or_confirm(&active.id).await == StopState::Confirmed
                     } else {
+                        false
+                    }
+                } else {
+                    r.status == Status::Cancelling && !r.stop_unknown
+                };
+                if confirmed {
+                    r.stop_unknown = false;
+                    r.active = None;
+                    if r.status == Status::Cancelling {
+                        r.status = Status::Cancelled;
+                        r.error = None;
+                        r.business_outcome = None;
+                        r.progress = json!({"phase":"cancelled"});
+                    }
+                    if inner.save(&row, &r, false, None, &[]).is_err() {
                         blocked_capacity = true;
                     }
                 } else {

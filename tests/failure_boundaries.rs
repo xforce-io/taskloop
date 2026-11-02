@@ -268,3 +268,118 @@ async fn confirmed_cancellation_never_precedes_a_new_executor_start() {
         "runtime_closed"
     );
 }
+
+struct QueueBudgetExecutor {
+    entered: Arc<tokio::sync::Notify>,
+    b_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+#[async_trait]
+impl Executor for QueueBudgetExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        inv: Invocation,
+        _: Arc<dyn ToolBridge>,
+        cancel: CancellationToken,
+    ) -> ExecutionOutcome {
+        if inv.inputs["nonce"] == "A" {
+            self.entered.notify_one();
+            cancel.cancelled().await;
+            ExecutionOutcome::Cancelled
+        } else {
+            self.b_calls.fetch_add(1, Ordering::SeqCst);
+            ExecutionOutcome::Completed {
+                usage: serde_json::json!({"kind":"deterministic"}),
+            }
+        }
+    }
+    async fn stop_or_confirm(&self, _: &str) -> StopState {
+        StopState::Confirmed
+    }
+}
+#[tokio::test]
+async fn queued_expired_work_never_calls_the_executor() {
+    let f = Fixture::new(false);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut bindings = f.bindings("pass");
+    bindings.executors.insert(
+        "test.executor".into(),
+        Arc::new(QueueBudgetExecutor {
+            entered: entered.clone(),
+            b_calls: calls.clone(),
+        }),
+    );
+    let rt = Runtime::open(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        bindings,
+    )
+    .await
+    .unwrap();
+    let a = rt
+        .start(f.request("a", "A", false), &Caller::local())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let mut request = f.request("b", "B", false);
+    request.limits.max_wall_ms = 20;
+    let b = rt.start(request, &Caller::local()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    rt.cancel(&a, "cancel", &Caller::local()).await.unwrap();
+    let s = wait_for(&rt, &b, |s| {
+        s.status == Status::Blocked || s.status.terminal()
+    })
+    .await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "expired queued work caused an external execution"
+    );
+    assert_eq!(s.status, Status::Blocked);
+    assert_eq!(s.error.unwrap().code, "limit_reached");
+    rt.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn orphaned_cancel_after_commit_conflict_is_eventually_reconciled() {
+    // White-box fault injection of the persisted state left by the reviewed CAS interleaving.
+    // Application consumers never access this private store.
+    let f = Fixture::new(false);
+    let rt = f.open("pass").await;
+    let id = rt
+        .start(f.request("one", "A", false), &Caller::local())
+        .await
+        .unwrap();
+    wait_for(&rt, &id, |s| s.status == Status::Completed).await;
+    let connection = rusqlite::Connection::open(f.root.path().join("store/state.sqlite")).unwrap();
+    let raw: String = connection
+        .query_row("SELECT body FROM executions WHERE id=?1", [&id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let mut body: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let run = body["attempts"][0]["run_id"].clone();
+    body["status"] = serde_json::json!("cancelling");
+    body["current_state"] = serde_json::json!("work");
+    body["business_outcome"] = serde_json::Value::Null;
+    body["progress"] = serde_json::json!({"phase":"executing"});
+    body["attempts"] = serde_json::json!([]);
+    body["stop_unknown"] = serde_json::json!(false);
+    body["history"] = serde_json::json!([]);
+    body["epoch"] = serde_json::json!(body["epoch"].as_u64().unwrap() + 1);
+    body["active"] = serde_json::json!({"id":run,"executor":"test.executor","epoch":body["epoch"],"started":true,"started_ms":1});
+    connection
+        .execute(
+            "UPDATE executions SET body=?1,revision=revision+1 WHERE id=?2",
+            rusqlite::params![serde_json::to_string(&body).unwrap(), id],
+        )
+        .unwrap();
+    drop(connection);
+    let s = wait_for(&rt, &id, |s| s.status == Status::Cancelled).await;
+    assert!(s.accepted_artifacts.is_empty());
+    rt.shutdown().await.unwrap();
+}

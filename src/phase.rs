@@ -317,7 +317,8 @@ impl ToolBridge for Bridge {
     }
 }
 pub(crate) async fn run(inner: Arc<Inner>, row: Row) {
-    if let Err(error) = run_checked(inner.clone(), row.clone()).await
+    let mut execution_stopped = true;
+    if let Err(error) = run_checked(inner.clone(), row.clone(), &mut execution_stopped).await
         && let Ok(latest) = inner.store.load(&row.id)
         && let Ok(mut record) = decode(&latest)
         && !record.status.terminal()
@@ -325,13 +326,45 @@ pub(crate) async fn run(inner: Arc<Inner>, row: Row) {
     {
         record.status = Status::Blocked;
         record.error = Some(error);
+        if execution_stopped {
+            record.active = None;
+            record.stop_unknown = false;
+        } else {
+            record.stop_unknown = true;
+        }
         let _ = inner.save(&latest, &record, false, None, &[]);
+    }
+    // Execution already returned a confirmed outcome. A losing final CAS must not
+    // discard that stop fact or force an in-process executor to rediscover it.
+    if execution_stopped {
+        loop {
+            let Ok(latest) = inner.store.load(&row.id) else {
+                break;
+            };
+            let Ok(mut record) = decode(&latest) else {
+                break;
+            };
+            if record.status != Status::Cancelling {
+                break;
+            }
+            record.status = Status::Cancelled;
+            record.active = None;
+            record.stop_unknown = false;
+            record.error = None;
+            record.business_outcome = None;
+            record.progress = json!({"phase":"cancelled"});
+            match inner.save(&latest, &record, false, None, &[]) {
+                Ok(_) => break,
+                Err(e) if e.code == "revision_conflict" => tokio::task::yield_now().await,
+                Err(_) => break,
+            }
+        }
     }
     if let Ok(mut handles) = inner.handles.lock() {
         handles.remove(&row.id);
     }
 }
-async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
+async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) -> Result<()> {
     let mut record = decode(&row)?;
     let definition = inner.store.definition(&record.definition_digest)?;
     if record.binding_fingerprint != inner.binding_fingerprint {
@@ -374,6 +407,13 @@ async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
             "capability_denied",
             "/tools",
             "entry requires tools outside current grant",
+        ));
+    }
+    if record.deadline_ms <= now_ms() || record.active_ms >= record.limits.max_active_ms {
+        return Err(Error::new(
+            "limit_reached",
+            "/dispatch",
+            "queued execution exhausted its budget before dispatch",
         ));
     }
     let references = requirements(&record, &definition, &contract.requires)?;
@@ -460,7 +500,13 @@ async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
         timeout_ms: time_left,
     };
     let mut internal_stop = false;
-    let outcome = if cancel.is_cancelled() {
+    *execution_stopped = false;
+    let outcome = if time_left == 0 {
+        ExecutionOutcome::Failed {
+            code: "limit_reached".into(),
+            message: "execution budget expired before adapter invocation".into(),
+        }
+    } else if cancel.is_cancelled() {
         ExecutionOutcome::Cancelled
     } else {
         match tokio::time::timeout(
@@ -498,6 +544,7 @@ async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
             }
         }
     };
+    *execution_stopped = !matches!(outcome, ExecutionOutcome::StopUnknown { .. });
     let latest = inner.store.load(&row.id)?;
     let mut current = decode(&latest)?;
     current.attempts.push(AttemptRecord {

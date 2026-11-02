@@ -87,6 +87,15 @@ pub fn validate_skill(root: impl AsRef<Path>) -> Result<SkillValidationReport> {
             "description must be nonempty and at most 1024 characters",
         ));
     }
+    for field in ["license", "allowed-tools"] {
+        if meta.get(field).is_some_and(|value| !value.is_string()) {
+            return Err(Error::new(
+                "definition_invalid",
+                format!("/SKILL.md/{field}"),
+                "optional Skill field must be a string",
+            ));
+        }
+    }
     if let Some(compat) = meta.get("compatibility")
         && compat
             .as_str()

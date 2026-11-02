@@ -116,22 +116,34 @@ async fn crash_child() {
     )
     .await
     .unwrap();
-    rt.start(
-        StartRequest {
-            definition_digest: definition.digest,
-            inputs: json!({"nonce":"BEFORE-CRASH","hold":false}),
-            grant_ref: "local-readonly".into(),
-            request_key: "before-crash".into(),
-            limits: ResourceLimits::default(),
-        },
-        &Caller::local(),
-    )
-    .await
-    .unwrap();
+    let id = rt
+        .start(
+            StartRequest {
+                definition_digest: definition.digest,
+                inputs: json!({"nonce":"BEFORE-CRASH","hold":false}),
+                grant_ref: "local-readonly".into(),
+                request_key: "before-crash".into(),
+                limits: ResourceLimits::default(),
+            },
+            &Caller::local(),
+        )
+        .await
+        .unwrap();
+    loop {
+        if root.join("request-cancel").exists() {
+            let snapshot = rt
+                .cancel(&id, "before-crash-cancel", &Caller::local())
+                .await
+                .unwrap();
+            assert_eq!(snapshot.status, Status::Cancelling);
+            std::fs::write(root.join("cancel-receipt"), b"accepted").unwrap();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     std::future::pending::<()>().await;
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
+async fn run_crash_case(cancel_before_kill: bool) {
     let mut f = Fixture::new(false);
     let flow_path = f.root.path().join("flow.json");
     let mut bundle: Value = serde_json::from_slice(&std::fs::read(&flow_path).unwrap()).unwrap();
@@ -166,6 +178,15 @@ async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
     }
     let entered: Value = serde_json::from_slice(&std::fs::read(marker).unwrap()).unwrap();
     let a = entered["execution"].as_str().unwrap();
+    if cancel_before_kill {
+        std::fs::write(f.root.path().join("request-cancel"), b"cancel").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !f.root.path().join("cancel-receipt").exists() {
+            assert!(child.try_wait().unwrap().is_none());
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     child.kill().await.unwrap();
     assert!(!child.wait().await.unwrap().success());
     let blobs: Vec<_> = std::fs::read_dir(f.root.path().join("store/blobs"))
@@ -190,7 +211,14 @@ async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
     .await
     .unwrap();
     let recovered = rt.get(a, &Caller::local()).await.unwrap();
-    assert_eq!(recovered.status, Status::Blocked);
+    assert_eq!(
+        recovered.status,
+        if cancel_before_kill {
+            Status::Cancelling
+        } else {
+            Status::Blocked
+        }
+    );
     assert_eq!(recovered.error.unwrap().code, "interrupted");
     assert_eq!(recovered.accepted_artifacts.len(), 1);
     let saved = rt
@@ -215,9 +243,11 @@ async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
         "unknown execution must hold worker capacity"
     );
     confirmed.store(true, Ordering::SeqCst);
-    rt.cancel(a, "confirmed-stop", &Caller::local())
-        .await
-        .unwrap();
+    if !cancel_before_kill {
+        rt.cancel(a, "confirmed-stop", &Caller::local())
+            .await
+            .unwrap();
+    }
     let final_b = common::wait_for(&rt, &b, |s| s.status.terminal()).await;
     assert_eq!(final_b.status, Status::Completed);
     assert_eq!(
@@ -230,4 +260,13 @@ async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
         Status::Cancelled
     );
     rt.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
+    run_crash_case(false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepted_cancel_survives_host_crash_and_finishes_without_new_cancel() {
+    run_crash_case(true).await;
 }
