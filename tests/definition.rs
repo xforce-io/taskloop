@@ -86,3 +86,116 @@ fn rejects_missing_skill_registration() {
     let e = Definition::load(root().join("research.bundle.json"), &BTreeMap::new()).unwrap_err();
     assert_eq!(e.code, "binding_missing");
 }
+
+struct PausedExecutor;
+#[async_trait::async_trait]
+impl taskloop::Executor for PausedExecutor {
+    fn capabilities(&self) -> taskloop::ExecutorCapabilities {
+        taskloop::ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        _: taskloop::Invocation,
+        _: std::sync::Arc<dyn taskloop::ToolBridge>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> taskloop::ExecutionOutcome {
+        cancel.cancelled().await;
+        taskloop::ExecutionOutcome::Cancelled
+    }
+}
+struct UnusedTool(String);
+#[async_trait::async_trait]
+impl taskloop::DomainTool for UnusedTool {
+    fn spec(&self) -> taskloop::ToolSpec {
+        taskloop::ToolSpec {
+            id: self.0.clone(),
+            description: "Unused read-only capability in definition-start test.".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+        }
+    }
+    async fn call(
+        &self,
+        _: taskloop::ToolContext,
+        _: serde_json::Value,
+    ) -> taskloop::Result<taskloop::ToolOutput> {
+        panic!("start-only test must not invoke domain capabilities")
+    }
+}
+struct UnusedGate;
+#[async_trait::async_trait]
+impl taskloop::DomainGate for UnusedGate {
+    async fn check(&self, _: taskloop::GateContext) -> taskloop::CheckResult {
+        panic!("start-only test must not evaluate domain outputs")
+    }
+}
+#[tokio::test]
+async fn two_businesses_start_through_public_api_with_distinct_inputs() {
+    use serde_json::json;
+    use std::sync::Arc;
+    use taskloop::*;
+    let definitions = ["research.bundle.json", "document-review.bundle.json"]
+        .map(|name| Definition::load(root().join(name), &skills()).unwrap());
+    let mut bindings = HostBindings::default().configuration_version("two-domains-start@1");
+    let mut tools = std::collections::BTreeSet::new();
+    for d in &definitions {
+        for e in d.bundle.entries.values() {
+            bindings
+                .executors
+                .insert(e.executor.clone(), Arc::new(PausedExecutor));
+            bindings.gates.insert(e.gate.clone(), Arc::new(UnusedGate));
+            for name in &e.tools {
+                tools.insert(name.clone());
+                if !matches!(name.as_str(), "artifact.read" | "artifact.write") {
+                    bindings
+                        .tools
+                        .insert(name.clone(), Arc::new(UnusedTool(name.clone())));
+                }
+            }
+        }
+    }
+    bindings.grants.insert(
+        "local-readonly".into(),
+        Grant {
+            definitions: definitions.iter().map(|d| d.digest.clone()).collect(),
+            tools: tools.into_iter().collect(),
+            limits: ResourceLimits::default(),
+        },
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let rt = Runtime::open(
+        RuntimeOptions::new(temp.path().join("store")),
+        definitions.to_vec(),
+        bindings,
+    )
+    .await
+    .unwrap();
+    let inputs = [
+        json!({"question":"Architecture boundaries?","seed_urls":[],"scope":"public read-only"}),
+        json!({"document_id":"doc-42","criteria":["clarity"]}),
+    ];
+    let mut ids = Vec::new();
+    for (d, input) in definitions.iter().zip(inputs) {
+        let id = rt
+            .start(
+                StartRequest {
+                    definition_digest: d.digest.clone(),
+                    inputs: input.clone(),
+                    grant_ref: "local-readonly".into(),
+                    request_key: d.bundle.flow.id.clone(),
+                    limits: ResourceLimits::default(),
+                },
+                &Caller::local(),
+            )
+            .await
+            .unwrap();
+        let snapshot = rt.get(&id, &Caller::local()).await.unwrap();
+        assert_eq!(snapshot.inputs, input);
+        assert_eq!(snapshot.current_state, d.bundle.flow.initial);
+        ids.push(id);
+    }
+    assert_ne!(ids[0], ids[1]);
+    for id in ids {
+        rt.cancel(&id, "cleanup", &Caller::local()).await.unwrap();
+    }
+    rt.shutdown().await.unwrap();
+}
