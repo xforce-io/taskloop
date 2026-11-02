@@ -64,7 +64,7 @@ impl CodexExecutor {
         self.proxy = Some(proxy.into());
         self
     }
-    async fn process(&self, inv: &Invocation) -> Result<Process> {
+    async fn process(&self, inv: &Invocation, cancel: &CancellationToken) -> Result<Process> {
         let info = json!({"name":"taskloop","title":format!("TaskLoop {}",inv.run_id),"version":env!("CARGO_PKG_VERSION")});
         let mut cmd = Command::new(&self.command);
         cmd.args([
@@ -142,6 +142,13 @@ impl CodexExecutor {
             .kill_on_drop(true);
         use std::os::unix::process::CommandExt;
         cmd.as_std_mut().process_group(0);
+        if cancel.is_cancelled() {
+            return Err(Error::new(
+                "cancelled",
+                "/run",
+                "execution cancelled before process launch",
+            ));
+        }
         let mut child = cmd.spawn()?;
         let pid = child
             .id()
@@ -240,7 +247,7 @@ impl CodexExecutor {
                     .map(move |path| format!("skill:{id}/{path}"))
             })
             .collect();
-        let request = json!({"instruction":inv.entry.instruction,"state_id":inv.state_id,"visit":inv.visit,"flow_input":inv.inputs,"accepted_inputs":inv.artifacts,"signal_facts":inv.signal_facts,"required_output_schemas":inv.output_schemas,"tool_mapping":state.tool_names,"method_resources":resources,"attachments":inv.entry.attachments,"time_limit_ms":inv.timeout_ms,"completion":"Use artifact.write for all required output slots, then finish. This is not a request to execute any later entry."});
+        let request = json!({"instruction":inv.entry.instruction,"state_id":inv.state_id,"visit":inv.visit,"task_input":inv.stage_input,"flow_input":inv.inputs,"accepted_inputs":inv.artifacts,"signal_facts":inv.signal_facts,"required_output_schemas":inv.output_schemas,"tool_mapping":state.tool_names,"method_resources":resources,"attachments":inv.entry.attachments,"time_limit_ms":inv.timeout_ms,"completion":"Use artifact.write for all required output slots, then finish. This is not a request to execute any later entry."});
         p.request(3,"turn/start",json!({"threadId":id,"effort":"high","input":[{"type":"text","text":request.to_string()}]}),&mut state).await?;
         loop {
             let message = p.next(cancel).await?;
@@ -276,7 +283,10 @@ impl Executor for CodexExecutor {
         bridge: Arc<dyn ToolBridge>,
         cancel: CancellationToken,
     ) -> ExecutionOutcome {
-        let mut p = match self.process(&inv).await {
+        if cancel.is_cancelled() {
+            return ExecutionOutcome::Cancelled;
+        }
+        let mut p = match self.process(&inv, &cancel).await {
             Ok(p) => p,
             Err(_) => {
                 return ExecutionOutcome::Failed {

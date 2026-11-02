@@ -133,6 +133,8 @@ pub trait DomainGate: Send + Sync {
 }
 #[derive(Debug, Clone)]
 pub struct Invocation {
+    /// Exact input envelope already validated against EntryContract.input_schema.
+    pub stage_input: Value,
     pub execution_id: String,
     pub run_id: String,
     pub state_id: String,

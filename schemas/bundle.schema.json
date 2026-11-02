@@ -108,6 +108,10 @@
                     "latest",
                     "all"
                   ]
+                },
+                "include_attachments": {
+                  "type": "boolean",
+                  "default": false
                 }
               },
               "required": [
@@ -302,6 +306,10 @@
                             "latest",
                             "all"
                           ]
+                        },
+                        "include_attachments": {
+                          "type": "boolean",
+                          "default": false
                         }
                       },
                       "required": [

@@ -39,6 +39,11 @@ pub struct Requirement {
     pub state: String,
     pub slot: String,
     pub selection: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_attachments: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -464,6 +469,13 @@ impl Definition {
                     "definition_invalid",
                     path,
                     format!("unknown output slot {}", r.slot),
+                ));
+            }
+            if r.include_attachments && self.bundle.entries[entry].attachments.is_none() {
+                return Err(Error::new(
+                    "definition_invalid",
+                    path,
+                    "attachment dependency requires an attachment-producing entry",
                 ));
             }
         }

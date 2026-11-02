@@ -307,22 +307,32 @@ impl Store {
     pub fn write_blob(&self, raw: &[u8]) -> Result<String> {
         let hash = digest(raw);
         let path = self.root.join("blobs").join(&hash);
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(mut f) => {
-                if let Err(e) = f.write_all(raw).and_then(|_| f.sync_all()) {
-                    let _ = std::fs::remove_file(&path);
-                    return Err(e.into());
+        // The final digest path must never name a partially written file.
+        let pending = self
+            .root
+            .join("blobs")
+            .join(format!(".pending-{}", uuid::Uuid::new_v4()));
+        let publish = (|| -> Result<()> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&pending)?;
+            file.write_all(raw)?;
+            file.sync_all()?;
+            match std::fs::hard_link(&pending, &path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if self.read_blob(&hash)? != raw {
+                        return Err(Error::io("content addressed blob mismatch"));
+                    }
                 }
-                File::open(self.root.join("blobs"))?.sync_all()?;
+                Err(e) => return Err(e.into()),
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let old = self.read_blob(&hash)?;
-                if old != raw {
-                    return Err(Error::io("content addressed blob mismatch"));
-                }
-            }
-            Err(e) => return Err(e.into()),
-        }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&pending);
+        publish?;
+        File::open(self.root.join("blobs"))?.sync_all()?;
         Ok(hash)
     }
     pub fn read_blob(&self, hash: &str) -> Result<Vec<u8>> {
@@ -400,6 +410,38 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn readers_never_observe_partial_content_addressed_files() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("store");
+        let s = Store::open(&root).unwrap();
+        let bytes = vec![42u8; 32 * 1024 * 1024];
+        let hash = digest(&bytes);
+        let path = root.join("blobs").join(&hash);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let reader_barrier = barrier.clone();
+        let reader = std::thread::spawn(move || {
+            reader_barrier.wait();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    break meta.len();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "blob was never published"
+                );
+                std::thread::yield_now();
+            }
+        });
+        barrier.wait();
+        assert_eq!(s.write_blob(&bytes).unwrap(), hash);
+        assert_eq!(
+            reader.join().unwrap(),
+            bytes.len() as u64,
+            "final digest path became visible before complete publication"
+        );
+    }
     #[test]
     fn refuses_public_store_without_changing_existing_permissions() {
         use std::os::unix::fs::PermissionsExt;

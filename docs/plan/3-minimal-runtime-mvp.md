@@ -31,3 +31,14 @@ Reviewer 按 ~/.config/keel/reviewer 绑定为 codex gpt-6.1-sol；用独立原�
 - 外部独立 Cargo package 通过五操作闭环，未引用私有模块或应用数据表；确定性执行器与真实模型探针分别记账。
 - 普通检查目前通过，等待超时用例明确设置 1 秒，其余等待/重启测试使用 60 秒以避免测试自身跨过业务期限。
 - 当前仍需核对完整验收覆盖、冻结候选复验、独立审查、平台 CI 和合入门禁。Inquiry 实现/真实研究对照/Web 驾驶未完成。
+
+
+## 首轮独立审查与修复
+
+候选 a9afbbf89b0226f0680a58ee5f4206bd99106fc0；Codex 原生独立只读 review，实际 gpt-6.1-sol，来源 bind-file；结果 CHANGES_REQUESTED / human: required，204.05 秒。完整原始记录位于被忽略的 work/verify/3-review-1/native-review.log；本轮累计审查次数 1，不清零。
+
+问题依据：phase.rs 的 started 保存和句柄注册有空窗；shutdown 仅等待循环退出；超时取消 token 被当成用户取消；StopUnknown 覆盖 Cancelling；requirements 仅选同名输出；入口 Schema 未用于实际输入；write_blob 在完成前创建最终摘要路径。详细发现及原候选行号保留在原审查中。附件缺口另由公开 API 独立宿主复现；关闭/超时/取消意图/输入契约有实际失败回归；并发文件观察看到最终摘要路径的长度为 0（预期 33554432）。启动竞争的原始依据是可达多线程交错与独立审查，未冒称已稳定复现原窗口；修复后增加 64 次公开启动/取消竞争检查。
+
+修复：协调 started 与取消句柄发布；核实未知停止后才能关闭，超时保留 JoinHandle 供重试；关闭后拒绝新工作；内部失败与取消意图区分；未知停止保留已受理的取消意图；显式 include_attachments 授权生产访问附件闭包；检查并传递实际阶段输入；临时文件同步后原子发布摘要路径。运行职责和领域边界不变。
+
+新增回归：failure_boundaries.rs、attachments.rs 和 Store 原子发布观察。附件覆盖默认拒绝/显式允许、latest/all、无关生产阶段、A/B 实例。真实执行器和流程输入发生变化，旧真实 Agent 依据不能直接作为修复候选通过；确定性检查通过后必须重跑相关实际方法/取消/隔离场景，再做完整合并差异的第二轮独立审查。最终交付、Inquiry 与研究质量目标仍未完成。

@@ -376,7 +376,9 @@ async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
             "entry requires tools outside current grant",
         ));
     }
-    let references = requirements(&record, &contract.requires)?;
+    let references = requirements(&record, &definition, &contract.requires)?;
+    let stage_input = json!({"flow_input":record.inputs,"input_artifact_ids":references.iter().map(|a|&a.id).collect::<Vec<_>>(),"signal_fact_ids":record.signals.iter().map(|s|&s.id).collect::<Vec<_>>()});
+    definition.validate_value(&contract.input_schema, &stage_input)?;
     let mut artifacts = Vec::new();
     for reference in &references {
         artifacts.push(ArtifactData {
@@ -392,18 +394,19 @@ async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
     active.started_ms = now_ms();
     record.active = Some(active.clone());
     record.progress = json!({"phase":"executing"});
-    if !matches!(
-        inner.save(&row, &record, false, None, &[])?,
-        Commit::Saved(_)
-    ) {
-        return Ok(());
-    }
     let cancel = inner.stop.child_token();
-    inner
-        .handles
-        .lock()
-        .map_err(Error::io)?
-        .insert(row.id.clone(), cancel.clone());
+    {
+        // cancel() uses this same lock before deciding whether execution is absent.
+        // Publish the started fact and its cancellation handle as one coordinated admission.
+        let mut handles = inner.handles.lock().map_err(Error::io)?;
+        if !matches!(
+            inner.save(&row, &record, false, None, &[])?,
+            Commit::Saved(_)
+        ) {
+            return Ok(());
+        }
+        handles.insert(row.id.clone(), cancel.clone());
+    }
     let visit = record.visits[&record.current_state];
     let context = ToolContext {
         inputs: record.inputs.clone(),
@@ -437,6 +440,7 @@ async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
         .map(|(slot, out)| (slot.clone(), definition.schemas[&out.schema].clone()))
         .collect();
     let invocation = Invocation {
+        stage_input,
         output_schemas,
         execution_id: row.id.clone(),
         run_id: active.id.clone(),
@@ -455,24 +459,41 @@ async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
         work_dir: inner.store.run_dir(&active.id)?,
         timeout_ms: time_left,
     };
-    let outcome = match tokio::time::timeout(
-        std::time::Duration::from_millis(time_left.max(1)),
-        AssertUnwindSafe(executor.execute(invocation, bridge.clone(), cancel.clone()))
-            .catch_unwind(),
-    )
-    .await
-    {
-        Ok(Ok(outcome)) => outcome,
-        _ => {
-            cancel.cancel();
-            if executor.stop_or_confirm(&active.id).await == StopState::Confirmed {
-                ExecutionOutcome::Failed {
-                    code: "limit_reached".into(),
-                    message: "execution deadline or adapter failure".into(),
-                }
-            } else {
-                ExecutionOutcome::StopUnknown {
-                    message: "execution failed without a confirmed stop".into(),
+    let mut internal_stop = false;
+    let outcome = if cancel.is_cancelled() {
+        ExecutionOutcome::Cancelled
+    } else {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(time_left.max(1)),
+            AssertUnwindSafe(executor.execute(invocation, bridge.clone(), cancel.clone()))
+                .catch_unwind(),
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            failed_execution => {
+                internal_stop = true;
+                let panicked = matches!(failed_execution, Ok(Err(_)));
+                cancel.cancel();
+                if executor.stop_or_confirm(&active.id).await == StopState::Confirmed {
+                    ExecutionOutcome::Failed {
+                        code: if panicked {
+                            "executor_failed"
+                        } else {
+                            "limit_reached"
+                        }
+                        .into(),
+                        message: if panicked {
+                            "execution adapter panicked"
+                        } else {
+                            "execution deadline exceeded"
+                        }
+                        .into(),
+                    }
+                } else {
+                    ExecutionOutcome::StopUnknown {
+                        message: "execution failed without a confirmed stop".into(),
+                    }
                 }
             }
         }
@@ -490,7 +511,9 @@ async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
         .active_ms
         .saturating_add(now_ms().saturating_sub(active.started_ms));
     if matches!(outcome, ExecutionOutcome::StopUnknown { .. }) {
-        current.status = Status::Blocked;
+        if current.status != Status::Cancelling {
+            current.status = Status::Blocked;
+        }
         current.stop_unknown = true;
         current.error = Some(Error::new(
             "stop_unconfirmed",
@@ -502,7 +525,7 @@ async fn run_checked(inner: Arc<Inner>, row: Row) -> Result<()> {
     }
     if current.status == Status::Cancelling
         || current.epoch != active.epoch
-        || cancel.is_cancelled()
+        || (cancel.is_cancelled() && !internal_stop)
     {
         current.status = Status::Cancelled;
         current.active = None;

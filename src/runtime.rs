@@ -32,6 +32,7 @@ impl RuntimeOptions {
 pub struct Runtime {
     pub(crate) inner: Arc<Inner>,
     task: Mutex<Option<JoinHandle<()>>>,
+    shutdown_lock: tokio::sync::Mutex<()>,
 }
 pub(crate) struct Inner {
     pub store: Store,
@@ -232,9 +233,17 @@ impl Runtime {
         Ok(Self {
             inner,
             task: Mutex::new(Some(task)),
+            shutdown_lock: tokio::sync::Mutex::new(()),
         })
     }
     pub async fn start(&self, request: StartRequest, caller: &Caller) -> Result<String> {
+        if self.inner.stop.is_cancelled() {
+            return Err(Error::new(
+                "runtime_closed",
+                "/runtime",
+                "runtime is closing; reopen before starting work",
+            ));
+        }
         nonempty(&request.request_key, "/request_key")?;
         let grant = self
             .inner
@@ -355,6 +364,13 @@ impl Runtime {
         request: SignalRequest,
         caller: &Caller,
     ) -> Result<SignalReceipt> {
+        if self.inner.stop.is_cancelled() {
+            return Err(Error::new(
+                "runtime_closed",
+                "/runtime",
+                "runtime is closing; reopen before submitting events",
+            ));
+        }
         nonempty(&request.request_key, "/request_key")?;
         let row = self.inner.authorized(id, caller)?;
         let fp = digest(&serde_json::to_vec(&request)?);
@@ -510,23 +526,78 @@ impl Runtime {
         })
     }
     pub async fn shutdown(&self) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let _shutdown = tokio::time::timeout_at(deadline, self.shutdown_lock.lock())
+            .await
+            .map_err(|_| {
+                Error::new(
+                    "stop_unconfirmed",
+                    "/shutdown",
+                    "another shutdown has not completed",
+                )
+            })?;
         self.inner.stop.cancel();
         for token in self.inner.handles.lock().map_err(Error::io)?.values() {
             token.cancel();
         }
         self.inner.notify.notify_waiters();
         let task = self.task.lock().map_err(Error::io)?.take();
-        if let Some(task) = task {
-            tokio::time::timeout(std::time::Duration::from_secs(15), task)
-                .await
-                .map_err(|_| {
-                    Error::new(
+        if let Some(mut task) = task {
+            match tokio::time::timeout_at(deadline, &mut task).await {
+                Ok(joined) => joined.map_err(Error::io)?,
+                Err(_) => {
+                    *self.task.lock().map_err(Error::io)? = Some(task);
+                    return Err(Error::new(
                         "stop_unconfirmed",
                         "/shutdown",
                         "executor did not confirm termination",
+                    ));
+                }
+            }
+        }
+        for row in self.inner.store.all()? {
+            let mut record = decode(&row)?;
+            if record.stop_unknown || record.active.as_ref().is_some_and(|a| a.started) {
+                let active = record.active.as_ref().ok_or_else(|| {
+                    Error::new(
+                        "stop_unconfirmed",
+                        "/shutdown",
+                        "unknown execution has no recoverable stop handle",
                     )
-                })?
-                .map_err(Error::io)?;
+                })?;
+                let executor = self
+                    .inner
+                    .bindings
+                    .executors
+                    .get(&active.executor)
+                    .ok_or_else(|| {
+                        Error::new("stop_unconfirmed", "/shutdown", "stop adapter unavailable")
+                    })?;
+                if !matches!(
+                    tokio::time::timeout_at(deadline, executor.stop_or_confirm(&active.id)).await,
+                    Ok(StopState::Confirmed)
+                ) {
+                    return Err(Error::new(
+                        "stop_unconfirmed",
+                        "/shutdown",
+                        "an execution has not confirmed stopping",
+                    ));
+                }
+                record.stop_unknown = false;
+                record.active = None;
+                if record.status == Status::Cancelling {
+                    record.status = Status::Cancelled;
+                    record.error = None;
+                } else if record.status == Status::Running {
+                    record.status = Status::Blocked;
+                    record.error = Some(Error::new(
+                        "interrupted",
+                        "/shutdown",
+                        "host closed during execution; it will not be replayed",
+                    ));
+                }
+                self.inner.save(&row, &record, false, None, &[])?;
+            }
         }
         Ok(())
     }
@@ -625,7 +696,11 @@ fn nonempty(s: &str, path: &str) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn requirements(r: &Record, requires: &[Requirement]) -> Result<Vec<ArtifactRef>> {
+pub(crate) fn requirements(
+    r: &Record,
+    d: &Definition,
+    requires: &[Requirement],
+) -> Result<Vec<ArtifactRef>> {
     let mut found = Vec::new();
     for dep in requires {
         let candidates: Vec<_> = r.history.iter().filter(|h| h.state == dep.state).collect();
@@ -639,7 +714,7 @@ pub(crate) fn requirements(r: &Record, requires: &[Requirement]) -> Result<Vec<A
             candidates
         };
         let items: Vec<_> = selected
-            .into_iter()
+            .iter()
             .flat_map(|h| h.artifacts.iter())
             .filter(|a| a.slot == dep.slot)
             .cloned()
@@ -652,7 +727,41 @@ pub(crate) fn requirements(r: &Record, requires: &[Requirement]) -> Result<Vec<A
             ));
         }
         found.extend(items);
+        if dep.include_attachments {
+            let Some(State::Work { entry, .. }) = d.bundle.flow.states.get(&dep.state) else {
+                return Err(Error::new(
+                    "definition_invalid",
+                    "/requires",
+                    "attachment producer missing",
+                ));
+            };
+            let producer = &d.bundle.entries[entry];
+            let policy = producer.attachments.as_ref().ok_or_else(|| {
+                Error::new(
+                    "definition_invalid",
+                    "/requires",
+                    "producer has no attachments",
+                )
+            })?;
+            for history in selected {
+                // An output dependency grants only attachments from its selected producer visit.
+                if history.artifacts.iter().any(|a| a.slot == dep.slot) {
+                    found.extend(
+                        history
+                            .artifacts
+                            .iter()
+                            .filter(|a| {
+                                a.slot.starts_with(&policy.slot_prefix)
+                                    && !producer.outputs.contains_key(&a.slot)
+                            })
+                            .cloned(),
+                    );
+                }
+            }
+        }
     }
+    found.sort_by(|a, b| a.id.cmp(&b.id));
+    found.dedup_by(|a, b| a.id == b.id);
     Ok(found)
 }
 pub(crate) fn enter(r: &mut Record, d: &Definition, target: &str, transition: bool) -> Result<()> {
@@ -677,7 +786,7 @@ pub(crate) fn enter(r: &mut Record, d: &Definition, target: &str, transition: bo
         return Ok(());
     }
     if let State::Terminal { requires, .. } = &state
-        && let Err(e) = requirements(r, requires)
+        && let Err(e) = requirements(r, d, requires)
     {
         r.status = Status::Blocked;
         r.active = None;
@@ -730,7 +839,7 @@ pub(crate) fn enter(r: &mut Record, d: &Definition, target: &str, transition: bo
                 return Ok(());
             }
             let e = &d.bundle.entries[&entry];
-            if let Err(error) = requirements(r, &e.requires) {
+            if let Err(error) = requirements(r, d, &e.requires) {
                 r.status = Status::Blocked;
                 r.error = Some(error);
                 return Ok(());
@@ -775,6 +884,7 @@ async fn worker_loop(inner: Arc<Inner>) {
                             r.active = None;
                             if r.status == Status::Cancelling {
                                 r.status = Status::Cancelled;
+                                r.error = None;
                             }
                             if inner.save(&row, &r, false, None, &[]).is_err() {
                                 blocked_capacity = true;
