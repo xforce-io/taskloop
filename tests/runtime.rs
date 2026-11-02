@@ -264,3 +264,125 @@ async fn cancelled_attempt_cannot_submit_late_output_even_if_it_reports_complete
     assert_eq!(s.current_state, "work");
     rt.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn competing_signals_and_changed_idempotency_payload_cannot_double_advance() {
+    let f = Fixture::new(true);
+    let rt = f.open("pass").await;
+    let id = rt
+        .start(f.request("one", "A", false), &Caller::local())
+        .await
+        .unwrap();
+    assert_eq!(
+        rt.start(f.request("one", "DIFFERENT", false), &Caller::local())
+            .await
+            .unwrap_err()
+            .code,
+        "request_conflict"
+    );
+    let s = wait_for(&rt, &id, |s| s.status == Status::Waiting).await;
+    let first = SignalRequest {
+        event_name: "resume".into(),
+        payload: json!({"confirm":true}),
+        request_key: "first".into(),
+        expected_revision: s.revision,
+    };
+    let second = SignalRequest {
+        request_key: "second".into(),
+        ..first.clone()
+    };
+    let caller = Caller::local();
+    let (a, b) = tokio::join!(
+        rt.signal(&id, first.clone(), &caller),
+        rt.signal(&id, second, &caller)
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    let accepted = a.or(b).unwrap();
+    assert_eq!(
+        rt.get(&id, &caller).await.unwrap().revision,
+        accepted.revision
+    );
+    let mut changed = first.clone();
+    changed.payload = json!({"confirm":false});
+    assert_eq!(
+        rt.signal(&id, changed, &caller).await.unwrap_err().code,
+        "request_conflict"
+    );
+    assert_eq!(
+        rt.signal(&id, first, &caller).await.unwrap().revision,
+        accepted.revision
+    );
+    rt.shutdown().await.unwrap();
+}
+struct InvalidSubmissionExecutor(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+#[async_trait::async_trait]
+impl Executor for InvalidSubmissionExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        inv: Invocation,
+        bridge: std::sync::Arc<dyn ToolBridge>,
+        _: tokio_util::sync::CancellationToken,
+    ) -> ExecutionOutcome {
+        for (tool, args) in [
+            (
+                "artifact.write",
+                json!({"slot":"undeclared","value":{"nonce":"x"}}),
+            ),
+            (
+                "artifact.write",
+                json!({"slot":"result","value":{"nonce":42}}),
+            ),
+            ("unregistered.tool", json!({})),
+        ] {
+            assert!(bridge.call(tool, args).await.is_err());
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        bridge
+            .call(
+                "artifact.write",
+                json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}}),
+            )
+            .await
+            .unwrap();
+        ExecutionOutcome::Completed {
+            usage: json!({"kind":"deterministic"}),
+        }
+    }
+}
+#[tokio::test]
+async fn bridge_rejects_undeclared_slots_bad_schema_and_tools_before_acceptance() {
+    let f = Fixture::new(false);
+    let denials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut bindings = f.bindings("pass");
+    bindings.executors.insert(
+        "test.executor".into(),
+        std::sync::Arc::new(InvalidSubmissionExecutor(denials.clone())),
+    );
+    let rt = Runtime::open(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        bindings,
+    )
+    .await
+    .unwrap();
+    let id = rt
+        .start(f.request("one", "A", false), &Caller::local())
+        .await
+        .unwrap();
+    let s = wait_for(&rt, &id, |s| s.status.terminal()).await;
+    assert_eq!(s.status, Status::Completed);
+    assert_eq!(denials.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert_eq!(s.accepted_artifacts.len(), 1);
+    let output = rt
+        .read_artifact(&s.accepted_artifacts[0].id, &Caller::local())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.bytes).unwrap()["nonce"],
+        "A"
+    );
+    rt.shutdown().await.unwrap();
+}
