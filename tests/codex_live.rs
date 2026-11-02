@@ -41,7 +41,11 @@ async fn real_agent_reads_locked_method_and_submits_only_through_host_tools() {
     let mut bindings = f.bindings("pass");
     bindings.executors.insert(
         "test.executor".into(),
-        Arc::new(CodexExecutor::new("gpt-6.1-sol").unwrap()),
+        Arc::new(AuditedExecutor {
+            native: CodexExecutor::new("gpt-6.1-sol").unwrap(),
+            runs: Arc::new(std::sync::Mutex::new(Vec::new())),
+            denials: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
     );
     bindings.gates.insert(
         "test.gate".into(),
@@ -161,8 +165,11 @@ impl Executor for AuditedExecutor {
         bridge: Arc<dyn ToolBridge>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> ExecutionOutcome {
-        self.runs.lock().unwrap().push(invocation.run_id.clone());
-        self.native
+        let run_id = invocation.run_id.clone();
+        self.runs.lock().unwrap().push(run_id.clone());
+        let started = std::time::Instant::now();
+        let outcome = self
+            .native
             .execute(
                 invocation,
                 Arc::new(AuditBridge {
@@ -171,7 +178,12 @@ impl Executor for AuditedExecutor {
                 }),
                 cancel,
             )
-            .await
+            .await;
+        println!(
+            "{}",
+            json!({"kind":"native_agent_run","run_id":run_id,"elapsed_seconds":started.elapsed().as_secs_f64(),"model_calls":1,"outcome":outcome})
+        );
+        outcome
     }
     async fn stop_or_confirm(&self, id: &str) -> StopState {
         self.native.stop_or_confirm(id).await
