@@ -32,15 +32,22 @@ impl Executor for Recoverable {
         tools: Arc<dyn ToolBridge>,
         _: CancellationToken,
     ) -> ExecutionOutcome {
-        self.starts.fetch_add(1, Ordering::SeqCst);
+        let call = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
+        let nonce = if self.marker.is_some() && call == 2 {
+            json!("UNACCEPTED-BEFORE-CRASH")
+        } else {
+            inv.inputs["nonce"].clone()
+        };
         tools
             .call(
                 "artifact.write",
-                json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}}),
+                json!({"slot":"result","value":{"nonce":nonce}}),
             )
             .await
             .unwrap();
-        if let Some(marker) = &self.marker {
+        if let Some(marker) = &self.marker
+            && call == 2
+        {
             std::fs::write(
                 marker,
                 serde_json::to_vec(&json!({"execution":inv.execution_id,"run":inv.run_id}))
@@ -125,7 +132,17 @@ async fn crash_child() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
-    let f = Fixture::new(false);
+    let mut f = Fixture::new(false);
+    let flow_path = f.root.path().join("flow.json");
+    let mut bundle: Value = serde_json::from_slice(&std::fs::read(&flow_path).unwrap()).unwrap();
+    bundle["flow"]["states"]["work"]["accepted"]["ready"] = json!("after_initial");
+    bundle["flow"]["states"]["after_initial"] = json!({"kind":"work","entry":"test.work","accepted":{"ready":"done"},"rejected":"failed","failed":"failed"});
+    std::fs::write(&flow_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    f.definition = Definition::load(
+        &flow_path,
+        &BTreeMap::from([("demo-skill@0.1.0".into(), f.root.path().join("demo-skill"))]),
+    )
+    .unwrap();
     let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "crash_child", "--nocapture"])
         .env("TASKLOOP_CRASH_CHILD_ROOT", f.root.path())
@@ -155,7 +172,9 @@ async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
         .unwrap()
         .map(|e| std::fs::read(e.unwrap().path()).unwrap())
         .collect();
-    assert!(blobs.iter().any(|b| serde_json::from_slice::<Value>(b).is_ok_and(|v|v["nonce"]=="BEFORE-CRASH")));
+    assert!(blobs.iter().any(|b| {
+        serde_json::from_slice::<Value>(b).is_ok_and(|v| v["nonce"] == "UNACCEPTED-BEFORE-CRASH")
+    }));
     let confirmed = Arc::new(AtomicBool::new(false));
     let starts = Arc::new(AtomicUsize::new(0));
     let executor = Arc::new(Recoverable {
@@ -173,7 +192,15 @@ async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
     let recovered = rt.get(a, &Caller::local()).await.unwrap();
     assert_eq!(recovered.status, Status::Blocked);
     assert_eq!(recovered.error.unwrap().code, "interrupted");
-    assert!(recovered.accepted_artifacts.is_empty());
+    assert_eq!(recovered.accepted_artifacts.len(), 1);
+    let saved = rt
+        .read_artifact(&recovered.accepted_artifacts[0].id, &Caller::local())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&saved.bytes).unwrap()["nonce"],
+        "BEFORE-CRASH"
+    );
     let b = rt
         .start(
             f.request("after-crash", "AFTER-CRASH", false),
@@ -195,8 +222,8 @@ async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
     assert_eq!(final_b.status, Status::Completed);
     assert_eq!(
         starts.load(Ordering::SeqCst),
-        1,
-        "only B may run, A must never replay"
+        2,
+        "only B's two phases may run, A must never replay"
     );
     assert_eq!(
         rt.get(a, &Caller::local()).await.unwrap().status,
