@@ -1,0 +1,528 @@
+use crate::{Error, Result, json::digest};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
+use std::{
+    fs::{File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
+pub(crate) struct Store {
+    conn: Mutex<Connection>,
+    root: PathBuf,
+    _lock: File,
+}
+#[derive(Debug, Clone)]
+pub(crate) struct Row {
+    pub id: String,
+    pub owner: String,
+    pub revision: u64,
+    pub queue_order: u64,
+    pub body: Value,
+}
+#[derive(Debug, Clone)]
+pub(crate) struct CommandReceipt {
+    pub kind: String,
+    pub key: String,
+    pub fingerprint: String,
+    pub response: Value,
+    pub not_after_ms: Option<u64>,
+}
+pub(crate) enum Commit {
+    Saved(Row),
+    Replayed(Value),
+}
+impl Store {
+    pub fn open(root: &Path) -> Result<Self> {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(root)?;
+        let root = root.canonicalize()?;
+        if std::fs::metadata(&root)?.permissions().mode() & 0o077 != 0 {
+            return Err(Error::new(
+                "capability_denied",
+                "/store",
+                "store directory must be private to its owner (0700)",
+            ));
+        }
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("owner.lock"))?;
+        fs2::FileExt::try_lock_exclusive(&lock).map_err(|_| {
+            Error::new(
+                "already_running",
+                "/store",
+                "another TaskLoop host owns this store",
+            )
+        })?;
+        std::fs::create_dir_all(root.join("blobs"))?;
+        std::fs::create_dir_all(root.join("runs"))?;
+        let conn = Connection::open(root.join("state.sqlite"))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > 1 {
+            return Err(Error::new(
+                "storage_incompatible",
+                "/store",
+                "newer schema version; refusing to guess migration",
+            ));
+        }
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+            CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY,owner TEXT NOT NULL,request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,revision INTEGER NOT NULL,queue_order INTEGER NOT NULL,body TEXT NOT NULL,UNIQUE(owner,request_key));
+            CREATE INDEX IF NOT EXISTS active_queue ON executions(queue_order,id) WHERE json_extract(body,'$.status') NOT IN ('completed','failed','cancelled');
+            CREATE TABLE IF NOT EXISTS commands(execution_id TEXT NOT NULL,kind TEXT NOT NULL,request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL,PRIMARY KEY(execution_id,kind,request_key));
+            CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY,execution_id TEXT NOT NULL,sha256 TEXT NOT NULL,metadata TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS definitions(digest TEXT PRIMARY KEY,body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
+            INSERT OR IGNORE INTO meta(key,value) VALUES('queue',0);
+            PRAGMA user_version=1;")?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            root,
+            _lock: lock,
+        })
+    }
+    fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| Error::io("store mutex poisoned"))
+    }
+    fn next_queue(conn: &Connection) -> Result<u64> {
+        conn.execute("UPDATE meta SET value=value+1 WHERE key='queue'", [])?;
+        let n: i64 =
+            conn.query_row("SELECT value FROM meta WHERE key='queue'", [], |r| r.get(0))?;
+        u64::try_from(n).map_err(|_| Error::io("negative queue counter"))
+    }
+    fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, i64, i64, String)> {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    }
+    fn decode(
+        (id, owner, revision, queue_order, body): (String, String, i64, i64, String),
+    ) -> Result<Row> {
+        Ok(Row {
+            id,
+            owner,
+            revision: u64::try_from(revision).map_err(|_| Error::io("negative revision"))?,
+            queue_order: u64::try_from(queue_order)
+                .map_err(|_| Error::io("negative queue position"))?,
+            body: serde_json::from_str(&body)?,
+        })
+    }
+    pub fn load(&self, id: &str) -> Result<Row> {
+        let c = self.connection()?;
+        let r = c
+            .query_row(
+                "SELECT id,owner,revision,queue_order,body FROM executions WHERE id=?1",
+                [id],
+                Self::row,
+            )
+            .optional()?;
+        Self::decode(r.ok_or_else(|| Error::new("not_found", "/execution", "execution not found"))?)
+    }
+    pub fn all(&self) -> Result<Vec<Row>> {
+        let c = self.connection()?;
+        let mut st = c.prepare(
+            "SELECT id,owner,revision,queue_order,body FROM executions WHERE json_extract(body,'$.status') NOT IN ('completed','failed','cancelled') ORDER BY queue_order,id",
+        )?;
+        let rows = st
+            .query_map([], Self::row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter().map(Self::decode).collect()
+    }
+    pub fn create(
+        &self,
+        id: &str,
+        owner: &str,
+        key: &str,
+        fingerprint: &str,
+        body: &Value,
+        capacity: usize,
+    ) -> Result<(Row, bool)> {
+        let mut c = self.connection()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let prior: Option<(String, String)> = tx
+            .query_row(
+                "SELECT id,fingerprint FROM executions WHERE owner=?1 AND request_key=?2",
+                params![owner, key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((existing, fp)) = prior {
+            if fp != fingerprint {
+                return Err(Error::new(
+                    "request_conflict",
+                    "/request_key",
+                    "same key has different request",
+                ));
+            }
+            let row = Self::decode(tx.query_row(
+                "SELECT id,owner,revision,queue_order,body FROM executions WHERE id=?1",
+                [existing],
+                Self::row,
+            )?)?;
+            tx.commit()?;
+            return Ok((row, false));
+        }
+        let count:i64=tx.query_row("SELECT COUNT(*) FROM executions WHERE json_extract(body,'$.status') NOT IN ('completed','failed','cancelled')",[],|r|r.get(0))?;
+        if count >= capacity as i64 {
+            return Err(Error::new(
+                "admission_full",
+                "/execution",
+                "admission limit reached",
+            ));
+        }
+        let queue = Self::next_queue(&tx)?;
+        tx.execute(
+            "INSERT INTO executions VALUES(?1,?2,?3,?4,0,?5,?6)",
+            params![
+                id,
+                owner,
+                key,
+                fingerprint,
+                queue as i64,
+                serde_json::to_string(body)?
+            ],
+        )?;
+        tx.commit()?;
+        Ok((
+            Row {
+                id: id.into(),
+                owner: owner.into(),
+                revision: 0,
+                queue_order: queue,
+                body: body.clone(),
+            },
+            true,
+        ))
+    }
+    pub fn command(&self, id: &str, kind: &str, key: &str, fp: &str) -> Result<Option<Value>> {
+        let c = self.connection()?;
+        let prior:Option<(String,String)>=c.query_row("SELECT fingerprint,response FROM commands WHERE execution_id=?1 AND kind=?2 AND request_key=?3",params![id,kind,key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        match prior {
+            Some((old, response)) => {
+                if old != fp {
+                    return Err(Error::new(
+                        "request_conflict",
+                        "/request_key",
+                        "same command key has different content",
+                    ));
+                }
+                Ok(Some(serde_json::from_str(&response)?))
+            }
+            None => Ok(None),
+        }
+    }
+    pub fn commit(
+        &self,
+        row: &Row,
+        body: &Value,
+        enqueue: bool,
+        command: Option<CommandReceipt>,
+        artifacts: &[crate::ArtifactRef],
+    ) -> Result<Commit> {
+        let mut c = self.connection()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(ref cmd) = command {
+            let prior:Option<(String,String)>=tx.query_row("SELECT fingerprint,response FROM commands WHERE execution_id=?1 AND kind=?2 AND request_key=?3",params![row.id,cmd.kind,cmd.key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if let Some((fp, response)) = prior {
+                if fp != cmd.fingerprint {
+                    return Err(Error::new(
+                        "request_conflict",
+                        "/request_key",
+                        "same command key has different content",
+                    ));
+                }
+                let v = serde_json::from_str(&response)?;
+                tx.commit()?;
+                return Ok(Commit::Replayed(v));
+            }
+        }
+        if command
+            .as_ref()
+            .and_then(|c| c.not_after_ms)
+            .is_some_and(|deadline| crate::runtime::now_ms() >= deadline)
+        {
+            return Err(Error::new(
+                "signal_expired",
+                "/signal",
+                "waiting deadline passed before transaction commit",
+            ));
+        }
+        let queue = if enqueue {
+            Self::next_queue(&tx)?
+        } else {
+            row.queue_order
+        };
+        let revision = row.revision + 1;
+        let changed = tx.execute(
+            "UPDATE executions SET revision=?1,queue_order=?2,body=?3 WHERE id=?4 AND revision=?5",
+            params![
+                revision as i64,
+                queue as i64,
+                serde_json::to_string(body)?,
+                row.id,
+                row.revision as i64
+            ],
+        )?;
+        if changed != 1 {
+            return Err(Error::new(
+                "revision_conflict",
+                "/revision",
+                "instance changed; refresh snapshot",
+            ));
+        }
+        for a in artifacts {
+            tx.execute(
+                "INSERT INTO artifacts VALUES(?1,?2,?3,?4)",
+                params![a.id, row.id, a.sha256, serde_json::to_string(a)?],
+            )?;
+        }
+        if let Some(cmd) = command {
+            tx.execute(
+                "INSERT INTO commands VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    row.id,
+                    cmd.kind,
+                    cmd.key,
+                    cmd.fingerprint,
+                    serde_json::to_string(&cmd.response)?
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(Commit::Saved(Row {
+            id: row.id.clone(),
+            owner: row.owner.clone(),
+            revision,
+            queue_order: queue,
+            body: body.clone(),
+        }))
+    }
+    pub fn write_blob(&self, raw: &[u8]) -> Result<String> {
+        let hash = digest(raw);
+        let path = self.root.join("blobs").join(&hash);
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(raw).and_then(|_| f.sync_all()) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e.into());
+                }
+                File::open(self.root.join("blobs"))?.sync_all()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let old = self.read_blob(&hash)?;
+                if old != raw {
+                    return Err(Error::io("content addressed blob mismatch"));
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(hash)
+    }
+    pub fn read_blob(&self, hash: &str) -> Result<Vec<u8>> {
+        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::new(
+                "artifact_invalid",
+                "/artifact",
+                "invalid content digest",
+            ));
+        }
+        let raw = crate::definition::safe_read(&self.root.join("blobs"), hash, 64 * 1024 * 1024)
+            .map_err(|_| Error::io("locked artifact bytes unavailable"))?;
+        if digest(&raw) != hash {
+            return Err(Error::io("immutable artifact corrupted"));
+        }
+        Ok(raw)
+    }
+    pub fn artifact(&self, id: &str) -> Result<(String, crate::ArtifactRef)> {
+        let c = self.connection()?;
+        let pair: Option<(String, String)> = c
+            .query_row(
+                "SELECT execution_id,metadata FROM artifacts WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (execution, metadata) = pair
+            .ok_or_else(|| Error::new("not_found", "/artifact", "accepted artifact not found"))?;
+        Ok((execution, serde_json::from_str(&metadata)?))
+    }
+    pub fn save_definition(&self, definition: &crate::Definition) -> Result<()> {
+        let c = self.connection()?;
+        c.execute(
+            "INSERT OR IGNORE INTO definitions VALUES(?1,?2)",
+            params![definition.digest, serde_json::to_string(definition)?],
+        )?;
+        Ok(())
+    }
+    pub fn definition(&self, digest: &str) -> Result<crate::Definition> {
+        let c = self.connection()?;
+        let body: Option<String> = c
+            .query_row(
+                "SELECT body FROM definitions WHERE digest=?1",
+                [digest],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let definition: crate::Definition = serde_json::from_str(&body.ok_or_else(|| {
+            Error::new(
+                "definition_invalid",
+                "/definition",
+                "locked definition unavailable",
+            )
+        })?)
+        .map_err(Error::io)?;
+        definition.verify_integrity()?;
+        if definition.digest != digest {
+            return Err(Error::io("definition identity mismatch"));
+        }
+        Ok(definition)
+    }
+    pub fn run_dir(&self, nonce: &str) -> Result<PathBuf> {
+        if !nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(Error::new("artifact_invalid", "/run", "invalid run nonce"));
+        }
+        let p = self.root.join("runs").join(nonce);
+        std::fs::create_dir_all(&p)?;
+        Ok(p)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn refuses_public_store_without_changing_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("public");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(Store::open(&root).err().unwrap().code, "capability_denied");
+        assert_eq!(
+            std::fs::metadata(root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+    #[test]
+    fn expired_signal_cannot_commit_and_replay_survives_deadline() {
+        let t = tempfile::tempdir().unwrap();
+        let s = Store::open(&t.path().join("store")).unwrap();
+        let (row, _) = s
+            .create("a", "u", "start", "fp", &json!({"status":"waiting"}), 8)
+            .unwrap();
+        let expired = CommandReceipt {
+            kind: "signal".into(),
+            key: "late".into(),
+            fingerprint: "one".into(),
+            response: json!({"ok":true}),
+            not_after_ms: Some(1),
+        };
+        assert_eq!(
+            s.commit(
+                &row,
+                &json!({"status":"completed"}),
+                false,
+                Some(expired),
+                &[]
+            )
+            .err()
+            .unwrap()
+            .code,
+            "signal_expired"
+        );
+        assert_eq!(s.load("a").unwrap().revision, row.revision);
+        let receipt = CommandReceipt {
+            kind: "signal".into(),
+            key: "accepted".into(),
+            fingerprint: "two".into(),
+            response: json!({"ok":true}),
+            not_after_ms: None,
+        };
+        s.commit(
+            &row,
+            &json!({"status":"completed"}),
+            false,
+            Some(receipt.clone()),
+            &[],
+        )
+        .unwrap();
+        let late_replay = CommandReceipt {
+            not_after_ms: Some(1),
+            ..receipt
+        };
+        assert!(matches!(
+            s.commit(
+                &row,
+                &json!({"status":"failed"}),
+                false,
+                Some(late_replay),
+                &[]
+            )
+            .unwrap(),
+            Commit::Replayed(_)
+        ));
+        assert_eq!(s.load("a").unwrap().body["status"], "completed");
+    }
+    #[test]
+    fn rejects_second_host() {
+        let t = tempfile::tempdir().unwrap();
+        let _a = Store::open(&t.path().join("store")).unwrap();
+        assert!(Store::open(&t.path().join("store")).is_err());
+    }
+    #[test]
+    fn idempotency_precedes_capacity_and_cas_rejects_stale() {
+        let t = tempfile::tempdir().unwrap();
+        let s = Store::open(&t.path().join("store")).unwrap();
+        let (a, new) = s
+            .create("a", "u", "one", "fp", &json!({"status":"running"}), 1)
+            .unwrap();
+        assert!(new);
+        assert!(
+            !s.create("ignored", "u", "one", "fp", &json!({}), 1)
+                .unwrap()
+                .1
+        );
+        assert!(
+            s.create("b", "u", "two", "fp", &json!({"status":"running"}), 1)
+                .is_err()
+        );
+        s.commit(&a, &json!({"status":"waiting"}), false, None, &[])
+            .unwrap();
+        assert!(
+            s.commit(&a, &json!({"status":"completed"}), false, None, &[])
+                .is_err()
+        );
+        assert_eq!(s.load("a").unwrap().body["status"], "waiting");
+    }
+    #[test]
+    fn committed_facts_and_blobs_survive_restart() {
+        let t = tempfile::tempdir().unwrap();
+        let hash;
+        {
+            let s = Store::open(&t.path().join("store")).unwrap();
+            hash = s.write_blob(b"saved content").unwrap();
+            s.create(
+                "a",
+                "u",
+                "one",
+                "fp",
+                &json!({"status":"waiting","artifact":hash}),
+                1,
+            )
+            .unwrap();
+        }
+        let s = Store::open(&t.path().join("store")).unwrap();
+        assert_eq!(s.read_blob(&hash).unwrap(), b"saved content");
+        assert_eq!(s.load("a").unwrap().body["artifact"], hash);
+    }
+}

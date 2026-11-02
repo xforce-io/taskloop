@@ -1,0 +1,102 @@
+{
+  "scope": "跨仓设计/资源/Schema/依赖静态检查；不证明实际 Rust/Harness/UI 或质量能力",
+  "checks": [
+    {
+      "name": "business_and_framework_schemas_valid",
+      "result": "pass"
+    },
+    {
+      "name": "active_inquiry_bundle_consumes_taskloop_format",
+      "result": "pass"
+    },
+    {
+      "name": "business_schema_refs_resolve_without_vendored_builtins",
+      "result": "pass"
+    },
+    {
+      "name": "six_research_stages_preserved",
+      "result": "pass"
+    },
+    {
+      "name": "business_skill_ref_matches_local_version",
+      "result": "pass"
+    },
+    {
+      "name": "framework_protocol_only_in_taskloop",
+      "result": "pass"
+    },
+    {
+      "name": "framework_witness_and_second_business_removed_from_inquiry",
+      "result": "pass"
+    },
+    {
+      "name": "public_snapshot_sufficient_for_app_projection",
+      "result": "pass"
+    },
+    {
+      "name": "domain_acquisition_has_no_private_execution_identity",
+      "result": "pass"
+    },
+    {
+      "name": "generic_tool_receipt_has_no_http_fields",
+      "result": "pass"
+    },
+    {
+      "name": "five_public_instance_artifact_operations",
+      "result": "pass"
+    },
+    {
+      "name": "application_avoids_private_runtime_protocol",
+      "result": "pass"
+    },
+    {
+      "name": "consumer_has_all_five_dependency_mappings",
+      "result": "pass"
+    },
+    {
+      "name": "inquiry_l2_has_13_sections",
+      "result": "pass"
+    },
+    {
+      "name": "inquiry_local_design_links_resolve",
+      "result": "pass"
+    },
+    {
+      "name": "taskloop_l2_has_13_sections",
+      "result": "pass"
+    },
+    {
+      "name": "taskloop_local_design_links_resolve",
+      "result": "pass"
+    },
+    {
+      "name": "1-minimal-research-loop_witness_passed",
+      "result": "pass"
+    },
+    {
+      "name": "1-minimal-research-loop_witness_sources_match",
+      "result": "pass"
+    },
+    {
+      "name": "2-minimal-runtime-contract_witness_passed",
+      "result": "pass"
+    },
+    {
+      "name": "2-minimal-runtime-contract_witness_sources_match",
+      "result": "pass"
+    },
+    {
+      "name": "framework_trace_matches_current_model",
+      "result": "pass"
+    }
+  ],
+  "passed": true,
+  "framework_model_cases": 85,
+  "inquiry_domain_cases": 21,
+  "product_tests": "not_run",
+  "source_sha256": {
+    "inquiry_l2": "2e7e85c99b5190e61bcff17b3192d10e2299a44e4bfcfa06750c5d53af55d050",
+    "taskloop_l2": "0d37d33f42445ce4056ef2cacdf1e73db02b97bdc43cc7a0c05f5b5236e15f6d",
+    "checker": "64f67af1c4b43b6797be762f8dd0168cd76a8afec73a45d1f3d2d39f2eec4e0b"
+  }
+}

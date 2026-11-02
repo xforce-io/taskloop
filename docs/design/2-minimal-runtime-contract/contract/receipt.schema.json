@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requested_url": {
+      "type": "string",
+      "pattern": "^https?://",
+      "minLength": 1
+    },
+    "final_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "captured_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T"
+    },
+    "http_status": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 100,
+      "maximum": 599
+    },
+    "fetch_status": {
+      "enum": [
+        "captured",
+        "unavailable",
+        "denied",
+        "not_attempted"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "body_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "normalized_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "transform_version": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "usable": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "run_id",
+    "source_id",
+    "requested_url",
+    "final_url",
+    "captured_at",
+    "http_status",
+    "fetch_status",
+    "reason",
+    "body_sha256",
+    "normalized_sha256",
+    "transform_version",
+    "usable"
+  ],
+  "additionalProperties": false
+}

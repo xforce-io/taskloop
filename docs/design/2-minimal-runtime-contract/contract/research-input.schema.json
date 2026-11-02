@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seed_urls": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^https?://",
+        "minLength": 1
+      }
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "question",
+    "seed_urls",
+    "scope"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "const": 1
+    },
+    "execution_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_key": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "protocol_version",
+    "execution_id",
+    "request_key"
+  ],
+  "additionalProperties": false
+}

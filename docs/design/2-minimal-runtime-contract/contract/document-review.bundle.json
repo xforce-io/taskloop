@@ -1,0 +1,80 @@
+{
+  "contract_version": 1,
+  "entries": {
+    "review.inspect": {
+      "executor": "review.cli",
+      "skills": [
+        "document-review@0.1.0"
+      ],
+      "input_schema": "task-input.schema.json",
+      "outputs": {
+        "review": {
+          "schema": "review-result.schema.json",
+          "required": true
+        }
+      },
+      "gate": "review.inspect.gate",
+      "outcomes": [
+        "accepted",
+        "revise"
+      ],
+      "instruction": "按文档审阅标准检查并提交有依据的结果。",
+      "tools": [
+        "artifact.read",
+        "artifact.write"
+      ]
+    }
+  },
+  "flow": {
+    "id": "example.document_review",
+    "version": "0.1.0",
+    "initial": "inspect",
+    "limits": {
+      "max_transitions": 8,
+      "max_visits_per_state": 2,
+      "max_runs": 4
+    },
+    "states": {
+      "inspect": {
+        "kind": "work",
+        "entry": "review.inspect",
+        "accepted": {
+          "accepted": "approved",
+          "revise": "revise"
+        },
+        "rejected": "failed",
+        "failed": "failed"
+      },
+      "revise": {
+        "kind": "wait",
+        "signals": {
+          "revision.submitted": {
+            "schema": "review-revision.schema.json",
+            "target": "inspect"
+          }
+        },
+        "timeout_seconds": 3600,
+        "timeout_target": "failed"
+      },
+      "approved": {
+        "kind": "terminal",
+        "status": "completed",
+        "outcome": "approved",
+        "requires": [
+          {
+            "state": "inspect",
+            "slot": "review",
+            "selection": "latest"
+          }
+        ]
+      },
+      "failed": {
+        "kind": "terminal",
+        "status": "failed",
+        "outcome": "review_failed",
+        "requires": []
+      }
+    },
+    "input_schema": "review-input.schema.json"
+  }
+}

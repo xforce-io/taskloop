@@ -1,12 +1,14 @@
 # RFC-0001：TaskLoop 总体架构
 
+> 本文保留 Issue #1 的历史总体提案。2026-11-02 起，一期 Rust crate 的范围与通用契约以 [Issue #2 L2](design/2-minimal-runtime-contract.md) 为准；本文的 Python/CLI、动态规划、租约心跳及外部写动作设计不作为一期依赖。本文不是另一份生效的一期规格。
+
 | 项目 | 内容 |
 |---|---|
 | 状态 | Draft，完整设计提案；未经过人工架构批准，未实现 |
 | 版本 | 0.1.0，2026-11-01 |
 | 需求与验收 | [Issue #1](https://github.com/xforce-io/taskloop/issues/1)，S1–S4 |
 | 术语 | [名词表](glossary.md) |
-| 事实源 | 本文件是唯一详细设计事实源；Issue 只保存验收与概要 |
+| 事实源 | 本文件为 Issue #1 历史总体提案；一期范围与契约仅认 Issue #2 L2 |
 | 范围依据 | 用户在研究系统讨论及本次续办中确认的 Skill-first、Task-first、七层、领域解耦、第三方 Harness 与详细设计范围；本稿新增技术选择均为提案 |
 
 本次按用户指定路径发布 RFC，取代 Issue 原定的 `docs/design/1-taskloop-architecture.md`，不生成第二份详细正文。保留用户指定的 13 节结构。§4 定义产品路径与验收细项，§5–10 定义技术契约，§11 定义验证，§12 记录未决项，§13 收录 ADR 与关联。L1 概要在 Issue 评论，完整产品行为在 §4；L2 为本 RFC 的技术部分。L1: write、L2: write；理由是全新系统且用户明确要求总体详细设计。`keel-how: skip: 无现成机制可讲`，基线提交 `6f9ffa4` 只有 README 和名词表，没有运行时代码。这里完成的是设计发布，不是实现验收或批准。

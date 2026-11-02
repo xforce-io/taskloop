@@ -1,0 +1,15 @@
+[package]
+name = "taskloop-external-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+taskloop = { path = "../.." }
+async-trait = "0.1"
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-util = "0.7"
