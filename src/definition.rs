@@ -527,17 +527,26 @@ pub(crate) fn collect_skill(
         if t.is_dir() {
             collect_skill(root, &p, out)?;
         } else if t.is_file() {
+            if out.len() >= 128 {
+                return Err(Error::new(
+                    "definition_invalid",
+                    "/skills",
+                    "method resources exceed 128 files",
+                ));
+            }
+            let remaining = (8 * 1024 * 1024_u64)
+                .saturating_sub(out.values().map(|bytes| bytes.len() as u64).sum());
             let rel = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
-            let bytes = safe_read(root, &rel, 2 * 1024 * 1024)?;
+            // Limit the descriptor read itself, not only the retained map.
+            let bytes = safe_read(root, &rel, remaining.min(2 * 1024 * 1024))?;
             out.insert(rel, bytes);
+        } else {
+            return Err(Error::new(
+                "definition_invalid",
+                p.display().to_string(),
+                "skill resources must be regular files or directories",
+            ));
         }
-    }
-    if out.len() > 128 || out.values().map(Vec::len).sum::<usize>() > 8 * 1024 * 1024 {
-        return Err(Error::new(
-            "definition_invalid",
-            "/skills",
-            "method resources exceed 128 files or 8 MiB",
-        ));
     }
     Ok(())
 }
@@ -566,20 +575,33 @@ pub(crate) fn safe_read(root: &Path, relative: &str, max: u64) -> Result<Vec<u8>
             "relative normal path required",
         ));
     }
-    let root_fd = std::fs::File::open(root)?;
     #[cfg(unix)]
     let file = {
         use std::{
             ffi::CString,
-            os::fd::{AsRawFd, FromRawFd},
+            os::{
+                fd::{AsRawFd, FromRawFd},
+                unix::fs::OpenOptionsExt,
+            },
         };
-        let mut current = root_fd;
+        let mut current = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(root)
+            .map_err(|e| {
+                Error::new(
+                    "artifact_invalid",
+                    root.display().to_string(),
+                    e.to_string(),
+                )
+            })?;
         let components: Vec<_> = Path::new(relative).components().collect();
         for (i, c) in components.iter().enumerate() {
             let name = CString::new(c.as_os_str().as_encoded_bytes())
                 .map_err(|_| Error::new("artifact_invalid", relative, "NUL in path"))?;
             let last = i + 1 == components.len();
             let flags = libc::O_RDONLY
+                | libc::O_NONBLOCK
                 | libc::O_NOFOLLOW
                 | libc::O_CLOEXEC
                 | if last { 0 } else { libc::O_DIRECTORY };
@@ -597,7 +619,6 @@ pub(crate) fn safe_read(root: &Path, relative: &str, max: u64) -> Result<Vec<u8>
     };
     #[cfg(not(unix))]
     let file = {
-        let _ = root_fd;
         return Err(Error::new(
             "capability_denied",
             relative,
@@ -622,4 +643,48 @@ pub(crate) fn safe_read(root: &Path, relative: &str, max: u64) -> Result<Vec<u8>
         ));
     }
     Ok(raw)
+}
+
+#[cfg(test)]
+mod resource_limits {
+    use super::*;
+    #[test]
+    fn collection_never_retains_more_than_128_files() {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..129 {
+            std::fs::write(root.path().join(format!("{i}.bin")), b"data").unwrap();
+        }
+        let mut files = BTreeMap::new();
+        assert!(collect_skill(root.path(), root.path(), &mut files).is_err());
+        assert!(
+            files.len() <= 128,
+            "retained {} files before rejecting",
+            files.len()
+        );
+    }
+    #[test]
+    fn collection_never_retains_more_than_eight_mib() {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..9 {
+            std::fs::write(root.path().join(format!("{i}.bin")), vec![42; 1024 * 1024]).unwrap();
+        }
+        let mut files = BTreeMap::new();
+        assert!(collect_skill(root.path(), root.path(), &mut files).is_err());
+        let bytes: usize = files.values().map(Vec::len).sum();
+        assert!(
+            bytes <= 8 * 1024 * 1024,
+            "retained {bytes} bytes before rejecting"
+        );
+    }
+    #[test]
+    fn exact_package_file_and_byte_limits_are_accepted() {
+        let root = tempfile::tempdir().unwrap();
+        for i in 0..128 {
+            std::fs::write(root.path().join(format!("{i}.bin")), vec![42; 64 * 1024]).unwrap();
+        }
+        let mut files = BTreeMap::new();
+        collect_skill(root.path(), root.path(), &mut files).unwrap();
+        assert_eq!(files.len(), 128);
+        assert_eq!(files.values().map(Vec::len).sum::<usize>(), 8 * 1024 * 1024);
+    }
 }

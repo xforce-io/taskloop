@@ -256,3 +256,75 @@ fn definition_filename_without_parent_is_supported() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[test]
+fn fifo_paths_are_rejected_without_blocking_static_loading() {
+    if let Some(root) = std::env::var_os("TASKLOOP_FIFO_ROOT").map(std::path::PathBuf::from) {
+        let kind = std::env::var("TASKLOOP_FIFO_KIND").unwrap();
+        if kind == "skill" {
+            assert!(taskloop::validate_skill(root.join("demo-skill")).is_err());
+        } else {
+            let path = if kind == "root" {
+                root.join("root-fifo/flow.json")
+            } else {
+                root.join("flow.json")
+            };
+            assert!(
+                Definition::load(
+                    path,
+                    &BTreeMap::from([("demo-skill@0.1.0".into(), root.join("demo-skill"))])
+                )
+                .is_err()
+            );
+        }
+        return;
+    }
+    use std::{
+        os::unix::ffi::OsStrExt,
+        time::{Duration, Instant},
+    };
+    let mut failures = Vec::new();
+    for kind in ["definition", "schema", "root", "skill"] {
+        let f = common::Fixture::new(false);
+        let path = f.root.path().join(match kind {
+            "definition" => "flow.json",
+            "schema" => "input.schema.json",
+            "root" => "root-fifo",
+            _ => "demo-skill/pipe",
+        });
+        if path.exists() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "fifo_paths_are_rejected_without_blocking_static_loading",
+                "--nocapture",
+            ])
+            .env("TASKLOOP_FIFO_ROOT", f.root.path())
+            .env("TASKLOOP_FIFO_KIND", kind)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                if !status.success() {
+                    failures.push(format!("{kind}: FIFO was not rejected"));
+                }
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                failures.push(format!("{kind}: loader blocked on FIFO"));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("; "));
+}
