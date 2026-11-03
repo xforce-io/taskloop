@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]*$"
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https?://",
+            "minLength": 1
+          },
+          "discovery_receipt_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "subquestion": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "source_id",
+          "url",
+          "discovery_receipt_id",
+          "subquestion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "stop_reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "items",
+    "stop_reason"
+  ],
+  "additionalProperties": false
+}

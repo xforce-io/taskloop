@@ -1,0 +1,307 @@
+{
+  "contract_version": 1,
+  "entries": {
+    "inquiry.scope": {
+      "executor": "research.agent",
+      "skills": [
+        "inquiry-deep-research@0.1.0"
+      ],
+      "input_schema": "task-input.schema.json",
+      "outputs": {
+        "plan": {
+          "schema": "plan.schema.json",
+          "required": true
+        }
+      },
+      "gate": "inquiry.scope.gate",
+      "outcomes": [
+        "ready"
+      ],
+      "requires": [],
+      "instruction": "拆出子问题、检索方向与停止条件，提交研究计划。",
+      "tools": [
+        "artifact.read",
+        "artifact.write"
+      ]
+    },
+    "inquiry.discover": {
+      "executor": "research.agent",
+      "skills": [
+        "inquiry-deep-research@0.1.0"
+      ],
+      "input_schema": "task-input.schema.json",
+      "outputs": {
+        "candidates": {
+          "schema": "candidates.schema.json",
+          "required": true
+        }
+      },
+      "gate": "inquiry.discover.gate",
+      "outcomes": [
+        "ready",
+        "need_input"
+      ],
+      "requires": [
+        {
+          "state": "scope",
+          "slot": "plan",
+          "selection": "latest"
+        }
+      ],
+      "instruction": "按问题和已接受计划广泛发现候选来源，保留检索回执与停止原因。",
+      "tools": [
+        "artifact.read",
+        "artifact.write",
+        "inquiry.search"
+      ]
+    },
+    "inquiry.capture": {
+      "executor": "research.agent",
+      "skills": [
+        "inquiry-deep-research@0.1.0"
+      ],
+      "input_schema": "task-input.schema.json",
+      "outputs": {
+        "materials": {
+          "schema": "materials.schema.json",
+          "required": true
+        }
+      },
+      "gate": "inquiry.capture.gate",
+      "outcomes": [
+        "ready",
+        "need_input"
+      ],
+      "attachments": {
+        "slot_prefix": "capture.",
+        "path_prefix": "captures/",
+        "max_files": 60,
+        "max_bytes": 52428800
+      },
+      "requires": [
+        {
+          "state": "discover",
+          "slot": "candidates",
+          "selection": "latest"
+        }
+      ],
+      "instruction": "对每个候选来源获取实际处置回执，留存可访问内容快照；不编造访问结果。",
+      "tools": [
+        "artifact.read",
+        "artifact.write",
+        "inquiry.fetch"
+      ]
+    },
+    "inquiry.catalogue": {
+      "executor": "research.agent",
+      "skills": [
+        "inquiry-deep-research@0.1.0"
+      ],
+      "input_schema": "task-input.schema.json",
+      "outputs": {
+        "catalogue": {
+          "schema": "catalogue.schema.json",
+          "required": true
+        }
+      },
+      "gate": "inquiry.catalogue.gate",
+      "outcomes": [
+        "ready",
+        "need_more",
+        "need_input"
+      ],
+      "requires": [
+        {
+          "state": "capture",
+          "slot": "materials",
+          "selection": "all"
+        }
+      ],
+      "instruction": "去重、分类和检查各子问题覆盖，记录缺口与建议。",
+      "tools": [
+        "artifact.read",
+        "artifact.write"
+      ]
+    },
+    "inquiry.analyze": {
+      "executor": "research.agent",
+      "skills": [
+        "inquiry-deep-research@0.1.0"
+      ],
+      "input_schema": "task-input.schema.json",
+      "outputs": {
+        "analysis": {
+          "schema": "analysis.schema.json",
+          "required": true
+        }
+      },
+      "gate": "inquiry.analyze.gate",
+      "outcomes": [
+        "ready",
+        "need_more",
+        "need_input"
+      ],
+      "requires": [
+        {
+          "state": "catalogue",
+          "slot": "catalogue",
+          "selection": "latest"
+        },
+        {
+          "state": "capture",
+          "slot": "materials",
+          "selection": "all"
+        }
+      ],
+      "instruction": "从已接受快照提取支持和反驳证据，梳理判断及其限制。",
+      "tools": [
+        "artifact.read",
+        "artifact.write"
+      ]
+    },
+    "inquiry.report": {
+      "executor": "research.agent",
+      "skills": [
+        "inquiry-deep-research@0.1.0"
+      ],
+      "input_schema": "task-input.schema.json",
+      "outputs": {
+        "report": {
+          "schema": "report.schema.json",
+          "required": true
+        }
+      },
+      "gate": "inquiry.report.gate",
+      "outcomes": [
+        "ready",
+        "need_input"
+      ],
+      "requires": [
+        {
+          "state": "analyze",
+          "slot": "analysis",
+          "selection": "latest"
+        },
+        {
+          "state": "capture",
+          "slot": "materials",
+          "selection": "all"
+        }
+      ],
+      "instruction": "基于已接受判断与证据综合报告，保留可定位引用与未决问题。",
+      "tools": [
+        "artifact.read",
+        "artifact.write"
+      ]
+    }
+  },
+  "flow": {
+    "id": "inquiry.deep_research",
+    "version": "0.1.0",
+    "initial": "scope",
+    "limits": {
+      "max_transitions": 30,
+      "max_visits_per_state": 3,
+      "max_runs": 24
+    },
+    "states": {
+      "scope": {
+        "kind": "work",
+        "entry": "inquiry.scope",
+        "accepted": {
+          "ready": "discover"
+        },
+        "rejected": "failed",
+        "failed": "failed"
+      },
+      "discover": {
+        "kind": "work",
+        "entry": "inquiry.discover",
+        "accepted": {
+          "ready": "capture",
+          "need_input": "await_sources"
+        },
+        "rejected": "failed",
+        "failed": "failed"
+      },
+      "capture": {
+        "kind": "work",
+        "entry": "inquiry.capture",
+        "accepted": {
+          "ready": "catalogue",
+          "need_input": "await_sources"
+        },
+        "rejected": "failed",
+        "failed": "failed"
+      },
+      "catalogue": {
+        "kind": "work",
+        "entry": "inquiry.catalogue",
+        "accepted": {
+          "ready": "analyze",
+          "need_more": "discover",
+          "need_input": "await_sources"
+        },
+        "rejected": "failed",
+        "failed": "failed"
+      },
+      "analyze": {
+        "kind": "work",
+        "entry": "inquiry.analyze",
+        "accepted": {
+          "ready": "report",
+          "need_more": "discover",
+          "need_input": "await_sources"
+        },
+        "rejected": "failed",
+        "failed": "failed"
+      },
+      "report": {
+        "kind": "work",
+        "entry": "inquiry.report",
+        "accepted": {
+          "ready": "done",
+          "need_input": "await_sources"
+        },
+        "rejected": "failed",
+        "failed": "failed"
+      },
+      "await_sources": {
+        "kind": "wait",
+        "signals": {
+          "sources.added": {
+            "schema": "sources-added.schema.json",
+            "target": "discover"
+          }
+        },
+        "timeout_seconds": 86400,
+        "timeout_target": "partial"
+      },
+      "done": {
+        "kind": "terminal",
+        "status": "completed",
+        "outcome": "report_ready",
+        "requires": [
+          {
+            "state": "report",
+            "slot": "report",
+            "selection": "latest"
+          }
+        ]
+      },
+      "partial": {
+        "kind": "terminal",
+        "status": "completed",
+        "outcome": "insufficient_evidence",
+        "requires": []
+      },
+      "failed": {
+        "kind": "terminal",
+        "status": "failed",
+        "outcome": "execution_failed",
+        "requires": []
+      }
+    },
+    "input_schema": "research-input.schema.json"
+  }
+}

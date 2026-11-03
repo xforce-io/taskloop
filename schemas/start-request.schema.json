@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "const": 1
+    },
+    "request_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "definition_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "inputs": {
+      "type": "object"
+    },
+    "grant_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_active_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_wall_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_transitions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_runs": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "max_active_ms",
+        "max_wall_ms",
+        "max_transitions",
+        "max_runs"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "protocol_version",
+    "request_key",
+    "definition_digest",
+    "inputs",
+    "grant_ref",
+    "limits"
+  ],
+  "additionalProperties": false
+}

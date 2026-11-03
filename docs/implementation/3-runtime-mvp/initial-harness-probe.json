@@ -1,0 +1,40 @@
+{
+  "status": "completed",
+  "tool_calls": [
+    {
+      "tool": "probe_echo",
+      "arguments": {
+        "value": "taskloop-a"
+      }
+    }
+  ],
+  "final": [
+    "done"
+  ],
+  "event_methods": [
+    "account/rateLimits/updated",
+    "account/updated",
+    "error",
+    "item/agentMessage/delta",
+    "item/completed",
+    "item/started",
+    "item/tool/call",
+    "mcpServer/startupStatus/updated",
+    "remoteControl/status/changed",
+    "thread/settings/updated",
+    "thread/started",
+    "thread/status/changed",
+    "thread/tokenUsage/updated",
+    "turn/completed",
+    "turn/moderationMetadata",
+    "turn/started",
+    "warning"
+  ],
+  "codex_version": "0.166.0",
+  "model": "gpt-6.1-sol",
+  "cwd": "$RUN_WORKSPACE/stage-a",
+  "registered_tools": [
+    "probe_echo"
+  ],
+  "scope": "真实 Codex app-server 动态工具初步交接探针；尚未证明取消、A/B 隔离或完整安全能力"
+}

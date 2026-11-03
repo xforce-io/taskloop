@@ -1,0 +1,159 @@
+//! An independent package consuming only TaskLoop's public API.
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use taskloop::*;
+use tokio_util::sync::CancellationToken;
+struct ExecutorImpl;
+#[async_trait]
+impl Executor for ExecutorImpl {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        inv: Invocation,
+        bridge: Arc<dyn ToolBridge>,
+        _: CancellationToken,
+    ) -> ExecutionOutcome {
+        match bridge
+            .call(
+                "artifact.write",
+                json!({"slot":"result","value":{"answer":inv.inputs["question"]}}),
+            )
+            .await
+        {
+            Ok(_) => ExecutionOutcome::Completed {
+                usage: json!({"kind":"deterministic-consumer"}),
+            },
+            Err(e) => ExecutionOutcome::Failed {
+                code: e.code,
+                message: e.message,
+            },
+        }
+    }
+    async fn stop_or_confirm(&self, _: &str) -> StopState {
+        StopState::Confirmed
+    }
+}
+struct Gate;
+#[async_trait]
+impl DomainGate for Gate {
+    async fn check(&self, c: GateContext) -> CheckResult {
+        if c.output("result").unwrap()["answer"] == c.inputs["question"] {
+            CheckResult::pass("ready", vec![c.check_evidence_ref])
+        } else {
+            CheckResult::fail("mismatch", "result", "wrong input")
+        }
+    }
+}
+async fn waiting(rt: &Runtime, id: &str) -> ExecutionSnapshot {
+    for _ in 0..100 {
+        let s = rt.get(id, &Caller::local()).await.unwrap();
+        if s.status == Status::Waiting {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("consumer never reached waiting")
+}
+#[tokio::main]
+async fn main() {
+    let root = tempfile::tempdir().unwrap();
+    let skill = root.path().join("consumer-method");
+    std::fs::create_dir(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"),"---\nname: consumer-method\ndescription: External consumer method.\n---\nReturn the current input only.\n").unwrap();
+    assert_eq!(validate_skill(&skill).unwrap().name, "consumer-method");
+    for (name, schema) in [
+        (
+            "input.schema.json",
+            json!({"type":"object","properties":{"question":{"type":"string"}},"required":["question"],"additionalProperties":false}),
+        ),
+        (
+            "result.schema.json",
+            json!({"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}),
+        ),
+        (
+            "signal.schema.json",
+            json!({"type":"object","properties":{},"additionalProperties":false}),
+        ),
+    ] {
+        std::fs::write(root.path().join(name), serde_json::to_vec(&schema).unwrap()).unwrap();
+    }
+    let bundle = json!({"contract_version":1,"entries":{"consumer.work":{"instruction":"Copy question to result.answer using artifact.write.","executor":"consumer.executor","skills":["consumer-method@1.0.0"],"tools":["artifact.write"],"input_schema":"task-input.schema.json","outputs":{"result":{"schema":"result.schema.json","required":true}},"gate":"consumer.gate","outcomes":["ready"]}},"flow":{"id":"consumer.flow","version":"1.0.0","input_schema":"input.schema.json","initial":"work","states":{"work":{"kind":"work","entry":"consumer.work","accepted":{"ready":"await"},"rejected":"failed","failed":"failed"},"await":{"kind":"wait","signals":{"confirm":{"schema":"signal.schema.json","target":"done"}},"timeout_seconds":60,"timeout_target":"failed"},"done":{"kind":"terminal","status":"completed","outcome":"ready","requires":[{"state":"work","slot":"result","selection":"latest"}]},"failed":{"kind":"terminal","status":"failed","outcome":"failure","requires":[]}},"limits":{"max_transitions":8,"max_visits_per_state":2,"max_runs":3}}});
+    let file = root.path().join("flow.json");
+    std::fs::write(&file, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let definition = Definition::load(
+        file,
+        &BTreeMap::from([("consumer-method@1.0.0".into(), skill)]),
+    )
+    .unwrap();
+    let bindings = HostBindings::default()
+        .configuration_version("consumer@1")
+        .executor("consumer.executor", Arc::new(ExecutorImpl))
+        .gate("consumer.gate", Arc::new(Gate))
+        .grant(
+            "local-readonly",
+            Grant {
+                definitions: vec![definition.digest.clone()],
+                tools: vec!["artifact.write".into()],
+                limits: ResourceLimits::default(),
+            },
+        );
+    assert!(validate(&definition, &bindings).unwrap().valid);
+    let digest = definition.digest.clone();
+    let rt = Runtime::open(
+        RuntimeOptions::new(root.path().join("store")),
+        vec![definition],
+        bindings,
+    )
+    .await
+    .unwrap();
+    let request = |key: &str| StartRequest {
+        definition_digest: digest.clone(),
+        inputs: json!({"question":"external-host"}),
+        grant_ref: "local-readonly".into(),
+        request_key: key.into(),
+        limits: ResourceLimits::default(),
+    };
+    let a = rt.start(request("a"), &Caller::local()).await.unwrap();
+    let snapshot = waiting(&rt, &a).await;
+    let artifact = rt
+        .read_artifact(&snapshot.accepted_artifacts[0].id, &Caller::local())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&artifact.bytes).unwrap()["answer"],
+        "external-host"
+    );
+    rt.signal(
+        &a,
+        SignalRequest {
+            event_name: "confirm".into(),
+            payload: json!({}),
+            request_key: "confirm-a".into(),
+            expected_revision: snapshot.revision,
+        },
+        &Caller::local(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rt.get(&a, &Caller::local()).await.unwrap().status,
+        Status::Completed
+    );
+    let b = rt.start(request("b"), &Caller::local()).await.unwrap();
+    waiting(&rt, &b).await;
+    assert_eq!(
+        rt.cancel(&b, "cancel-b", &Caller::local())
+            .await
+            .unwrap()
+            .status,
+        Status::Cancelled
+    );
+    rt.shutdown().await.unwrap();
+    println!(
+        "{}",
+        json!({"external_consumer":"pass","operations":["start","get","signal","cancel","read_artifact"],"private_modules_imported":false,"execution":"deterministic; real Harness is tested separately"})
+    );
+}

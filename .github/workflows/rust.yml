@@ -1,0 +1,33 @@
+name: Rust
+on:
+  push:
+    branches: [main, 'feat/**', 'bugfix/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout exact event commit
+        run: |
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Install fixed Rust toolchain
+        run: rustup toolchain install 1.91.1 --profile minimal --component rustfmt --component clippy
+      - name: Format
+        run: |
+          cargo +1.91.1 fmt --check
+          cargo +1.91.1 fmt --manifest-path tests/consumer/Cargo.toml --check
+      - name: Test
+        run: cargo +1.91.1 test --locked
+      - name: Clippy
+        run: cargo +1.91.1 clippy --locked --all-targets -- -D warnings
+      - name: Independent Rust consumer
+        run: cargo +1.91.1 run --locked --manifest-path tests/consumer/Cargo.toml

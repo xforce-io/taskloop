@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "const": 1
+    },
+    "execution_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payload": {
+      "type": "object"
+    },
+    "request_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected_revision": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "protocol_version",
+    "execution_id",
+    "event_name",
+    "payload",
+    "request_key",
+    "expected_revision"
+  ],
+  "additionalProperties": false
+}

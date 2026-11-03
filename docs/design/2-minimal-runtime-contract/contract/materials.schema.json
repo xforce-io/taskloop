@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]*$"
+          },
+          "requested_url": {
+            "type": "string",
+            "minLength": 1
+          },
+          "final_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fetch_status": {
+            "enum": [
+              "captured",
+              "unavailable",
+              "denied",
+              "not_attempted"
+            ]
+          },
+          "http_status": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "receipt_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "snapshot_slot": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "raw_slot": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "source_id",
+          "requested_url",
+          "final_url",
+          "fetch_status",
+          "http_status",
+          "reason",
+          "receipt_id",
+          "snapshot_slot",
+          "raw_slot"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "stop_reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "items",
+    "stop_reason"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,7 @@
+target/
+/.taskloop/
+/work/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+__pycache__/

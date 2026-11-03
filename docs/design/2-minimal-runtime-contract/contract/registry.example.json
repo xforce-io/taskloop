@@ -1,0 +1,92 @@
+{
+  "notice": "这是宿主绑定示例，不是 Skill 可自行授权的执行配置；路径/版本需实际安装后核验。",
+  "executors": {
+    "research.agent": {
+      "kind": "harness",
+      "adapter": "registered-harness-adapter@1",
+      "capabilities": [
+        "bounded_entry",
+        "collect_artifacts",
+        "cancel",
+        "isolated_workspace",
+        "isolated_context"
+      ],
+      "profile": "research-readonly@1"
+    },
+    "review.cli": {
+      "kind": "cli",
+      "program": "/operator/approved/document-check",
+      "argv": [
+        "inspect"
+      ],
+      "adapter": "registered-cli-json@1",
+      "capabilities": [
+        "bounded_entry",
+        "collect_artifacts",
+        "cancel",
+        "isolated_workspace",
+        "isolated_context"
+      ]
+    }
+  },
+  "gates": {
+    "inquiry.scope.gate": {
+      "implementation": "host-registered callback",
+      "version": "1"
+    },
+    "inquiry.discover.gate": {
+      "implementation": "host-registered callback",
+      "version": "1"
+    },
+    "inquiry.capture.gate": {
+      "implementation": "host-registered callback",
+      "version": "1"
+    },
+    "inquiry.catalogue.gate": {
+      "implementation": "host-registered callback",
+      "version": "1"
+    },
+    "inquiry.analyze.gate": {
+      "implementation": "host-registered callback",
+      "version": "1"
+    },
+    "inquiry.report.gate": {
+      "implementation": "host-registered callback",
+      "version": "1"
+    },
+    "review.inspect.gate": {
+      "implementation": "host-registered callback",
+      "version": "1"
+    }
+  },
+  "skills": {
+    "inquiry-deep-research@0.1.0": {
+      "root": "skills/inquiry-deep-research",
+      "version": "0.1.0",
+      "tree_digest": "cda3d2ba58b93f3b8076c95f035c8a86035c8999323f30388e9d0f395f402d38"
+    },
+    "document-review@0.1.0": {
+      "root": "skills/document-review",
+      "version": "0.1.0",
+      "tree_digest": "5118c2818dfe01d41768ef2c941df022deae3a98773aa350916dab86bb1e4f13"
+    }
+  },
+  "tools": {
+    "artifact.read": {
+      "provider": "host",
+      "capability": "read_granted_artifacts"
+    },
+    "artifact.write": {
+      "provider": "host",
+      "capability": "write_current_run_staging"
+    },
+    "inquiry.search": {
+      "provider": "registered search adapter",
+      "receipt_origin": "host"
+    },
+    "inquiry.fetch": {
+      "provider": "registered acquisition adapter",
+      "receipt_origin": "host"
+    }
+  }
+}

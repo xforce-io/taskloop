@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "const": 1
+    },
+    "execution_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "definition_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "status": {
+      "enum": [
+        "created",
+        "running",
+        "waiting",
+        "blocked",
+        "cancelling",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "current_state": {
+      "type": "string",
+      "minLength": 1
+    },
+    "visit": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "business_outcome": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "progress": {
+      "type": "object"
+    },
+    "accepted_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "slot": {
+            "type": "string",
+            "minLength": 1
+          },
+          "producer_run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "state_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "visit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "sha256",
+          "slot",
+          "state_id",
+          "visit"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "waiting_signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "payload_schema_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "name",
+          "payload_schema_digest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "inputs": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "execution_id",
+    "definition_digest",
+    "status",
+    "current_state",
+    "visit",
+    "revision",
+    "business_outcome",
+    "progress",
+    "accepted_artifacts",
+    "waiting_signals",
+    "error",
+    "inputs"
+  ],
+  "additionalProperties": false
+}
