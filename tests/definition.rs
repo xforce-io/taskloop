@@ -328,3 +328,51 @@ fn fifo_paths_are_rejected_without_blocking_static_loading() {
     }
     assert!(failures.is_empty(), "{}", failures.join("; "));
 }
+
+#[test]
+fn skill_validation_and_locking_must_use_matching_package_bytes() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let f = common::Fixture::new(false);
+    let package = f.root.path().join("demo-skill");
+    let valid = "---\nname: demo-skill\ndescription: Atomic package validation.\nmetadata:\n  version: \"0.1.0\"\n---\nMethod A.\n";
+    let other = valid.replace("0.1.0", "0.2.0");
+    std::fs::write(package.join("SKILL.md"), valid).unwrap();
+    std::fs::write(package.join("asset.bin"), vec![7; 256 * 1024]).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = stop.clone();
+    let target = package.join("SKILL.md");
+    let staging = f.root.path().join("replacement.md");
+    let good = valid.to_string();
+    let bad = other.clone();
+    let writer = std::thread::spawn(move || {
+        let mut alternate = false;
+        while !writer_stop.load(Ordering::SeqCst) {
+            std::fs::write(&staging, if alternate { &good } else { &bad }).unwrap();
+            std::fs::rename(&staging, &target).unwrap();
+            alternate = !alternate;
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+    });
+    let mut mismatched = false;
+    for _ in 0..32 {
+        if let Ok(d) = Definition::load(
+            f.root.path().join("flow.json"),
+            &BTreeMap::from([("demo-skill@0.1.0".into(), package.clone())]),
+        ) {
+            let locked = &d.skills["demo-skill@0.1.0"].files["SKILL.md"];
+            if locked == other.as_bytes() {
+                mismatched = true;
+                break;
+            }
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    writer.join().unwrap();
+    assert!(
+        !mismatched,
+        "accepted a 0.1.0 binding with locked Skill bytes declaring 0.2.0"
+    );
+}

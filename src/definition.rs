@@ -198,17 +198,10 @@ impl Definition {
                         "skill root is not registered",
                     )
                 })?;
-                let skill_report = crate::validate_skill(path)?;
                 let canonical = path.canonicalize()?;
                 let mut files = BTreeMap::new();
                 collect_skill(&canonical, &canonical, &mut files)?;
-                if !files.contains_key("SKILL.md") {
-                    return Err(Error::new(
-                        "definition_invalid",
-                        format!("/skills/{id}"),
-                        "SKILL.md missing",
-                    ));
-                }
+                let skill_report = crate::skill::validate_skill_files(&canonical, &files)?;
                 let version = id
                     .rsplit_once('@')
                     .map(|(_, v)| v.to_string())
@@ -226,13 +219,12 @@ impl Definition {
                         "declared Skill version does not match binding",
                     ));
                 }
-                let content = serde_json::to_vec(&files)?;
                 skills.insert(
                     id.clone(),
                     SkillPackage {
                         version,
                         files,
-                        sha256: digest(&content),
+                        sha256: skill_report.sha256,
                     },
                 );
             }

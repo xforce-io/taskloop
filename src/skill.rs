@@ -16,6 +16,14 @@ pub fn validate_skill(root: impl AsRef<Path>) -> Result<SkillValidationReport> {
     let root = root.as_ref().canonicalize()?;
     let mut files = BTreeMap::new();
     collect_skill(&root, &root, &mut files)?;
+    validate_skill_files(&root, &files)
+}
+
+/// Validates the same immutable byte map that Definition will lock.
+pub(crate) fn validate_skill_files(
+    root: &Path,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<SkillValidationReport> {
     let text = files
         .get("SKILL.md")
         .ok_or_else(|| Error::new("definition_invalid", "/SKILL.md", "required file missing"))?;
@@ -124,7 +132,7 @@ pub fn validate_skill(root: impl AsRef<Path>) -> Result<SkillValidationReport> {
             .pointer("/metadata/version")
             .and_then(Value::as_str)
             .map(str::to_string),
-        sha256: digest(&serde_json::to_vec(&files)?),
+        sha256: digest(&serde_json::to_vec(files)?),
         files: files.len(),
     })
 }
