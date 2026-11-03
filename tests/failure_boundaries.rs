@@ -550,3 +550,40 @@ async fn concurrent_stop_confirmations_do_not_leak_internal_revision_conflicts()
     );
     rt.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn unsupported_candidate_limit_is_rejected_before_store_or_executor() {
+    for limit in [128 * 1024 * 1024, 64 * 1024 * 1024 + 1, 0] {
+        let f = Fixture::new(false);
+        let store = f.root.path().join("unsupported-store");
+        let mut options = RuntimeOptions::new(&store);
+        options.max_candidate_bytes = limit;
+        match Runtime::open(options, vec![f.definition.clone()], f.bindings("pass")).await {
+            Ok(rt) => {
+                rt.shutdown().await.unwrap();
+                panic!("unsupported candidate limit {limit} was accepted");
+            }
+            Err(e) => {
+                assert_eq!(e.code, "input_invalid");
+                assert_eq!(e.path, "/max_candidate_bytes");
+                assert!(
+                    !store.exists(),
+                    "invalid configuration must not open a store"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn supported_candidate_limit_endpoints_open_successfully() {
+    for limit in [1, 64 * 1024 * 1024] {
+        let f = Fixture::new(false);
+        let mut options = RuntimeOptions::new(f.root.path().join("store"));
+        options.max_candidate_bytes = limit;
+        let rt = Runtime::open(options, vec![f.definition.clone()], f.bindings("pass"))
+            .await
+            .unwrap();
+        rt.shutdown().await.unwrap();
+    }
+}

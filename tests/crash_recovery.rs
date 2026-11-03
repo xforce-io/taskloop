@@ -68,6 +68,32 @@ impl Executor for Recoverable {
         }
     }
 }
+struct Replacement {
+    stops: Arc<AtomicUsize>,
+    starts: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl Executor for Replacement {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    fn identity(&self) -> Value {
+        json!({"adapter":"crash-test@2"})
+    }
+    async fn execute(
+        &self,
+        _: Invocation,
+        _: Arc<dyn ToolBridge>,
+        _: CancellationToken,
+    ) -> ExecutionOutcome {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        ExecutionOutcome::Completed { usage: json!({}) }
+    }
+    async fn stop_or_confirm(&self, _: &str) -> StopState {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        StopState::Confirmed
+    }
+}
 struct Gate;
 #[async_trait]
 impl DomainGate for Gate {
@@ -79,7 +105,7 @@ impl DomainGate for Gate {
         }
     }
 }
-fn bindings(definition: &Definition, executor: Arc<Recoverable>) -> HostBindings {
+fn bindings(definition: &Definition, executor: Arc<dyn Executor>) -> HostBindings {
     HostBindings::default()
         .configuration_version("crash-test@1")
         .executor("test.executor", executor)
@@ -143,7 +169,7 @@ async fn crash_child() {
     }
     std::future::pending::<()>().await;
 }
-async fn run_crash_case(cancel_before_kill: bool) {
+async fn run_crash_case(cancel_before_kill: bool, replace_executor: bool) {
     let mut f = Fixture::new(false);
     let flow_path = f.root.path().join("flow.json");
     let mut bundle: Value = serde_json::from_slice(&std::fs::read(&flow_path).unwrap()).unwrap();
@@ -198,11 +224,19 @@ async fn run_crash_case(cancel_before_kill: bool) {
     }));
     let confirmed = Arc::new(AtomicBool::new(false));
     let starts = Arc::new(AtomicUsize::new(0));
-    let executor = Arc::new(Recoverable {
-        marker: None,
-        confirmed: confirmed.clone(),
-        starts: starts.clone(),
-    });
+    let stops = Arc::new(AtomicUsize::new(0));
+    let executor: Arc<dyn Executor> = if replace_executor {
+        Arc::new(Replacement {
+            stops: stops.clone(),
+            starts: starts.clone(),
+        })
+    } else {
+        Arc::new(Recoverable {
+            marker: None,
+            confirmed: confirmed.clone(),
+            starts: starts.clone(),
+        })
+    };
     let rt = Runtime::open(
         RuntimeOptions::new(f.root.path().join("store")),
         vec![f.definition.clone()],
@@ -210,6 +244,45 @@ async fn run_crash_case(cancel_before_kill: bool) {
     )
     .await
     .unwrap();
+    if replace_executor {
+        let b = rt
+            .start(
+                f.request("replacement-queued", "B", false),
+                &Caller::local(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let cancelled = rt
+            .cancel(a, "replacement-cancel", &Caller::local())
+            .await
+            .unwrap();
+        let shutdown = rt.shutdown().await;
+        assert_eq!(
+            stops.load(Ordering::SeqCst),
+            0,
+            "a replacement must never confirm the old executor's stop"
+        );
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            0,
+            "unknown old execution must hold capacity"
+        );
+        assert_eq!(cancelled.status, Status::Cancelling);
+        assert_eq!(shutdown.unwrap_err().code, "stop_unconfirmed");
+        assert_eq!(
+            rt.get(a, &Caller::local()).await.unwrap().status,
+            Status::Cancelling
+        );
+        assert!(
+            !rt.get(&b, &Caller::local())
+                .await
+                .unwrap()
+                .status
+                .terminal()
+        );
+        return;
+    }
     let recovered = rt.get(a, &Caller::local()).await.unwrap();
     assert_eq!(
         recovered.status,
@@ -264,9 +337,15 @@ async fn run_crash_case(cancel_before_kill: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn killed_host_never_replays_unknown_run_and_retains_candidate_bytes() {
-    run_crash_case(false).await;
+    run_crash_case(false, false).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_cancel_survives_host_crash_and_finishes_without_new_cancel() {
-    run_crash_case(true).await;
+    run_crash_case(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replacement_executor_cannot_confirm_old_run_after_crash() {
+    run_crash_case(false, true).await;
+    run_crash_case(true, true).await;
 }

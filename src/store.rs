@@ -8,6 +8,8 @@ use std::{
     sync::Mutex,
 };
 
+pub(crate) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
+
 pub(crate) struct Store {
     conn: Mutex<Connection>,
     root: PathBuf,
@@ -305,6 +307,13 @@ impl Store {
         }))
     }
     pub fn write_blob(&self, raw: &[u8]) -> Result<String> {
+        if raw.len() as u64 > MAX_BLOB_BYTES {
+            return Err(Error::new(
+                "artifact_invalid",
+                "/artifact",
+                "artifact exceeds storage limit",
+            ));
+        }
         let hash = digest(raw);
         let path = self.root.join("blobs").join(&hash);
         // The final digest path must never name a partially written file.
@@ -343,7 +352,7 @@ impl Store {
                 "invalid content digest",
             ));
         }
-        let raw = crate::definition::safe_read(&self.root.join("blobs"), hash, 64 * 1024 * 1024)
+        let raw = crate::definition::safe_read(&self.root.join("blobs"), hash, MAX_BLOB_BYTES)
             .map_err(|_| Error::io("locked artifact bytes unavailable"))?;
         if digest(&raw) != hash {
             return Err(Error::io("immutable artifact corrupted"));
@@ -410,6 +419,27 @@ impl Store {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn blob_read_and_write_share_the_exact_size_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store")).unwrap();
+        let mut bytes = vec![42; MAX_BLOB_BYTES as usize];
+        let hash = store.write_blob(&bytes).unwrap();
+        assert_eq!(store.read_blob(&hash).unwrap(), bytes);
+        // Re-publication is the path used when accepted candidates already exist.
+        assert_eq!(store.write_blob(&bytes).unwrap(), hash);
+        bytes.push(42);
+        assert_eq!(
+            store.write_blob(&bytes).unwrap_err().code,
+            "artifact_invalid"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("store/blobs"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
     #[test]
     fn readers_never_observe_partial_content_addressed_files() {
         let t = tempfile::tempdir().unwrap();

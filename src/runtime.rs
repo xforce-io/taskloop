@@ -1,6 +1,6 @@
 use crate::{
     json::digest,
-    store::{CommandReceipt, Commit, Row, Store},
+    store::{CommandReceipt, Commit, MAX_BLOB_BYTES, Row, Store},
     *,
 };
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ pub struct RuntimeOptions {
     pub store_dir: PathBuf,
     pub max_admitted_instances: usize,
     pub max_tool_calls_per_run: u64,
+    /// Total candidate bytes per Run; must be in 1..=64 MiB.
     pub max_candidate_bytes: u64,
 }
 impl RuntimeOptions {
@@ -25,7 +26,7 @@ impl RuntimeOptions {
             store_dir: store.into(),
             max_admitted_instances: 8,
             max_tool_calls_per_run: 40,
-            max_candidate_bytes: 64 * 1024 * 1024,
+            max_candidate_bytes: MAX_BLOB_BYTES,
         }
     }
 }
@@ -191,6 +192,13 @@ impl Runtime {
                 "input_invalid",
                 "/max_admitted_instances",
                 "expected 1..=1024",
+            ));
+        }
+        if options.max_candidate_bytes == 0 || options.max_candidate_bytes > MAX_BLOB_BYTES {
+            return Err(Error::new(
+                "input_invalid",
+                "/max_candidate_bytes",
+                "expected 1..=67108864 bytes",
             ));
         }
         for d in &definitions {
@@ -507,9 +515,7 @@ impl Runtime {
             .contains_key(id);
         if r.status == Status::Cancelling
             && !has_handle
-            && let Some(active) = &r.active
-            && let Some(executor) = self.inner.bindings.executors.get(&active.executor)
-            && executor.stop_or_confirm(&active.id).await == StopState::Confirmed
+            && self.inner.confirm_stop(&r).await == StopState::Confirmed
         {
             r.status = Status::Cancelled;
             r.active = None;
@@ -570,23 +576,8 @@ impl Runtime {
         for row in self.inner.store.all()? {
             let mut record = decode(&row)?;
             if record.stop_unknown || record.active.as_ref().is_some_and(|a| a.started) {
-                let active = record.active.as_ref().ok_or_else(|| {
-                    Error::new(
-                        "stop_unconfirmed",
-                        "/shutdown",
-                        "unknown execution has no recoverable stop handle",
-                    )
-                })?;
-                let executor = self
-                    .inner
-                    .bindings
-                    .executors
-                    .get(&active.executor)
-                    .ok_or_else(|| {
-                        Error::new("stop_unconfirmed", "/shutdown", "stop adapter unavailable")
-                    })?;
                 if !matches!(
-                    tokio::time::timeout_at(deadline, executor.stop_or_confirm(&active.id)).await,
+                    tokio::time::timeout_at(deadline, self.inner.confirm_stop(&record)).await,
                     Ok(StopState::Confirmed)
                 ) {
                     return Err(Error::new(
@@ -626,6 +617,20 @@ impl Drop for Runtime {
     }
 }
 impl Inner {
+    async fn confirm_stop(&self, record: &Record) -> StopState {
+        // A new implementation bound under the same logical ID cannot attest
+        // to a process started by the previous locked host configuration.
+        if record.binding_fingerprint != self.binding_fingerprint {
+            return StopState::Unknown;
+        }
+        let Some(active) = &record.active else {
+            return StopState::Unknown;
+        };
+        let Some(executor) = self.bindings.executors.get(&active.executor) else {
+            return StopState::Unknown;
+        };
+        executor.stop_or_confirm(&active.id).await
+    }
     pub fn authorized(&self, id: &str, caller: &Caller) -> Result<Row> {
         let row = self.store.load(id)?;
         if row.owner != caller.principal {
@@ -894,10 +899,8 @@ async fn worker_loop(inner: Arc<Inner>) {
                 let confirmed = if let Some(active) = &r.active {
                     if !r.stop_unknown && !active.started {
                         true
-                    } else if let Some(executor) = inner.bindings.executors.get(&active.executor) {
-                        executor.stop_or_confirm(&active.id).await == StopState::Confirmed
                     } else {
-                        false
+                        inner.confirm_stop(&r).await == StopState::Confirmed
                     }
                 } else {
                     r.status == Status::Cancelling && !r.stop_unknown
