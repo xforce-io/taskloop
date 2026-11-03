@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use futures_util::FutureExt;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
 };
@@ -25,6 +25,7 @@ struct Bridge {
     candidates: Mutex<BTreeMap<String, Candidate>>,
     calls: Mutex<u64>,
     written_bytes: Mutex<u64>,
+    storage_failure: Mutex<Option<Error>>,
 }
 impl Bridge {
     fn write(&self, candidate: Candidate) -> Result<()> {
@@ -201,6 +202,22 @@ impl ToolBridge for Bridge {
     }).collect()
     }
     async fn call(&self, id: &str, args: Value) -> Result<Value> {
+        let result = self.call_inner(id, args).await;
+        if let Err(error) = &result
+            && matches!(error.code.as_str(), "storage_error" | "revision_conflict")
+        {
+            // Infrastructure failures cannot be erased or reclassified by an
+            // executor's return value, even if it retries a later tool call.
+            let mut failure = self.storage_failure.lock().map_err(Error::io)?;
+            if failure.is_none() {
+                *failure = Some(error.clone());
+            }
+        }
+        result
+    }
+}
+impl Bridge {
+    async fn call_inner(&self, id: &str, args: Value) -> Result<Value> {
         self.active()?;
         if !self.entry.tools.iter().any(|t| t == id) {
             return Err(Error::new(
@@ -467,6 +484,7 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
         candidates: Mutex::new(BTreeMap::new()),
         calls: Mutex::new(0),
         written_bytes: Mutex::new(0),
+        storage_failure: Mutex::new(None),
     });
     let time_left = record
         .limits
@@ -584,6 +602,16 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
     if current.active.as_ref().is_none_or(|a| a.id != active.id) {
         return Err(Error::new("stale_attempt", "/run", "late result"));
     }
+    if let Some(error) = bridge.storage_failure.lock().map_err(Error::io)?.clone() {
+        current.status = Status::Blocked;
+        current.active = None;
+        current.stop_unknown = false;
+        current.business_outcome = None;
+        current.error = Some(error);
+        current.progress = json!({"phase":"blocked"});
+        inner.save(&latest, &current, false, None, &[])?;
+        return Ok(());
+    }
     match outcome {
         ExecutionOutcome::Cancelled => {
             current.status = Status::Cancelled;
@@ -636,6 +664,8 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
         .cloned()
         .collect();
     let gate = self_gate(&inner, &contract.gate)?;
+    let authorized_evidence: BTreeSet<_> =
+        artifacts.iter().map(|a| a.reference.id.clone()).collect();
     let context = GateContext {
         inputs: current.inputs.clone(),
         state_id: current.current_state.clone(),
@@ -699,13 +729,7 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
     let schema: Value = serde_json::from_str(include_str!("../schemas/check-result.schema.json"))?;
     let valid = validate_schema(&schema, &checked_json, "/gate").is_ok()
         && checked.evidence_refs.iter().all(|e| {
-            e == &check_ref
-                || facts.iter().any(|f| &f.id == e)
-                || current
-                    .history
-                    .iter()
-                    .flat_map(|h| &h.artifacts)
-                    .any(|a| &a.id == e)
+            e == &check_ref || facts.iter().any(|f| &f.id == e) || authorized_evidence.contains(e)
         });
     if !valid || matches!(checked.verdict, Verdict::Error) {
         current.status = Status::Blocked;

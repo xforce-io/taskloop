@@ -88,3 +88,18 @@ Reviewer 按 ~/.config/keel/reviewer 绑定为 codex gpt-6.1-sol；用独立原�
 新候选须保留四轮累计成本，按受影响路径复验并追加独立审查。未经新的明确追加授权，不运行第 5 轮或新增真实模型复验；先完成确定性检查和 CI，形成可审阅候选，再请求决定。旧精确候选的条件合入授权不转移到新 SHA。Inquiry、真实质量实验和 Web 驾驶仍未完成。
 
 本地本轮普通检查结果：47 项通过、2 项真实模型测试按默认忽略；fmt、Clippy（-D warnings）和独立 Rust consumer 通过。最初新增大文件单测使用了已有临时根目录，因其非 0700 被正确拒绝；测试夹具改为由 Store 新建私有子目录，原失败日志保留。修复后真实模型复验、第五轮审查、合入和 Inquiry 未完成。
+
+
+## 第五轮 Astra 审查及错误分类/证据范围修复
+
+用户明确授权对候选 3975f3eab1d08fd661d4887c3ab01dc7c33d65ea 追加1轮累计第5轮 gpt-6-astra 审查，以及必要真实复验；仅同一候选通过全部门禁才可合入并继续 Inquiry。授权原文在 work/verify/3-review-5/user-authorization.md。三个真实 Run 本轮全部通过（A取消/B完成/锁定方法，2个测试），取消Run token未知，另外两次provider用量保留；双平台CI及Git SHA外部消费者通过。
+
+第5轮原生独立只读 Astra 审查 305.68 秒，CHANGES_REQUESTED / human required：2项P2，当前未合入，追加授权已使用，不自动第6轮。全部五轮及每次真实Run的计量保留在 work/verify/3-review-5-fixes/cumulative-history.json；早期探索总体计量仍未知。
+
+依据：phase.rs 将 GateContext.accepted 设为 requirements 选中的产物，但证据校验却遍历 current.history 全量；Bridge 持久化失败只返回执行器，phase 随后根据执行器的 Failed/Completed 选择业务失败/拒绝，丢失框架错误分类。原始公开入口反例证明 latest 不授权的首次产物仍被接纳，以及写候选时损坏全新测试存储的 blobs 子目录、保留SQLite可写后，两类执行器返回都导致 Failed 而非 Blocked。原始 evidence-before.log/storage-before.log 保留，非假称真实模型磁盘故障；另保留最初测试夹具误设可选输出被静态规范正确拒绝的日志。
+
+修复：证据检查只认本次授权产物集合、当前检查句柄和当前Run受信回执；桥记录首次 storage_error/revision_conflict，实际执行停止且未取消时，在业务转移前维持当前阶段 blocked。无新公共接口、调度器或故障平台。补充6种证据正反例覆盖旧visit、未授权槽、未授权附件、其他生产阶段、all与显式附件授权；补充执行器失败/忽略错误/成功重试、领域产物持久化和SQLite回执故障反例。SQLite故障采用测试库内受控触发器白盒注入，产品不暴露私有表接口。
+
+共同根因：同一可信边界在读取、证据接纳和执行器结果消费处未统一。策略改为让当前授权集合及桥接层基础设施失败直接约束最终转移，而不依赖领域gate或执行器自行解释。先完成原失败对照和完整确定性检查/双平台CI，形成新精确候选，再请求必要真实复验及仅1轮完整独立审查的新授权。未获新授权前不启动第6轮，也不将旧候选条件合入授权移用；Inquiry与真实质量/Web目标仍未完成。
+
+本地完整普通检查：53项通过，2项真实模型测试默认忽略；fmt、Clippy（-D warnings）和独立 Rust 消费者通过。新候选的真实复验/第6轮审查未运行；仍需新精确SHA的追加与条件合入授权。

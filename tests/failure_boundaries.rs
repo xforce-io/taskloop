@@ -587,3 +587,225 @@ async fn supported_candidate_limit_endpoints_open_successfully() {
         rt.shutdown().await.unwrap();
     }
 }
+
+struct BrokenBlobExecutor {
+    blobs: std::path::PathBuf,
+    ignore_error: bool,
+    retry: bool,
+    domain: bool,
+}
+#[async_trait]
+impl Executor for BrokenBlobExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        inv: Invocation,
+        bridge: Arc<dyn ToolBridge>,
+        _: CancellationToken,
+    ) -> ExecutionOutcome {
+        // Only the fresh fixture blob directory is damaged; SQLite stays writable.
+        std::fs::remove_dir(&self.blobs).unwrap();
+        std::fs::write(&self.blobs, b"not a directory").unwrap();
+        let error = bridge
+            .call(
+                if self.domain {
+                    "test.persist"
+                } else {
+                    "artifact.write"
+                },
+                if self.domain {
+                    serde_json::json!({})
+                } else {
+                    serde_json::json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}})
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "storage_error");
+        if self.retry {
+            std::fs::remove_file(&self.blobs).unwrap();
+            std::fs::create_dir(&self.blobs).unwrap();
+            bridge
+                .call(
+                    "artifact.write",
+                    serde_json::json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}}),
+                )
+                .await
+                .unwrap();
+        }
+        if self.ignore_error {
+            ExecutionOutcome::Completed {
+                usage: serde_json::json!({}),
+            }
+        } else {
+            ExecutionOutcome::Failed {
+                code: "adapter_failed".into(),
+                message: error.to_string(),
+            }
+        }
+    }
+}
+async fn blob_failure_case(ignore_error: bool, retry: bool, domain: bool) {
+    let f = if domain {
+        persistence_tool_fixture()
+    } else {
+        Fixture::new(false)
+    };
+    let mut b = f.bindings("pass");
+    b.executors.insert(
+        "test.executor".into(),
+        Arc::new(BrokenBlobExecutor {
+            blobs: f.root.path().join("store/blobs"),
+            ignore_error,
+            retry,
+            domain,
+        }),
+    );
+    if domain {
+        register_persistence_tool(&mut b);
+    }
+    let rt = Runtime::open(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        b,
+    )
+    .await
+    .unwrap();
+    let id = rt
+        .start(f.request("blob-io", "A", false), &Caller::local())
+        .await
+        .unwrap();
+    let result = wait_for(&rt, &id, |s| {
+        s.status.terminal() || s.status == Status::Blocked
+    })
+    .await;
+    assert_eq!(result.status, Status::Blocked);
+    assert_eq!(result.current_state, "work");
+    assert_eq!(result.error.unwrap().code, "storage_error");
+    assert!(result.accepted_artifacts.is_empty());
+    rt.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn bridge_storage_failure_cannot_be_reclassified_as_business_failure() {
+    blob_failure_case(false, false, false).await;
+}
+#[tokio::test]
+async fn bridge_storage_failure_cannot_be_ignored_as_completed() {
+    blob_failure_case(true, false, false).await;
+}
+
+#[tokio::test]
+async fn successful_retry_cannot_erase_an_earlier_storage_failure() {
+    blob_failure_case(true, true, false).await;
+}
+#[tokio::test]
+async fn domain_output_persistence_failure_stays_blocked() {
+    blob_failure_case(true, false, true).await;
+}
+struct PersistenceTool;
+#[async_trait]
+impl DomainTool for PersistenceTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            id: "test.persist".into(),
+            description: "Test trusted output persistence.".into(),
+            input_schema: serde_json::json!({"type":"object","additionalProperties":false}),
+        }
+    }
+    async fn call(&self, c: ToolContext, _: serde_json::Value) -> Result<ToolOutput> {
+        Ok(ToolOutput {
+            payload: serde_json::json!({"stored":true}),
+            files: vec![Candidate::json(
+                "result",
+                &serde_json::json!({"nonce":c.inputs["nonce"]}),
+            )?],
+        })
+    }
+}
+fn persistence_tool_fixture() -> Fixture {
+    let mut f = Fixture::new(false);
+    let path = f.root.path().join("flow.json");
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    bundle["entries"]["test.work"]["tools"] =
+        serde_json::json!(["artifact.read", "artifact.write", "test.persist"]);
+    std::fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    f.definition = Definition::load(
+        &path,
+        &std::collections::BTreeMap::from([(
+            "demo-skill@0.1.0".into(),
+            f.root.path().join("demo-skill"),
+        )]),
+    )
+    .unwrap();
+    f
+}
+fn register_persistence_tool(b: &mut HostBindings) {
+    b.tools
+        .insert("test.persist".into(), Arc::new(PersistenceTool));
+    b.grants
+        .get_mut("local-readonly")
+        .unwrap()
+        .tools
+        .push("test.persist".into());
+}
+struct ReceiptFailureExecutor(std::path::PathBuf);
+#[async_trait]
+impl Executor for ReceiptFailureExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        _: Invocation,
+        bridge: Arc<dyn ToolBridge>,
+        _: CancellationToken,
+    ) -> ExecutionOutcome {
+        // Controlled white-box fault: only receipt-bearing updates fail, so the
+        // later Runtime blocked record can still be committed.
+        let connection = rusqlite::Connection::open(&self.0).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_receipts BEFORE UPDATE ON executions WHEN json_array_length(NEW.body, '$.receipts') > 0 BEGIN SELECT RAISE(ABORT, 'injected receipt storage failure'); END;").unwrap();
+        let error = bridge
+            .call("test.persist", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "storage_error");
+        ExecutionOutcome::Completed {
+            usage: serde_json::json!({}),
+        }
+    }
+}
+#[tokio::test]
+async fn receipt_storage_failure_cannot_accept_already_written_candidates() {
+    let f = persistence_tool_fixture();
+    let mut b = f.bindings("pass");
+    register_persistence_tool(&mut b);
+    b.executors.insert(
+        "test.executor".into(),
+        Arc::new(ReceiptFailureExecutor(
+            f.root.path().join("store/state.sqlite"),
+        )),
+    );
+    let rt = Runtime::open(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        b,
+    )
+    .await
+    .unwrap();
+    let id = rt
+        .start(f.request("receipt-io", "A", false), &Caller::local())
+        .await
+        .unwrap();
+    let result = wait_for(&rt, &id, |s| {
+        s.status.terminal() || s.status == Status::Blocked
+    })
+    .await;
+    assert_eq!(result.status, Status::Blocked);
+    assert_eq!(result.current_state, "work");
+    assert_eq!(result.error.unwrap().code, "storage_error");
+    assert!(result.accepted_artifacts.is_empty());
+    rt.shutdown().await.unwrap();
+}
