@@ -809,3 +809,156 @@ async fn receipt_storage_failure_cannot_accept_already_written_candidates() {
     assert!(result.accepted_artifacts.is_empty());
     rt.shutdown().await.unwrap();
 }
+
+struct StopCommitFailureExecutor {
+    database: std::path::PathBuf,
+    returned: Arc<tokio::sync::Notify>,
+    confirm: Arc<AtomicBool>,
+    b_starts: Arc<std::sync::atomic::AtomicUsize>,
+}
+#[async_trait]
+impl Executor for StopCommitFailureExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        inv: Invocation,
+        bridge: Arc<dyn ToolBridge>,
+        _: CancellationToken,
+    ) -> ExecutionOutcome {
+        if inv.inputs["nonce"] == "A" {
+            // Row-specific SQLite fault after started=true was committed. Both
+            // the StopUnknown save and its fallback fail while B remains writable.
+            let connection = rusqlite::Connection::open(&self.database).unwrap();
+            connection
+                .execute_batch("CREATE TABLE stop_fault_target(id TEXT PRIMARY KEY);")
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO stop_fault_target(id) VALUES(?1)",
+                    [&inv.execution_id],
+                )
+                .unwrap();
+            connection.execute_batch("CREATE TRIGGER reject_stop_commit BEFORE UPDATE ON executions WHEN NEW.id IN (SELECT id FROM stop_fault_target) BEGIN SELECT RAISE(ABORT, 'injected stop commit failure'); END;").unwrap();
+            self.returned.notify_one();
+            ExecutionOutcome::StopUnknown {
+                message: "external execution stop remains unknown".into(),
+            }
+        } else {
+            self.b_starts.fetch_add(1, Ordering::SeqCst);
+            bridge
+                .call(
+                    "artifact.write",
+                    serde_json::json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}}),
+                )
+                .await
+                .unwrap();
+            ExecutionOutcome::Completed {
+                usage: serde_json::json!({}),
+            }
+        }
+    }
+    async fn stop_or_confirm(&self, _: &str) -> StopState {
+        if self.confirm.load(Ordering::SeqCst) {
+            StopState::Confirmed
+        } else {
+            StopState::Unknown
+        }
+    }
+}
+async fn stop_commit_failure_case(confirm_before_recovery: bool) {
+    let f = Fixture::new(false);
+    let returned = Arc::new(tokio::sync::Notify::new());
+    let confirm = Arc::new(AtomicBool::new(false));
+    let b_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let database = f.root.path().join("store/state.sqlite");
+    let mut b = f.bindings("pass");
+    b.executors.insert(
+        "test.executor".into(),
+        Arc::new(StopCommitFailureExecutor {
+            database: database.clone(),
+            returned: returned.clone(),
+            confirm: confirm.clone(),
+            b_starts: b_starts.clone(),
+        }),
+    );
+    let rt = Runtime::open(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        b,
+    )
+    .await
+    .unwrap();
+    let a = rt
+        .start(f.request("stop-fault-A", "A", false), &Caller::local())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), returned.notified())
+        .await
+        .unwrap();
+    let b = rt
+        .start(f.request("stop-fault-B", "B", false), &Caller::local())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let raw: String = connection
+        .query_row("SELECT body FROM executions WHERE id=?1", [&a], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let record: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(record["status"], "running");
+    assert_eq!(record["active"]["started"], true);
+    assert_eq!(record["stop_unknown"], false);
+    assert_eq!(
+        b_starts.load(Ordering::SeqCst),
+        0,
+        "failed stop writes must retain capacity"
+    );
+    if confirm_before_recovery {
+        confirm.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            b_starts.load(Ordering::SeqCst),
+            0,
+            "stop confirmation must also be committed before releasing capacity"
+        );
+    }
+    connection
+        .execute_batch("DROP TRIGGER reject_stop_commit;")
+        .unwrap();
+    if !confirm_before_recovery {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            b_starts.load(Ordering::SeqCst),
+            0,
+            "storage recovery alone cannot confirm the old execution stopped"
+        );
+        let blocked = wait_for(&rt, &a, |s| s.status == Status::Blocked).await;
+        assert_eq!(blocked.current_state, "work");
+        assert_eq!(blocked.error.unwrap().code, "interrupted");
+        assert!(blocked.accepted_artifacts.is_empty());
+        confirm.store(true, Ordering::SeqCst);
+    }
+    assert_eq!(
+        wait_for(&rt, &b, |s| s.status.terminal()).await.status,
+        Status::Completed
+    );
+    assert_eq!(b_starts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        rt.get(&a, &Caller::local()).await.unwrap().status,
+        Status::Blocked
+    );
+    rt.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_unknown_stop_commit_must_not_release_worker_capacity() {
+    stop_commit_failure_case(false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirmed_stop_must_commit_before_worker_capacity_is_released() {
+    stop_commit_failure_case(true).await;
+}

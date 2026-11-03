@@ -893,9 +893,30 @@ async fn worker_loop(inner: Arc<Inner>) {
             if r.status == Status::Waiting {
                 let _ = inner.expire(&row.id);
             }
-            if r.stop_unknown || r.status == Status::Cancelling {
-                // A cancelled phase can lose its final CAS after execution has returned.
-                // Reconcile all pending cancellation, including orphaned handles and restart.
+            let started = r.active.as_ref().is_some_and(|a| a.started);
+            if r.stop_unknown || r.status == Status::Cancelling || started {
+                // This loop is serial with phase execution: any started Run
+                // seen here has returned without a durable final state. Failed
+                // stop-state writes must not make it disappear from capacity.
+                let recovery_changed = started && (!r.stop_unknown || r.status == Status::Running);
+                if recovery_changed {
+                    if !r.stop_unknown {
+                        r.epoch += 1;
+                    }
+                    r.stop_unknown = true;
+                    if r.status == Status::Running {
+                        r.status = Status::Blocked;
+                        r.business_outcome = None;
+                        r.error.get_or_insert_with(|| {
+                            Error::new(
+                                "interrupted",
+                                "/execution",
+                                "prior run has no committed final state; it will not be replayed",
+                            )
+                        });
+                        r.progress = json!({"phase":"blocked"});
+                    }
+                }
                 let confirmed = if let Some(active) = &r.active {
                     if !r.stop_unknown && !active.started {
                         true
@@ -919,6 +940,10 @@ async fn worker_loop(inner: Arc<Inner>) {
                     }
                 } else {
                     blocked_capacity = true;
+                    if recovery_changed {
+                        // Keep capacity blocked even if storage is still faulty.
+                        let _ = inner.save(&row, &r, false, None, &[]);
+                    }
                 }
             }
             if next.is_none()
