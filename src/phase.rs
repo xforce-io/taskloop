@@ -241,21 +241,17 @@ impl Bridge {
                     }
                 })
                 .unwrap_or_else(|| trace.phase_span());
-            let content = if self.active().is_ok() && self.entry.tools.iter().any(|t| t == id) {
-                trace.content(id, "input", &span, &args).await
-            } else {
-                None
-            };
-            trace.emit("tool.started", &span, Some(parent), json!({"tool":if self.entry.tools.iter().any(|t|t==id){id}else{"<undeclared>"},"call_id":metadata.as_ref().map(|m|&m.call_id),"source_run_id":metadata.as_ref().map(|m|&m.source_run_id),"native_call_id":metadata.as_ref().and_then(|m|m.native_call_id.as_ref()),"input_content":content}));
+            trace.emit("tool.started", &span, Some(parent), json!({"tool":if self.entry.tools.iter().any(|t|t==id){id}else{"<undeclared>"},"call_id":metadata.as_ref().map(|m|&m.call_id),"source_run_id":metadata.as_ref().map(|m|&m.source_run_id),"native_call_id":metadata.as_ref().and_then(|m|m.native_call_id.as_ref()),"input_content":null}));
+            if self.active().is_ok() && self.entry.tools.iter().any(|t| t == id) {
+                trace.queue_content(id, "input", &span, &args);
+            }
         }
         let result = self.call_inner(id, args).await;
         if let Some(trace) = &self.trace {
-            let content = if let Ok(value) = &result {
-                trace.content(id, "output", &span, value).await
-            } else {
-                None
-            };
-            trace.emit("tool.finished", &span, None, json!({"outcome":if result.is_ok(){"succeeded"}else{"failed"},"code":result.as_ref().err().map(|e|&e.code),"output_content":content}));
+            trace.emit("tool.finished", &span, None, json!({"outcome":if result.is_ok(){"succeeded"}else{"failed"},"code":result.as_ref().err().map(|e|&e.code),"output_content":null}));
+            if let Ok(value) = &result {
+                trace.queue_content(id, "output", &span, value);
+            }
         }
         if let Err(error) = &result
             && matches!(error.code.as_str(), "storage_error" | "revision_conflict")

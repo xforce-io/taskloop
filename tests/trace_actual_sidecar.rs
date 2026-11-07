@@ -206,8 +206,20 @@ async fn real_milkie_trace_public_query_and_cancel() {
             .filter(|e| e.event.source_id.starts_with("milkie:"))
             .all(|e| e.event.milkie_run_id.is_some() && e.event.milkie_context_id.is_some())
     );
-    let reference: TraceContentRef =
-        serde_json::from_value(tool.event.data["input_content"].clone()).unwrap();
+    let reference: TraceContentRef = serde_json::from_value(
+        page.events
+            .iter()
+            .find(|e| {
+                e.event.kind == "tool.content"
+                    && e.event.span_id == tool.event.span_id
+                    && e.event.data["direction"] == "input"
+            })
+            .unwrap()
+            .event
+            .data["content"]
+            .clone(),
+    )
+    .unwrap();
     let content = rt
         .read_trace_content(&id, &reference.id, &Caller::local())
         .unwrap();

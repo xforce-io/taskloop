@@ -75,16 +75,28 @@ async fn completed(rt: &Runtime, f: &Fixture, key: &str) -> String {
         wait_for(rt, &id, |s| s.status.terminal()).await.status,
         Status::Completed
     );
-    id
+    for _ in 0..100 {
+        if !rt
+            .trace(&id, q(), &Caller::local())
+            .unwrap()
+            .issues
+            .iter()
+            .any(|s| s.starts_with("content_pending:"))
+        {
+            return id;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("content collectors did not settle");
 }
 fn reference(page: &TracePage) -> TraceContentRef {
     serde_json::from_value(
         page.events
             .iter()
-            .find(|e| e.event.kind == "tool.started")
+            .find(|e| e.event.kind == "tool.content" && e.event.data["direction"] == "input")
             .unwrap()
             .event
-            .data["input_content"]
+            .data["content"]
             .clone(),
     )
     .unwrap()
@@ -563,4 +575,117 @@ async fn retention_cleanup_waits_until_framework_cannot_start_the_run() {
             .iter()
             .any(|s| s.state == "not_applicable")
     );
+}
+
+#[tokio::test]
+async fn slow_content_redaction_cannot_consume_the_business_execution_deadline() {
+    for direction in ["disabled", "input", "output"] {
+        let capture = direction != "disabled";
+        let f = Fixture::new(false);
+        let mut p = policy(capture);
+        if capture {
+            p.filter = Some(Arc::new(Filter { slow: true }));
+            if direction == "output" {
+                let selection = p.content_tools.get_mut("artifact.write").unwrap();
+                selection.input.clear();
+                selection.output = vec!["/written".into()];
+            }
+        }
+        let rt = open(&f, p).await;
+        let mut request = f.request("content-deadline", "BUSINESS", false);
+        request.limits.max_active_ms = 100;
+        let id = rt.start(request, &Caller::local()).await.unwrap();
+        let result = wait_for(&rt, &id, |s| {
+            s.status.terminal() || s.status == Status::Blocked
+        })
+        .await;
+        rt.shutdown().await.unwrap();
+        assert_eq!(
+            result.status,
+            Status::Completed,
+            "direction={direction}; observation filter altered business result: {result:?}"
+        );
+        assert_eq!(result.accepted_artifacts.len(), 1);
+    }
+}
+
+struct HeldFilter {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait::async_trait]
+impl TraceContentFilter for HeldFilter {
+    async fn redact(&self, _: &str, _: &str, value: Value) -> Result<Value> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(value)
+    }
+}
+#[tokio::test]
+async fn content_pending_is_visible_and_shutdown_drains_before_clean_reopen() {
+    let f = Fixture::new(false);
+    let filter = Arc::new(HeldFilter {
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let mut policy = policy(true);
+    policy.filter = Some(filter.clone());
+    let rt = open(&f, policy.clone()).await;
+    let id = rt
+        .start(f.request("content-tail", "SAFE", false), &Caller::local())
+        .await
+        .unwrap();
+    filter.entered.notified().await;
+    assert_eq!(
+        wait_for(&rt, &id, |s| s.status.terminal()).await.status,
+        Status::Completed
+    );
+    let pending = rt.trace(&id, q(), &Caller::local()).unwrap();
+    assert!(
+        pending
+            .issues
+            .iter()
+            .any(|s| s.starts_with("content_pending:"))
+    );
+    let mut closing = tokio::spawn(async move {
+        rt.shutdown().await.unwrap();
+        rt
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut closing)
+            .await
+            .is_err(),
+        "shutdown ignored an active content collector"
+    );
+    filter.release.notify_one();
+    let rt = closing.await.unwrap();
+    let page = rt.trace(&id, q(), &Caller::local()).unwrap();
+    assert!(
+        !page
+            .issues
+            .iter()
+            .any(|s| s.starts_with("content_pending:"))
+    );
+    let content = reference(&page);
+    assert_eq!(
+        rt.read_trace_content(&id, &content.id, &Caller::local())
+            .unwrap()
+            .value["/value"]["nonce"],
+        "SAFE"
+    );
+    let started = page
+        .events
+        .iter()
+        .find(|e| e.event.kind == "tool.started")
+        .unwrap();
+    assert_eq!(started.event.span_id, content.span_id);
+    drop(rt);
+    let rt = open(&f, policy).await;
+    let page = rt.trace(&id, q(), &Caller::local()).unwrap();
+    assert!(!page.issues.iter().any(|s| s.starts_with("host_unflushed:")));
+    assert_eq!(
+        serde_json::to_value(reference(&page)).unwrap(),
+        serde_json::to_value(content).unwrap()
+    );
+    rt.shutdown().await.unwrap();
 }

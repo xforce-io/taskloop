@@ -181,6 +181,26 @@ async fn main() {
             .status,
         Status::Cancelled
     );
+    for _ in 0..100 {
+        let pending = rt
+            .trace(
+                &a,
+                TraceQuery {
+                    limit: 100,
+                    ..Default::default()
+                },
+                &Caller::local(),
+            )
+            .unwrap();
+        if !pending
+            .issues
+            .iter()
+            .any(|s| s.starts_with("content_pending:"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let trace = rt
         .trace(
             &a,
@@ -222,11 +242,18 @@ async fn main() {
         trace
             .events
             .iter()
-            .find(|e| e.event.kind == "tool.started")
-            .unwrap()
-            .event
-            .data["input_content"]
-            .clone(),
+            .find_map(|e| {
+                let value =
+                    if e.event.kind == "tool.content" && e.event.data["direction"] == "input" {
+                        e.event.data.get("content")
+                    } else if e.event.kind == "tool.started" {
+                        e.event.data.get("input_content")
+                    } else {
+                        None
+                    };
+                value.filter(|v| !v.is_null()).cloned()
+            })
+            .expect("no settled input content reference"),
     )
     .unwrap();
     let content = rt

@@ -704,6 +704,15 @@ impl Runtime {
                 })??;
         }
         if let Some(trace) = &self.inner.trace {
+            tokio::time::timeout_at(deadline, trace.finish_content())
+                .await
+                .map_err(|_| {
+                    Error::new(
+                        "trace_cleanup_unconfirmed",
+                        "/shutdown/content",
+                        "content collectors have not finished",
+                    )
+                })??;
             let _ = trace.finish_observation();
         }
         Ok(())

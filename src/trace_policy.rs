@@ -13,6 +13,8 @@ pub struct TraceToolContent {
 #[async_trait]
 pub trait TraceContentFilter: Send + Sync {
     /// Receives only selected fields. Remove domain-specific secrets before returning.
+    /// Runs off the business tool path; the future must yield and be cancellation-safe.
+    /// Perform blocking work outside the async executor.
     async fn redact(&self, tool: &str, direction: &str, selected: Value) -> Result<Value>;
 }
 #[derive(Clone)]
