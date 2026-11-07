@@ -128,6 +128,7 @@ pub(crate) struct TraceStore {
     started: Instant,
     policy: Option<Arc<crate::TracePolicy>>,
     content_slots: Arc<tokio::sync::Semaphore>,
+    content_pending: Mutex<BTreeMap<(String, String), usize>>,
     degraded: AtomicBool,
 }
 impl TraceStore {
@@ -177,6 +178,7 @@ impl TraceStore {
             started: Instant::now(),
             policy: policy.map(Arc::new),
             content_slots: Arc::new(tokio::sync::Semaphore::new(8)),
+            content_pending: Mutex::default(),
             degraded: AtomicBool::new(false),
         }))
     }
@@ -314,6 +316,17 @@ impl TraceStore {
         {
             if id == execution && q.run_id.as_ref().is_none_or(|q| q == run) {
                 issues.insert(format!("{reason}:{run}"));
+            }
+        }
+        for ((id, run), count) in self
+            .content_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .range((execution.to_owned(), String::new())..)
+            .take_while(|((id, _), _)| id == execution)
+        {
+            if id == execution && *count > 0 && q.run_id.as_ref().is_none_or(|q| q == run) {
+                issues.insert(format!("content_pending:{run}"));
             }
         }
         if sources.is_empty() {

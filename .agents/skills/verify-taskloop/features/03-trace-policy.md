@@ -1,6 +1,6 @@
 # Trace 治理
 
-主要覆盖 #8 S1/S2；验收为 `docs/design/8-trace-policy-data-governance.md` v0.4 §11。
+主要覆盖 #8 S1/S2；验收为 `docs/design/8-trace-policy-data-governance.md` v0.5 §11。
 
 公开路径：Runtime::open_with_trace_policy、trace/export_trace、read_trace_content 和维护入口。
 
@@ -16,3 +16,5 @@
 审查回归：S2.A3 包含启动握手/调用尚可能启动时期限到达，不得提前 not_applicable；S2.A1 包含重开后降低 max_runs，须腾出足够空间，未确认来源阻止接纳。
 
 观测尾部补充：业务完成后源清理仍需等采集资源结束（retention_waits_for_observation_tail_after_business_completion）；关闭先完成采集再清未刷盘标记。#7摘要查询沿用本功能的过期可见性，旧Run迁移、容量和删除隔离均须重验。
+
+内容脱敏独立收尾：slow_content_redaction_cannot_consume_the_business_execution_deadline从100ms公开业务路径对照开/关采集；content_pending_is_visible_and_shutdown_drains_before_clean_reopen核对业务已成时仍content_pending、关闭等待、同Span追加tool.content引用及重开不造未刷盘。队列上限8的回归走真实queue_content入口，超载可查且不无限持有字段。旧事件内嵌引用保留，新内容从tool.content追加事件读取。

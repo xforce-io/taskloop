@@ -252,27 +252,123 @@ impl TraceStore {
         Ok(())
     }
 }
+struct ContentJob {
+    trace: Arc<RunTrace>,
+    completed: bool,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+impl Drop for ContentJob {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.trace.store.fault(
+                &self.trace.execution,
+                &self.trace.run,
+                "content_interrupted",
+            );
+        }
+        let key = (self.trace.execution.clone(), self.trace.run.clone());
+        let mut pending = self
+            .trace
+            .store
+            .content_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = pending.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                pending.remove(&key);
+            }
+        }
+    }
+}
+impl TraceStore {
+    pub async fn finish_content(self: &Arc<Self>) -> Result<()> {
+        let _permits = self
+            .content_slots
+            .clone()
+            .acquire_many_owned(8)
+            .await
+            .map_err(Error::io)?;
+        Ok(())
+    }
+}
 impl RunTrace {
-    pub async fn content(
-        &self,
-        tool: &str,
-        direction: &str,
-        span: &str,
-        value: &Value,
-    ) -> Option<TraceContentRef> {
+    fn selected_content(&self, tool: &str, direction: &str, value: &Value) -> Option<Value> {
         let policy = self.store.policy.as_ref()?;
         let selected = policy.select(tool, direction, value)?;
-        let limit = policy.max_content_bytes;
-        if serde_json::to_vec(&selected).ok()?.len() as u64 > limit {
+        if serde_json::to_vec(&selected).ok()?.len() as u64 > policy.max_content_bytes {
             self.store
                 .fault(&self.execution, &self.run, "content_capacity");
             return None;
         }
-        let Ok(_permit) = self.store.content_slots.clone().try_acquire_owned() else {
-            self.store
-                .fault(&self.execution, &self.run, "content_queue");
-            return None;
+        Some(selected)
+    }
+    fn content_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        match self.store.content_slots.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                self.store
+                    .fault(&self.execution, &self.run, "content_queue");
+                None
+            }
+        }
+    }
+    pub fn queue_content(self: &Arc<Self>, tool: &str, direction: &str, span: &str, value: &Value) {
+        let Some(selected) = self.selected_content(tool, direction, value) else {
+            return;
         };
+        let Some(permit) = self.content_permit() else {
+            return;
+        };
+        let key = (self.execution.clone(), self.run.clone());
+        *self
+            .store
+            .content_pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_default() += 1;
+        let mut job = ContentJob {
+            completed: false,
+            trace: self.clone(),
+            _permit: permit,
+        };
+        let (tool, direction, span) = (tool.to_owned(), direction.to_owned(), span.to_owned());
+        tokio::spawn(async move {
+            let trace = &job.trace;
+            let captured = std::panic::AssertUnwindSafe(
+                trace.capture_content(&tool, &direction, &span, selected),
+            )
+            .catch_unwind()
+            .await;
+            let content = match captured {
+                Ok(content) => content,
+                Err(_) => {
+                    trace
+                        .store
+                        .fault(&trace.execution, &trace.run, "content_filter");
+                    None
+                }
+            };
+            trace.emit(
+                "tool.content",
+                &span,
+                None,
+                json!({"tool":tool,"direction":direction,"content":content}),
+            );
+            job.completed = true;
+            drop(job);
+        });
+    }
+    async fn capture_content(
+        &self,
+        tool: &str,
+        direction: &str,
+        span: &str,
+        selected: Value,
+    ) -> Option<TraceContentRef> {
+        let policy = self.store.policy.as_ref()?;
+        let limit = policy.max_content_bytes;
         let filter = policy.filter.as_ref()?;
         let filtered = tokio::time::timeout(
             std::time::Duration::from_millis(200),
@@ -434,13 +530,8 @@ mod tests {
         let s = TraceStore::open_with_policy(temp.path(), options(), Some(p)).unwrap();
         let t = s.session("e", "r", "work", 1);
         t.emit("phase.started", &t.phase_span(), None, json!({}));
-        let mut jobs = tokio::task::JoinSet::new();
         for _ in 0..8 {
-            let t = t.clone();
-            jobs.spawn(async move {
-                t.content("tool", "input", "span", &json!({"value":"safe"}))
-                    .await
-            });
+            t.queue_content("tool", "input", "span", &json!({"value":"safe"}));
         }
         for _ in 0..100 {
             if filter.started.load(Ordering::Acquire) == 8 {
@@ -449,15 +540,18 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         assert_eq!(filter.started.load(Ordering::Acquire), 8);
-        assert!(
-            t.content("tool", "input", "span", &json!({"value":"overflow"}))
-                .await
-                .is_none()
+        assert_eq!(
+            *s.content_pending
+                .lock()
+                .unwrap()
+                .get(&("e".into(), "r".into()))
+                .unwrap(),
+            8
         );
+        t.queue_content("tool", "input", "span", &json!({"value":"overflow"}));
         filter.release.notify_waiters();
-        while let Some(result) = jobs.join_next().await {
-            assert!(result.unwrap().is_some());
-        }
+        s.finish_content().await.unwrap();
+        assert!(s.content_pending.lock().unwrap().is_empty());
         let p = s
             .read(
                 "e",
@@ -468,6 +562,13 @@ mod tests {
             )
             .unwrap();
         assert!(p.issues.iter().any(|e| e.starts_with("content_queue:")));
+        assert_eq!(
+            p.events
+                .iter()
+                .filter(|e| e.event.kind == "tool.content" && !e.event.data["content"].is_null())
+                .count(),
+            8
+        );
     }
     #[test]
     fn unflushed_boot_is_persisted_per_run_and_not_erased_by_clean_reopen() {

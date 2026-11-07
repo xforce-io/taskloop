@@ -1,6 +1,6 @@
 # #8 Trace 内容与数据治理
 
-版本：v0.4（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/8 。L1: write（Issue 概要）；L2: write（本文件为唯一详细契约）。沿用用户确认的“TaskLoop 集成 Milkie Trace 并统一治理”和本票 S1/S2；不将推荐的保留天数或容量当成批准默认值。章节和存放位置遵循用户 AGENTS；细化验收放 §11。
+版本：v0.5（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/8 。L1: write（Issue 概要）；L2: write（本文件为唯一详细契约）。沿用用户确认的“TaskLoop 集成 Milkie Trace 并统一治理”和本票 S1/S2；不将推荐的保留天数或容量当成批准默认值。章节和存放位置遵循用户 AGENTS；细化验收放 §11。
 
 ## 1 背景
 
@@ -55,9 +55,13 @@ flowchart TD
 
 ## 8 API/CLI
 
-仅新增 Rust SDK。`TracePolicy` 必须给 policy_id、全局事件/字节/Run 限额、保留毫秒数和单引用限额；元数据模式 content_tools 为空；显式模式指定工具及 input/output JSON Pointer，并提供非空版本的异步脱敏器。每工具每方向最多 32 个非根路径；拒绝非法 Pointer 或显式凭据/环境路径。脱敏等待最多 200ms，不持有存储锁；同时处理数量有界，过载降级。`read_trace_content(execution_id, content_id, caller)` 先验证实例 owner，再在该实例范围读取，不接受任意路径。清理可由维护入口触发，查询与写入同样执行到期检查。
+仅新增 Rust SDK。`TracePolicy` 必须给 policy_id、全局事件/字节/Run 限额、保留毫秒数和单引用限额；元数据模式 content_tools 为空；显式模式指定工具及 input/output JSON Pointer，并提供非空版本的异步脱敏器。每工具每方向最多 32 个非根路径；拒绝非法 Pointer 或显式凭据/环境路径。脱敏在独立的有界后台任务执行，每次最多等待 200ms，不持有存储锁；同时最多8项，未选字段不进入后台。工具执行及回执交付不等待脱敏，过载立即诊断降级。`read_trace_content(execution_id, content_id, caller)` 先验证实例 owner，再在该实例范围读取，不接受任意路径。清理可由维护入口触发，查询与写入同样执行到期检查。
 
 全局字节配额是保留事件 JSON 与内容 JSON 的逻辑字节，不承诺 SQLite 文件字节等值。Run 标记及故障记录有界：max_runs 为 1..10000，单份策略快照最多 64KiB；其元数据另受这些上限控制，不计入事件/内容 payload 配额。每工具每方向最多 32 个字段，最多 64 个工具、Pointer 最多 256 字节；SQLite 空闲页可复用，保留清理不声称安全擦除磁盘。格式/语义版本和策略版本分别可核对。
+
+内容引用在同一工具 Span 的追加 `tool.content` 元数据事件中交付，含 tool、direction 与脱敏后真实 TraceContentRef；采集失败该引用为空并有固定故障诊断。`tool.started`/`tool.finished` 不等待内容，其原 input_content/output_content 字段保持空，不填未知摘要或虚构引用。旧持久化事件原有引用可继续读取，新消费者同时识别旧内嵌引用和追加引用事件。导出不内联正文。
+
+内容任务尚未结束时查询明确 `content_pending:{run}`，不能报告完整；关闭等待全部已接纳内容任务后才清未刷盘标记，超时明确 trace_cleanup_unconfirmed。意外退出由既有 host_unflushed 保留缺口；不恢复或重放未脱敏内容。成功/失败均在后台任务完成前交付元数据，已过期 Run 的晚到内容不得复活。
 
 ## 9 边界
 
@@ -75,7 +79,7 @@ flowchart TD
 |---|---|---|---|
 | S1.A1 | 默认摘要模式，工具输入/输出含合成凭据、环境及完整提示 | 查询、导出、数据库新增内容中无正文；返回实际策略，不伪称开启内容 | Integration：公共 Runtime API 与存储防泄漏检查 |
 | S1.A2 | 显式工具字段、版本化脱敏器，两个实例/owner | 仅选定并脱敏内容可读，跨实例/owner 引用 not_found；非法选择和配置启动前拒绝 | E2E/Integration：独立 SDK consumer、公共读引用；Unit：Pointer 与敏感键 |
-| S2.A1 | 小配额、写入失败、源队列超载、退出未刷新或脱敏超时 | 固定降级可查，无无限等待；原工具、产物及业务结果保持真实 | Integration/Unit：故障注入与原执行结果对照；回归 #6/#7 |
+| S2.A1 | 小配额、写入失败、源队列超载、退出未刷新或脱敏超时 | 固定降级可查，无无限等待；原工具、产物及业务结果保持真实；100ms期限的慢脱敏对照不改变接纳，pending和关闭收尾可判 | Integration/Unit：故障注入与原执行结果对照；回归 #6/#7 |
 | S2.A3 | 中央和 Milkie 源端观测缓冲存在，中央期限到期 | 经 Milkie 公开入口确认清理源观测缓冲，运行中/未知源不得误删或复活；失败和未确认清理单列，不能把中央清理冒称全链路清理 | Integration/E2E：真实 Sidecar 文件生命周期与公开协议，不读取内部 SQLite |
 | S2.A2 | 短显式期限、重开、旧 v1 和未来数据库版本 | 到期清理内容和事件，晚到不复活，策略/缺口明确；旧库迁移、未来库明确拒绝 | Integration/Unit：公开查询、内容读取、维护及持久化重开 |
 
