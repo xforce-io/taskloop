@@ -936,7 +936,11 @@ async fn run_checked(
     }
     let mut checked = tokio::select! {
         _=cancel.cancelled()=>CheckResult::unavailable("check cancelled"),
-        result=tokio::time::timeout(std::time::Duration::from_millis(check_budget),AssertUnwindSafe(gate.check(context)).catch_unwind())=>match result {Ok(Ok(v))=>v,_=>{budget.mark(crate::BudgetLimit::CheckTime);CheckResult::unavailable("gate failed or timed out")}}
+        result=tokio::time::timeout(std::time::Duration::from_millis(check_budget),AssertUnwindSafe(gate.check(context)).catch_unwind())=>match result {
+            Ok(Ok(v))=>v,
+            Ok(Err(_))=>CheckResult::unavailable("gate callback panicked"),
+            Err(_)=>{budget.mark(crate::BudgetLimit::CheckTime);CheckResult::unavailable("gate timed out")}
+        }
     };
     if check_clock.elapsed() >= std::time::Duration::from_millis(check_budget) {
         budget.mark(crate::BudgetLimit::CheckTime);

@@ -594,3 +594,32 @@ async fn synchronous_gate_cannot_accept_after_its_separate_check_deadline() {
     assert!(r.limits_hit.contains(&BudgetLimit::CheckTime));
     rt.shutdown().await.unwrap();
 }
+
+struct PanickingGate;
+#[async_trait]
+impl DomainGate for PanickingGate {
+    async fn check(&self, _: GateContext) -> CheckResult {
+        panic!("fixture gate failure")
+    }
+}
+#[tokio::test]
+async fn gate_panic_does_not_claim_that_a_time_budget_was_exhausted() {
+    let f = Fixture::new(false);
+    let mut b = f.bindings("pass");
+    b.gates.insert("test.gate".into(), Arc::new(PanickingGate));
+    let rt = Runtime::open(options(&f, policy()), vec![f.definition.clone()], b)
+        .await
+        .unwrap();
+    let id = rt
+        .start(f.request("gate-panic", "A", false), &Caller::local())
+        .await
+        .unwrap();
+    let s = wait_for(&rt, &id, |s| s.status == Status::Blocked).await;
+    assert!(s.accepted_artifacts.is_empty());
+    assert!(
+        !rt.budgets(&id, &Caller::local()).unwrap().runs[0]
+            .limits_hit
+            .contains(&BudgetLimit::CheckTime)
+    );
+    rt.shutdown().await.unwrap();
+}
