@@ -197,6 +197,15 @@ pub trait ToolBridge: Send + Sync {
         self.call(id, args).await
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationCleanup {
+    Purged,
+    NotApplicable,
+    Deferred,
+    Unsupported,
+    Failed,
+}
 #[async_trait]
 pub trait Executor: Send + Sync {
     fn identity(&self) -> Value {
@@ -222,6 +231,14 @@ pub trait Executor: Send + Sync {
         _observer: Option<Arc<dyn crate::MilkieObserver>>,
     ) -> ExecutionOutcome {
         self.execute(invocation, tools, cancel).await
+    }
+    /// Retention only: must not start/cancel execution or delete functional native sessions.
+    async fn cleanup_observation(&self, _run_id: &str) -> ObservationCleanup {
+        if self.internal_observation() {
+            ObservationCleanup::Unsupported
+        } else {
+            ObservationCleanup::NotApplicable
+        }
     }
     /// Only a trusted adapter may confirm that its opaque run has no live execution left.
     async fn stop_or_confirm(&self, _run_id: &str) -> StopState {

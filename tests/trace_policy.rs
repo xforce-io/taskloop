@@ -355,3 +355,167 @@ async fn run_count_and_total_byte_limits_are_observable() {
         rt.shutdown().await.unwrap();
     }
 }
+
+struct CleanupExecutor {
+    label: &'static str,
+    allow: Arc<std::sync::atomic::AtomicBool>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    cleanups: Arc<std::sync::atomic::AtomicUsize>,
+    block: bool,
+}
+#[async_trait::async_trait]
+impl Executor for CleanupExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    fn identity(&self) -> Value {
+        json!({"fixture":self.label})
+    }
+    async fn execute(
+        &self,
+        inv: Invocation,
+        tools: Arc<dyn ToolBridge>,
+        _: tokio_util::sync::CancellationToken,
+    ) -> ExecutionOutcome {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tools
+            .call(
+                "artifact.write",
+                json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}}),
+            )
+            .await
+            .unwrap();
+        ExecutionOutcome::Completed {
+            usage: json!({"fixture":true}),
+        }
+    }
+    async fn cleanup_observation(&self, _: &str) -> ObservationCleanup {
+        self.cleanups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.block {
+            std::future::pending::<()>().await;
+        }
+        if self.allow.load(std::sync::atomic::Ordering::SeqCst) {
+            ObservationCleanup::Purged
+        } else {
+            ObservationCleanup::Deferred
+        }
+    }
+}
+fn cleanup_executor(label: &'static str) -> Arc<CleanupExecutor> {
+    Arc::new(CleanupExecutor {
+        label,
+        allow: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        cleanups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        block: false,
+    })
+}
+async fn open_cleanup(f: &Fixture, executor: Arc<CleanupExecutor>) -> Runtime {
+    let mut p = policy(false);
+    p.retention_ms = 150;
+    p.max_runs = 1;
+    let bindings = f.bindings("pass").executor("test.executor", executor);
+    Runtime::open_with_trace_policy(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        bindings,
+        options(),
+        p,
+    )
+    .await
+    .unwrap()
+}
+async fn cleanup_state(rt: &Runtime, id: &str, expected: &str) -> TracePage {
+    for _ in 0..200 {
+        let page = rt.trace(id, q(), &Caller::local()).unwrap();
+        if page.source_cleanup.iter().any(|s| s.state == expected) {
+            return page;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("expected source cleanup state {expected}")
+}
+#[tokio::test]
+async fn pending_source_cleanup_survives_restart_and_is_not_evicted_for_capacity() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new(false);
+    let executor = cleanup_executor("stable");
+    let rt = open_cleanup(&f, executor.clone()).await;
+    let a = completed(&rt, &f, "a").await;
+    rt.shutdown().await.unwrap();
+    drop(rt);
+    tokio::time::sleep(Duration::from_millis(180)).await;
+    let rt = open_cleanup(&f, executor.clone()).await;
+    cleanup_state(&rt, &a, "deferred").await;
+    assert_eq!(
+        executor.calls.load(Ordering::SeqCst),
+        1,
+        "reopen must not replay execution"
+    );
+    let b = completed(&rt, &f, "b").await;
+    assert!(
+        rt.trace(&b, q(), &Caller::local())
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    assert!(
+        rt.trace(&a, q(), &Caller::local())
+            .unwrap()
+            .source_cleanup
+            .iter()
+            .any(|s| s.state == "deferred")
+    );
+    executor.allow.store(true, Ordering::SeqCst);
+    cleanup_state(&rt, &a, "purged").await;
+    let c = completed(&rt, &f, "c").await;
+    assert!(
+        !rt.trace(&c, q(), &Caller::local())
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    assert_eq!(executor.calls.load(Ordering::SeqCst), 3);
+    rt.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn changed_executor_binding_cannot_claim_old_source_was_cleaned() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new(false);
+    let rt = open_cleanup(&f, cleanup_executor("old")).await;
+    let a = completed(&rt, &f, "a").await;
+    rt.shutdown().await.unwrap();
+    drop(rt);
+    tokio::time::sleep(Duration::from_millis(180)).await;
+    let replacement = cleanup_executor("replacement");
+    replacement.allow.store(true, Ordering::SeqCst);
+    let rt = open_cleanup(&f, replacement.clone()).await;
+    let page = cleanup_state(&rt, &a, "binding_changed").await;
+    assert!(!page.complete);
+    assert_eq!(replacement.cleanups.load(Ordering::SeqCst), 0);
+    rt.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn blocked_source_cleanup_does_not_block_shutdown_or_change_business_state() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new(false);
+    let mut executor = cleanup_executor("blocked");
+    Arc::get_mut(&mut executor).unwrap().block = true;
+    let rt = open_cleanup(&f, executor.clone()).await;
+    let a = completed(&rt, &f, "a").await;
+    for _ in 0..100 {
+        if executor.cleanups.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(executor.cleanups.load(Ordering::SeqCst) > 0);
+    let before = std::time::Instant::now();
+    rt.shutdown().await.unwrap();
+    assert!(before.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        rt.get(&a, &Caller::local()).await.unwrap().status,
+        Status::Completed
+    );
+}

@@ -390,12 +390,18 @@ impl Bridge {
 pub(crate) async fn run(inner: Arc<Inner>, row: Row) {
     let trace = decode(&row).ok().and_then(|r| {
         let a = r.active.as_ref()?;
-        Some(inner.trace.as_ref()?.session(
+        let trace = inner.trace.as_ref()?.session(
             &row.id,
             &a.id,
             &r.current_state,
             *r.visits.get(&r.current_state)?,
-        ))
+        );
+        let executor = inner.bindings.executors.get(&a.executor)?;
+        if trace.reserve_executor(&a.executor, &executor.identity()) {
+            Some(trace)
+        } else {
+            None
+        }
     });
     if let Some(trace) = &trace {
         trace.emit("phase.started", &trace.phase_span(), None, json!({}));
@@ -614,12 +620,22 @@ async fn run_checked(
     } else {
         match tokio::time::timeout(
             std::time::Duration::from_millis(time_left.max(1)),
-            AssertUnwindSafe(executor.execute_observed(
-                invocation,
-                bridge.clone(),
-                cancel.clone(),
-                trace.clone().map(|t| t as Arc<dyn MilkieObserver>),
-            ))
+            AssertUnwindSafe(async {
+                if inner.trace.is_some() {
+                    executor
+                        .execute_observed(
+                            invocation,
+                            bridge.clone(),
+                            cancel.clone(),
+                            trace.clone().map(|t| t as Arc<dyn MilkieObserver>),
+                        )
+                        .await
+                } else {
+                    executor
+                        .execute(invocation, bridge.clone(), cancel.clone())
+                        .await
+                }
+            })
             .catch_unwind(),
         )
         .await

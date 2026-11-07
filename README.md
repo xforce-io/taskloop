@@ -66,6 +66,6 @@ Milkie 依赖固定于上游 #277/#278 的契约与提交，当前兼容补充�
 
 容量拒收、过滤失败和超时可查，业务继续；过滤并行最多 8、单次等待 200ms。按接纳时间到期，重启不延长；维护、查询和写入都会检查，后台也按现有调度周期清理。清理只删除观测事件和内容；有界过期标记被淘汰后查询保留“未知缺口”，晚到事件不重新接纳。逻辑字节配额不等于 SQLite 文件大小，文件空闲页可复用；清理不承诺磁盘安全擦除。
 
-[详细契约 #8](docs/design/8-trace-policy-data-governance.md)；观测库升级为 v2，业务库版本保持不变。
+[详细契约 #8](docs/design/8-trace-policy-data-governance.md)；观测库升级为 v3，业务库版本保持不变。
 
-当前 #8 中央治理候选尚缺 Milkie 源端观测缓冲的公开清理链路，不能据中央库清理宣称全链路保留期限已完成；见设计 §12 和 S2.A3。
+中央到期后，独立后台通过 Executor 调用 Milkie 的公开 `observation.purge`。`source_cleanup` 单列 scheduled/pending/deferred/unsupported/failed/purged/not_applicable 等状态；未确认清理记录不因容量而淘汰。绑定变化或旧记录缺绑定时明确不可确认，不猜测已清理。中央观测接纳失败会关闭本次源采集，业务继续；普通未托管入口保留原 observer 行为。源清理不删除认证、原生功能会话、业务执行或工具记录。

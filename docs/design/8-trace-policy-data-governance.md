@@ -1,6 +1,6 @@
 # #8 Trace 内容与数据治理
 
-版本：v0.1（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/8 。L1: write（Issue 概要）；L2: write（本文件为唯一详细契约）。沿用用户确认的“TaskLoop 集成 Milkie Trace 并统一治理”和本票 S1/S2；不将推荐的保留天数或容量当成批准默认值。章节和存放位置遵循用户 AGENTS；细化验收放 §11。
+版本：v0.2（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/8 。L1: write（Issue 概要）；L2: write（本文件为唯一详细契约）。沿用用户确认的“TaskLoop 集成 Milkie Trace 并统一治理”和本票 S1/S2；不将推荐的保留天数或容量当成批准默认值。章节和存放位置遵循用户 AGENTS；细化验收放 §11。
 
 ## 1 背景
 
@@ -63,7 +63,7 @@ flowchart TD
 
 ## 10 迁移/兼容/回滚
 
-观测数据库升级到版本 2，业务库版本不变。保留旧事件为 legacy 策略，不补造原内容或开始时间；显式新策略只支配接纳后的新 Run。旧 #7 代码拒绝打开新观测库，但可不启用观测读取原业务库；回滚不删文件。未来版本更高时启动前明确拒绝，避免静默清空。
+观测数据库升级到版本 3，业务库版本不变。保留旧事件为 legacy 策略，不补造原内容或开始时间；显式新策略只支配接纳后的新 Run。旧 #7 代码拒绝打开新观测库，但可不启用观测读取原业务库；回滚不删文件。未来版本更高时启动前明确拒绝，避免静默清空。
 
 ## 11 测试计划
 
@@ -81,10 +81,20 @@ flowchart TD
 
 ## 12 开放问题
 
-尚需补齐源端缓冲清理：当前 Milkie observation API 只有读取，没有公开按 Run 清理入口。仅清理中央 trace.sqlite 不满足全链路期限；必须在 Milkie 增加公开清理契约并由 TaskLoop 通过 Executor 驱动，不能由 TaskLoop 直接删除 Milkie 内部文件。该技术缺口阻止本票 S2 全部通过。
+源端清理采用 Milkie #278 v0.3 的公开幂等 observation.purge。每个已接纳 Run 在开始采集前持久化 executor 逻辑名及 identity 摘要，后台只在绑定一致时清理；不读取 Milkie 私有表或直接删源文件。中央到期后清理状态独立保留，pending/deferred/unsupported/failed 不等于 purged，未确认条目不因容量而淘汰。升级前缺绑定的记录保留 unbound，不能猜测当前配置就是旧配置。
 
 无须替用户选择新的容量、保留天数或正文开放范围：全部由新入口参数明确提供，当前旧入口保持既有摘要行为。第二 Harness 与真实验收专用目录仍待宿主提供，不在本票伪造。
 
 ## 13 关联
 
 [本票 #8](https://github.com/xforce-io/taskloop/issues/8)、[依赖 #7](https://github.com/xforce-io/taskloop/issues/7)、[Epic #5](https://github.com/xforce-io/taskloop/issues/5)。
+
+### v0.2 源缓冲与恢复契约
+
+新增 Executor::cleanup_observation(run_id)，默认内部不可观测执行器返回 not_applicable，声称内部观测但未实现清理者为 unsupported。MilkieExecutor 只查自有 owner 关联和 Milkie execution.query/observation.purge；验证 run/context 和能力，不启动/取消原生执行，不碰认证或原生功能会话。活动、原生停止未确认或工具 pending 返回 deferred；公开协议/存储失败 failed；只有确认返回才记 purged。请求/回复丢失可幂等重试。
+
+后台清理独立于业务调度，每次至多 1 个，单次 5 秒、重试间隔至少 1 秒、轮询 500ms；运行时关闭中止本宿主的清理 Sidecar，不影响业务 Sidecar。SourceCleanup 状态通过同一授权查询返回，包含 Run、逻辑执行器和最近/下次尝试时间，不暴露路径或原始异常。活动 Run 的策略清理状态为 scheduled，到期转 pending，再到上述结果。
+
+接纳失败时继续业务但关闭该 invocation 的源观测，避免中央配额已满仍无限创建源 journal；这要求 Milkie 的 observed 入口把 None 解释为显式关闭，普通 execute 保留独立 observer 行为。已接纳源仍由每 Run 源容量和中央 max_runs 共同限制；未确认源清理记录不得淘汰。清理失败可阻止新观测接纳，不阻止业务执行。晚到事件根据原接纳时间拒收，不得建立新 journal。
+
+旧 v1 无期限事件仍为 legacy；旧 v2 有期限而无执行器绑定者迁移为 unbound 并明确未清理，不能虚构成功。业务库不变，旧观测实现拒绝新格式。

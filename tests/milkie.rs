@@ -367,3 +367,20 @@ async fn reused_rpc_identity_cannot_cross_tool_results() {
     ));
     assert!(spy.0.load(Ordering::SeqCst) <= 1);
 }
+
+#[tokio::test]
+async fn old_source_without_purge_capability_is_explicitly_unsupported() {
+    let f = Fixture::new(false);
+    let a = adapter(&f, "normal");
+    let inv = invocation(&f, false, 10000);
+    let run = inv.run_id.clone();
+    assert!(matches!(
+        a.execute(inv, Arc::new(Spy::default()), CancellationToken::new())
+            .await,
+        ExecutionOutcome::Completed { .. }
+    ));
+    assert_eq!(
+        a.cleanup_observation(&run).await,
+        ObservationCleanup::Unsupported
+    );
+}

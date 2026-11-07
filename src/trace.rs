@@ -14,7 +14,10 @@ use std::{
     time::Instant,
 };
 
+mod cleanup;
 mod governance;
+pub use cleanup::SourceCleanup;
+pub(crate) use cleanup::cleanup_loop;
 
 #[derive(Debug, Clone)]
 pub struct TraceOptions {
@@ -113,6 +116,8 @@ pub struct TracePage {
     pub expired_runs: Vec<String>,
     #[serde(default)]
     pub collector_degraded: bool,
+    #[serde(default)]
+    pub source_cleanup: Vec<SourceCleanup>,
 }
 pub(crate) struct TraceStore {
     conn: Mutex<Connection>,
@@ -140,7 +145,7 @@ impl TraceStore {
         let conn = Connection::open(root.join("trace.sqlite"))?;
         conn.busy_timeout(std::time::Duration::from_millis(5))?;
         let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(Error::new(
                 "storage_incompatible",
                 "/trace",
@@ -161,6 +166,7 @@ impl TraceStore {
           END;
           ")?;
         Self::migrate_policy(&conn, version)?;
+        Self::migrate_cleanup(&conn)?;
         Ok(Arc::new(Self {
             conn: Mutex::new(conn),
             options,
@@ -272,6 +278,7 @@ impl TraceStore {
         validate_query(q)?;
         let _ = self.maintain();
         let (run_policies, expired_runs) = self.query_policies(execution, q.run_id.as_deref())?;
+        let source_cleanup = self.cleanup_view(execution, q.run_id.as_deref())?;
         let conn = self
             .conn
             .lock()
@@ -447,6 +454,7 @@ impl TraceStore {
             run_policies,
             expired_runs,
             collector_degraded,
+            source_cleanup,
         })
     }
 }
@@ -482,6 +490,7 @@ pub(crate) fn disabled(q: &TraceQuery) -> Result<TracePage> {
         run_policies: BTreeMap::new(),
         expired_runs: vec![],
         collector_degraded: false,
+        source_cleanup: vec![],
     })
 }
 pub(crate) struct RunTrace {
@@ -591,6 +600,7 @@ fn source_data(kind: &str, data: &Value) -> Option<Value> {
                         "modelRequests",
                         "hostTools",
                         "hiddenReasoning",
+                        "purge",
                     ] {
                         if let Some(v) = v.get(k) {
                             if !(v.is_boolean()

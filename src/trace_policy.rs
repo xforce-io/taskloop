@@ -45,6 +45,12 @@ pub struct TracePolicySnapshot {
     pub source_callback_ms: u32,
     pub source_drain_ms: u32,
     pub content_concurrency: u32,
+    #[serde(default)]
+    pub source_cleanup_timeout_ms: Option<u32>,
+    #[serde(default)]
+    pub source_cleanup_poll_ms: Option<u32>,
+    #[serde(default)]
+    pub source_cleanup_retry_ms: Option<u32>,
 }
 impl PartialEq for TraceToolContent {
     fn eq(&self, other: &Self) -> bool {
@@ -123,6 +129,9 @@ impl TracePolicy {
             source_callback_ms: 200,
             source_drain_ms: 500,
             content_concurrency: 8,
+            source_cleanup_timeout_ms: Some(5000),
+            source_cleanup_poll_ms: Some(500),
+            source_cleanup_retry_ms: Some(1000),
         }
     }
     pub(crate) fn select(&self, tool: &str, direction: &str, value: &Value) -> Option<Value> {
@@ -161,6 +170,9 @@ impl TracePolicySnapshot {
             source_callback_ms: 200,
             source_drain_ms: 500,
             content_concurrency: 8,
+            source_cleanup_timeout_ms: Some(5000),
+            source_cleanup_poll_ms: Some(500),
+            source_cleanup_retry_ms: Some(1000),
         }
     }
 }

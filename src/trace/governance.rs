@@ -28,7 +28,7 @@ impl TraceStore {
             |r| r.get(0),
         )?;
         conn.execute("UPDATE trace_health SET value=1 WHERE key='boot_dirty'", [])?;
-        conn.pragma_update(None, "user_version", 2)?;
+
         if dirty != 0 {
             conn.execute("INSERT OR IGNORE INTO trace_faults SELECT execution_id,run_id,'host_unflushed' FROM trace_runs WHERE status!='expired'",[])?;
         }
@@ -79,9 +79,10 @@ impl TraceStore {
                 conn.query_row("SELECT runs FROM trace_global WHERE id=1", [], |r| r.get(0))?;
             if count >= policy.max_runs as i64 {
                 // Bounded tombstones may be evicted; missing history must remain unknown.
-                conn.execute("DELETE FROM trace_faults WHERE (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status='expired' LIMIT 1)",[])?;
-                conn.execute("DELETE FROM trace_totals WHERE (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status='expired' LIMIT 1)",[])?;
-                let removed=conn.execute("DELETE FROM trace_runs WHERE rowid IN (SELECT rowid FROM trace_runs WHERE status='expired' LIMIT 1)",[])?;
+                conn.execute("DELETE FROM trace_faults WHERE (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status='expired' AND NOT EXISTS(SELECT 1 FROM trace_cleanup c WHERE c.execution_id=trace_runs.execution_id AND c.run_id=trace_runs.run_id AND c.state NOT IN ('purged','not_applicable')) LIMIT 1)",[])?;
+                conn.execute("DELETE FROM trace_totals WHERE (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status='expired' AND NOT EXISTS(SELECT 1 FROM trace_cleanup c WHERE c.execution_id=trace_runs.execution_id AND c.run_id=trace_runs.run_id AND c.state NOT IN ('purged','not_applicable')) LIMIT 1)",[])?;
+                let removed=conn.execute("DELETE FROM trace_runs WHERE rowid IN (SELECT rowid FROM trace_runs WHERE status='expired' AND NOT EXISTS(SELECT 1 FROM trace_cleanup c WHERE c.execution_id=trace_runs.execution_id AND c.run_id=trace_runs.run_id AND c.state NOT IN ('purged','not_applicable')) LIMIT 1)",[])?;
+                conn.execute("DELETE FROM trace_cleanup WHERE NOT EXISTS(SELECT 1 FROM trace_runs r WHERE r.execution_id=trace_cleanup.execution_id AND r.run_id=trace_cleanup.run_id)",[])?;
                 if removed == 0 {
                     return Err(Error::new(
                         "trace_capacity",
@@ -159,6 +160,7 @@ impl TraceStore {
                 "DELETE FROM trace_faults WHERE execution_id=?1 AND run_id=?2",
                 params![execution, run],
             )?;
+            tx.execute("UPDATE trace_cleanup SET state='pending',next_ms=0 WHERE execution_id=?1 AND run_id=?2 AND state='scheduled'",params![execution,run])?;
             tx.execute(
                 "UPDATE trace_runs SET status='expired' WHERE execution_id=?1 AND run_id=?2",
                 params![execution, run],
@@ -497,6 +499,35 @@ mod tests {
             .unwrap();
         assert!(p.issues.iter().any(|e| e.starts_with("host_unflushed:")));
         assert!(!p.complete);
+    }
+    #[test]
+    fn v2_migration_does_not_invent_missing_executor_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut p = policy();
+        p.retention_ms = 60000;
+        {
+            let s = TraceStore::open_with_policy(temp.path(), options(), Some(p.clone())).unwrap();
+            let t = s.session("e", "r", "work", 1);
+            t.emit("phase.started", &t.phase_span(), None, json!({}));
+            s.finish_observation().unwrap();
+        }
+        let c = Connection::open(temp.path().join("trace.sqlite")).unwrap();
+        c.execute_batch("DROP TABLE trace_cleanup; PRAGMA user_version=2;")
+            .unwrap();
+        drop(c);
+        let s = TraceStore::open_with_policy(temp.path(), options(), Some(p)).unwrap();
+        let p = s
+            .read(
+                "e",
+                &TraceQuery {
+                    limit: 100,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(p.source_cleanup.len(), 1);
+        assert_eq!(p.source_cleanup[0].state, "unbound");
+        assert!(p.source_cleanup[0].executor.is_none());
     }
     #[test]
     fn v1_migration_retains_events_as_legacy_without_fabricating_content_or_start() {

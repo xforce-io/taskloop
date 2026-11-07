@@ -33,6 +33,7 @@ impl RuntimeOptions {
 pub struct Runtime {
     pub(crate) inner: Arc<Inner>,
     task: Mutex<Option<JoinHandle<()>>>,
+    trace_task: Mutex<Option<JoinHandle<()>>>,
     shutdown_lock: tokio::sync::Mutex<()>,
 }
 pub(crate) struct Inner {
@@ -276,9 +277,18 @@ impl Runtime {
         let task = tokio::spawn(async move {
             worker_loop(work).await;
         });
+        let trace_task = if inner.trace.is_some() {
+            let gc = inner.clone();
+            Some(tokio::spawn(
+                async move { crate::trace::cleanup_loop(gc).await },
+            ))
+        } else {
+            None
+        };
         Ok(Self {
             inner,
             task: Mutex::new(Some(task)),
+            trace_task: Mutex::new(trace_task),
             shutdown_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -634,6 +644,11 @@ impl Runtime {
             token.cancel();
         }
         self.inner.notify.notify_waiters();
+        let trace_task = self.trace_task.lock().map_err(Error::io)?.take();
+        if let Some(trace_task) = trace_task {
+            trace_task.abort();
+            let _ = trace_task.await;
+        }
         let task = self.task.lock().map_err(Error::io)?.take();
         if let Some(mut task) = task {
             match tokio::time::timeout_at(deadline, &mut task).await {
@@ -685,6 +700,11 @@ impl Runtime {
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
+        if let Ok(mut task) = self.trace_task.lock()
+            && let Some(task) = task.take()
+        {
+            task.abort();
+        }
         self.inner.stop.cancel();
         if let Ok(tokens) = self.inner.handles.lock() {
             for t in tokens.values() {
