@@ -617,6 +617,8 @@ struct TailObserver {
     delay_all: bool,
     timeout_terminal: bool,
     panic_terminal: bool,
+    callback_delay_ms: u64,
+    fail_sequence: u64,
 }
 #[async_trait::async_trait]
 impl MilkieObserver for TailObserver {
@@ -624,10 +626,14 @@ impl MilkieObserver for TailObserver {
         ReplayObserver(Arc::new(tokio::sync::Notify::new())).options(inv)
     }
     async fn event(&self, _: &Invocation, e: Value) -> Result<()> {
+        if self.callback_delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(self.callback_delay_ms)).await;
+        }
         if self.delay_all {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        if e["kind"] == "execution.finished"
+        if ((self.fail_sequence == 0 && e["kind"] == "execution.finished")
+            || e["sequence"] == self.fail_sequence)
             && self.fail_terminal_once.swap(false, Ordering::SeqCst)
         {
             if self.timeout_terminal {
@@ -658,13 +664,23 @@ impl MilkieObserver for TailObserver {
 }
 #[tokio::test]
 async fn delayed_and_failed_tail_recovers_with_contiguous_ack_and_one_tool_effect() {
-    for (mode, callback_error, timeout_terminal, panic_terminal) in [
-        ("tail_normal", false, false, false),
-        ("tail_delayed", false, false, false),
-        ("tail_retry", false, false, false),
-        ("tail_normal", true, false, false),
-        ("tail_normal", true, true, false),
-        ("tail_normal", true, false, true),
+    for (
+        mode,
+        callback_error,
+        timeout_terminal,
+        panic_terminal,
+        callback_delay_ms,
+        fail_sequence,
+    ) in [
+        ("tail_normal", false, false, false, 0, 0),
+        ("tail_delayed", false, false, false, 0, 0),
+        ("tail_retry", false, false, false, 0, 0),
+        ("tail_normal", true, false, false, 0, 0),
+        ("tail_normal", true, true, false, 0, 0),
+        ("tail_normal", true, false, true, 0, 0),
+        ("tail_normal", true, false, false, 10, 0),
+        ("tail_normal", true, true, false, 10, 0),
+        ("tail_normal", true, false, false, 10, 50),
     ] {
         let f = Fixture::new(false);
         let executor = adapter(&f, mode);
@@ -672,6 +688,8 @@ async fn delayed_and_failed_tail_recovers_with_contiguous_ack_and_one_tool_effec
             fail_terminal_once: std::sync::atomic::AtomicBool::new(callback_error),
             timeout_terminal,
             panic_terminal,
+            callback_delay_ms,
+            fail_sequence,
             ..Default::default()
         });
         let spy = Arc::new(Spy::default());

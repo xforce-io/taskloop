@@ -1309,8 +1309,10 @@ async fn perform(
                     .failures
                     .insert(code);
             }
-            let settle_until =
-                tail_until.min(tokio::time::Instant::now() + Duration::from_millis(200));
+            // A queued event is not a failed delivery yet. Wait for the pending
+            // callbacks before spending another replay attempt; otherwise fast
+            // reads can exhaust every retry while a slow callback is still queued.
+            let settle_until = tail_until;
             while context.delivery_pending.load(Ordering::Acquire) > 0
                 && tokio::time::Instant::now() < settle_until
             {
