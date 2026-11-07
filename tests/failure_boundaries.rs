@@ -4,7 +4,7 @@ use common::*;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -396,13 +396,12 @@ impl Executor for BudgetConsumedExecutor {
         bridge: Arc<dyn ToolBridge>,
         _: CancellationToken,
     ) -> ExecutionOutcome {
-        bridge
+        let _ = bridge
             .call(
                 "artifact.write",
                 serde_json::json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}}),
             )
-            .await
-            .unwrap();
+            .await;
         // A ready future may finish synchronous cleanup after its timer expired.
         std::thread::sleep(Duration::from_millis(50));
         ExecutionOutcome::Completed {
@@ -451,7 +450,7 @@ async fn exhausted_budget_does_not_start_domain_gate() {
         0,
         "a domain gate started after execution consumed its budget"
     );
-    assert_eq!(s.status, Status::Blocked);
+    assert_eq!(s.status, Status::Failed);
     assert_eq!(s.error.unwrap().code, "limit_reached");
     rt.shutdown().await.unwrap();
 }
@@ -461,6 +460,8 @@ struct ConcurrentStopExecutor {
     enabled: Arc<AtomicBool>,
     stop_entered: Arc<tokio::sync::Notify>,
     barrier: Arc<tokio::sync::Barrier>,
+    arrivals: AtomicUsize,
+    confirmed: CancellationToken,
 }
 #[async_trait]
 impl Executor for ConcurrentStopExecutor {
@@ -484,7 +485,13 @@ impl Executor for ConcurrentStopExecutor {
             return StopState::Unknown;
         }
         self.stop_entered.notify_one();
-        self.barrier.wait().await;
+        // 首批三个确认用于制造并发提交；后续查询复用已确认状态。
+        if self.arrivals.fetch_add(1, Ordering::SeqCst) < 3 {
+            self.barrier.wait().await;
+            self.confirmed.cancel();
+        } else {
+            self.confirmed.cancelled().await;
+        }
         StopState::Confirmed
     }
 }
@@ -502,6 +509,8 @@ async fn concurrent_stop_confirmations_do_not_leak_internal_revision_conflicts()
             enabled: enabled.clone(),
             stop_entered: stop_entered.clone(),
             barrier: Arc::new(tokio::sync::Barrier::new(3)),
+            arrivals: AtomicUsize::new(0),
+            confirmed: CancellationToken::new(),
         }),
     );
     let rt = Runtime::open(

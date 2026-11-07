@@ -147,6 +147,7 @@ pub struct Invocation {
     pub signal_facts: Vec<SignalFact>,
     pub work_dir: PathBuf,
     pub timeout_ms: u64,
+    pub budget: Option<crate::RunBudgetSnapshot>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExecutionOutcome {
@@ -187,6 +188,9 @@ impl ExecutorCapabilities {
 #[async_trait]
 pub trait ToolBridge: Send + Sync {
     fn specs(&self) -> Vec<ToolSpec>;
+    fn budget_hint(&self) -> Option<crate::BudgetHint> {
+        None
+    }
     async fn call(&self, id: &str, args: Value) -> Result<Value>;
     async fn call_with_metadata(
         &self,
@@ -208,6 +212,9 @@ pub enum ObservationCleanup {
 }
 #[async_trait]
 pub trait Executor: Send + Sync {
+    fn budget_limits(&self) -> crate::ExecutorBudgetLimits {
+        crate::ExecutorBudgetLimits::default()
+    }
     fn identity(&self) -> Value {
         serde_json::json!({"implementation":std::any::type_name::<Self>()})
     }

@@ -247,7 +247,7 @@ impl CodexExecutor {
                     .map(move |path| format!("skill:{id}/{path}"))
             })
             .collect();
-        let request = json!({"instruction":inv.entry.instruction,"state_id":inv.state_id,"visit":inv.visit,"task_input":inv.stage_input,"flow_input":inv.inputs,"accepted_inputs":inv.artifacts,"signal_facts":inv.signal_facts,"required_output_schemas":inv.output_schemas,"tool_mapping":state.tool_names,"method_resources":resources,"attachments":inv.entry.attachments,"time_limit_ms":inv.timeout_ms,"completion":"Use artifact.write for all required output slots, then finish. This is not a request to execute any later entry."});
+        let request = json!({"instruction":inv.entry.instruction,"state_id":inv.state_id,"visit":inv.visit,"task_input":inv.stage_input,"flow_input":inv.inputs,"accepted_inputs":inv.artifacts,"signal_facts":inv.signal_facts,"required_output_schemas":inv.output_schemas,"tool_mapping":state.tool_names,"method_resources":resources,"attachments":inv.entry.attachments,"time_limit_ms":inv.timeout_ms,"execution_budget":inv.budget,"completion":"Use artifact.write for all required output slots, then finish. This is not a request to execute any later entry."});
         p.request(3,"turn/start",json!({"threadId":id,"effort":"high","input":[{"type":"text","text":request.to_string()}]}),&mut state).await?;
         loop {
             let message = p.next(cancel).await?;
@@ -271,6 +271,12 @@ impl CodexExecutor {
 }
 #[async_trait]
 impl Executor for CodexExecutor {
+    fn budget_limits(&self) -> crate::ExecutorBudgetLimits {
+        crate::ExecutorBudgetLimits {
+            max_frame_bytes: Some(8 * 1024 * 1024),
+            ..Default::default()
+        }
+    }
     fn capabilities(&self) -> ExecutorCapabilities {
         ExecutorCapabilities::MANAGED
     }

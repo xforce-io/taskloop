@@ -44,3 +44,9 @@ pub use trace_policy::{
     TraceContent, TraceContentFilter, TraceContentRef, TracePolicy, TracePolicySnapshot,
     TraceToolContent,
 };
+
+mod budget;
+pub use budget::{
+    BudgetHint, BudgetLimit, BudgetView, ExecutorBudgetLimits, ModelIterationSupport,
+    RunBudgetPolicy, RunBudgetSnapshot, TaskLimitSources,
+};

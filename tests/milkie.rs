@@ -183,6 +183,7 @@ fn invocation(f: &Fixture, hold: bool, timeout_ms: u64) -> Invocation {
         signal_facts: vec![],
         work_dir: work,
         timeout_ms,
+        budget: None,
     }
 }
 #[tokio::test]
