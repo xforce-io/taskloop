@@ -125,6 +125,13 @@ impl Executor for Observed {
             )
             .await
             .unwrap();
+        observer
+            .status(
+                &inv,
+                json!({"kind":"adapter.summary","adapter_delivery_failed":false}),
+            )
+            .await
+            .unwrap();
         ExecutionOutcome::Completed {
             usage: json!({"fixture":true}),
         }

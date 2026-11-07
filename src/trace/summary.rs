@@ -17,13 +17,14 @@ SELECT json_extract(?1,'$.execution_id'),json_extract(?1,'$.run_id'),json_extrac
  CASE WHEN json_extract(?1,'$.kind') IN ('phase.finished','execution.finished','tool.finished','check.finished') OR (json_extract(?1,'$.kind')='tool.delivery' AND json_extract(?1,'$.data.outcome')='delivered') THEN 1 ELSE 0 END
 WHERE json_extract(?1,'$.kind') IN ('phase.started','execution.started','tool.started','tool.requested','check.started','phase.finished','execution.finished','tool.finished','check.finished') OR (json_extract(?1,'$.kind')='tool.delivery' AND json_extract(?1,'$.data.outcome')='delivered')
 ON CONFLICT(execution_id,run_id,span_id) DO UPDATE SET kind=coalesce(excluded.kind,kind),ended=max(ended,excluded.ended);";
-const RUN: &str = "INSERT INTO trace_summary_runs(execution_id,run_id,expected,unavailable,adapter_failed,status)
+const RUN: &str = "INSERT INTO trace_summary_runs(execution_id,run_id,expected,unavailable,adapter_failed,status,finalized)
 VALUES(json_extract(?1,'$.execution_id'),json_extract(?1,'$.run_id'),
  CASE WHEN json_extract(?1,'$.kind')='executor.capabilities' AND json_extract(?1,'$.data.internal_observation')='available' THEN 1 ELSE 0 END,
  CASE WHEN json_extract(?1,'$.kind')='executor.capabilities' AND json_extract(?1,'$.data.internal_observation')='unavailable' THEN 1 ELSE 0 END,
  CASE WHEN json_extract(?1,'$.kind')='source.status' AND json_extract(?1,'$.data.adapter_delivery_failed')=1 THEN 1 ELSE 0 END,
- CASE WHEN json_extract(?1,'$.kind')='source.status' AND json_extract(?1,'$.data.kind') IS NULL THEN json_extract(?1,'$.data') END)
-ON CONFLICT(execution_id,run_id) DO UPDATE SET expected=max(expected,excluded.expected),unavailable=max(unavailable,excluded.unavailable),adapter_failed=max(adapter_failed,excluded.adapter_failed),status=coalesce(excluded.status,status);";
+ CASE WHEN json_extract(?1,'$.kind')='source.status' AND json_extract(?1,'$.data.kind') IS NULL THEN json_extract(?1,'$.data') END,
+ CASE WHEN json_extract(?1,'$.kind')='source.status' AND json_extract(?1,'$.data.kind')='adapter.summary' THEN 1 ELSE 0 END)
+ON CONFLICT(execution_id,run_id) DO UPDATE SET expected=max(expected,excluded.expected),unavailable=max(unavailable,excluded.unavailable),adapter_failed=max(adapter_failed,excluded.adapter_failed),status=coalesce(excluded.status,status),finalized=max(finalized,excluded.finalized);";
 
 pub(super) struct Summary {
     pub sources: Vec<TraceSource>,
@@ -40,7 +41,7 @@ impl TraceStore {
                 r.get(0)
             })
             .optional()?;
-        if version.is_some_and(|v| v > 1) {
+        if version.is_some_and(|v| v > 2) {
             return Err(Error::new(
                 "storage_incompatible",
                 "/trace",
@@ -48,15 +49,16 @@ impl TraceStore {
             ));
         }
         let present: i64=conn.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('trace_summary_sources','trace_summary_spans','trace_summary_runs','trace_summary_insert','trace_summary_delete')",[],|r|r.get(0))?;
-        if version == Some(1) && present == 5 {
+        if version == Some(2) && present == 5 {
             return Ok(());
         }
         conn.execute_batch("BEGIN IMMEDIATE;
           DROP TRIGGER IF EXISTS trace_summary_insert; DROP TRIGGER IF EXISTS trace_summary_delete;
+          DROP TABLE IF EXISTS trace_summary_sources; DROP TABLE IF EXISTS trace_summary_spans; DROP TABLE IF EXISTS trace_summary_runs;
           CREATE TABLE IF NOT EXISTS trace_summary_sources(execution_id TEXT NOT NULL,run_id TEXT NOT NULL,source_id TEXT NOT NULL,last_sequence INTEGER NOT NULL,observed INTEGER NOT NULL,terminal INTEGER NOT NULL,activity_sequence INTEGER,activity_timestamp TEXT,PRIMARY KEY(execution_id,run_id,source_id));
           CREATE TABLE IF NOT EXISTS trace_summary_spans(execution_id TEXT NOT NULL,run_id TEXT NOT NULL,span_id TEXT NOT NULL,kind TEXT,ended INTEGER NOT NULL,PRIMARY KEY(execution_id,run_id,span_id));
           CREATE INDEX IF NOT EXISTS trace_summary_open ON trace_summary_spans(execution_id,run_id) WHERE kind IS NOT NULL AND ended=0;
-          CREATE TABLE IF NOT EXISTS trace_summary_runs(execution_id TEXT NOT NULL,run_id TEXT NOT NULL,expected INTEGER NOT NULL,unavailable INTEGER NOT NULL,adapter_failed INTEGER NOT NULL,status TEXT,PRIMARY KEY(execution_id,run_id));
+          CREATE TABLE IF NOT EXISTS trace_summary_runs(execution_id TEXT NOT NULL,run_id TEXT NOT NULL,expected INTEGER NOT NULL,unavailable INTEGER NOT NULL,adapter_failed INTEGER NOT NULL,status TEXT,finalized INTEGER NOT NULL,PRIMARY KEY(execution_id,run_id));
           CREATE INDEX IF NOT EXISTS trace_run_read ON trace_events(execution_id,run_id,cursor);
           DELETE FROM trace_summary_sources; DELETE FROM trace_summary_spans; DELETE FROM trace_summary_runs;")?;
         let rebuilt = (|| -> Result<()> {
@@ -73,7 +75,7 @@ impl TraceStore {
                 DELETE FROM trace_summary_spans WHERE execution_id=OLD.execution_id AND run_id=OLD.run_id;
                 DELETE FROM trace_summary_runs WHERE execution_id=OLD.execution_id AND run_id=OLD.run_id;
               END;
-              DELETE FROM trace_summary_meta; INSERT INTO trace_summary_meta VALUES(1);",SOURCE.replace("?1","NEW.body"),SPAN.replace("?1","NEW.body"),RUN.replace("?1","NEW.body")))?;
+              DELETE FROM trace_summary_meta; INSERT INTO trace_summary_meta VALUES(2);",SOURCE.replace("?1","NEW.body"),SPAN.replace("?1","NEW.body"),RUN.replace("?1","NEW.body")))?;
             Ok(())
         })();
         match rebuilt {
@@ -121,7 +123,7 @@ impl TraceStore {
         let mut issues = BTreeSet::new();
         let mut expected = BTreeSet::new();
         let mut statuses = BTreeMap::<String, Value>::new();
-        let mut stmt=conn.prepare("SELECT run_id,expected,unavailable,adapter_failed,status FROM trace_summary_runs WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2)")?;
+        let mut stmt=conn.prepare("SELECT run_id,expected,unavailable,adapter_failed,status,finalized FROM trace_summary_runs WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2)")?;
         for row in stmt.query_map(params![execution, q.run_id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -129,9 +131,13 @@ impl TraceStore {
                 r.get::<_, bool>(2)?,
                 r.get::<_, bool>(3)?,
                 r.get::<_, Option<String>>(4)?,
+                r.get::<_, bool>(5)?,
             ))
         })? {
-            let (run, wanted, unavailable, failed, status) = row?;
+            let (run, wanted, unavailable, failed, status, finalized) = row?;
+            if wanted && !finalized {
+                issues.insert(format!("observation_pending:{run}"));
+            }
             if wanted {
                 expected.insert(run.clone());
             }

@@ -826,4 +826,78 @@ mod tests {
         let p = s.read("execution", &q()).unwrap();
         assert_eq!(p.sources[0].last_activity_timestamp_ms, Some(u64::MAX));
     }
+    #[test]
+    fn business_and_source_terminal_do_not_complete_an_unfinalized_collector() {
+        let (_temp, s) = store();
+        let host = s.session("execution", "run", "work", 1);
+        host.emit(
+            "executor.capabilities",
+            &host.phase_span(),
+            None,
+            json!({"internal_observation":"available"}),
+        );
+        s.record(event(1, "execution.started"));
+        s.record(event(2, "execution.finished"));
+        host.emit("phase.finished", &host.phase_span(), None, json!({}));
+        let before = s.read("execution", &q()).unwrap();
+        assert!(
+            !before.complete,
+            "unfinished observation collector was declared complete"
+        );
+        assert!(before.issues.iter().any(|i| i == "observation_pending:run"));
+        host.emit(
+            "source.status",
+            &host.phase_span(),
+            None,
+            json!({"kind":"adapter.summary", "adapter_delivery_failed":false}),
+        );
+        let after = s.read("execution", &q()).unwrap();
+        assert!(after.complete, "{after:#?}");
+        host.emit(
+            "source.status",
+            &host.phase_span(),
+            None,
+            json!({"kind":"adapter.summary", "adapter_delivery_failed":true}),
+        );
+        assert!(!s.read("execution", &q()).unwrap().complete);
+    }
+    #[test]
+    fn summary_v1_upgrade_preserves_pending_collector_without_inventing_completion() {
+        let (temp, s) = store();
+        let host = s.session("execution", "run", "work", 1);
+        host.emit(
+            "executor.capabilities",
+            &host.phase_span(),
+            None,
+            json!({"internal_observation":"available"}),
+        );
+        s.record(event(1, "execution.finished"));
+        host.emit("phase.finished", &host.phase_span(), None, json!({}));
+        let before = s.read("execution", &q()).unwrap();
+        let options = s.options.clone();
+        drop(host);
+        drop(s);
+        let conn = Connection::open(temp.path().join("trace.sqlite")).unwrap();
+        conn.execute_batch("DROP TRIGGER trace_summary_insert; DROP TRIGGER trace_summary_delete; DROP TABLE trace_summary_runs;
+            CREATE TABLE trace_summary_runs(execution_id TEXT NOT NULL,run_id TEXT NOT NULL,expected INTEGER NOT NULL,unavailable INTEGER NOT NULL,adapter_failed INTEGER NOT NULL,status TEXT,PRIMARY KEY(execution_id,run_id));
+            UPDATE trace_summary_meta SET version=1;").unwrap();
+        drop(conn);
+        let s = TraceStore::open(temp.path(), options).unwrap();
+        let after = s.read("execution", &q()).unwrap();
+        assert_eq!(
+            serde_json::to_value(before.events).unwrap(),
+            serde_json::to_value(after.events).unwrap()
+        );
+        assert!(!after.complete);
+        assert!(after.issues.iter().any(|i| i == "observation_pending:run"));
+        assert_eq!(
+            s.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT version FROM trace_summary_meta", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
 }

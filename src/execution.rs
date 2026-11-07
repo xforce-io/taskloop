@@ -211,6 +211,9 @@ pub trait Executor: Send + Sync {
         cancel: CancellationToken,
     ) -> ExecutionOutcome;
     /// Whether this adapter accepts the per-invocation Milkie observation contract.
+    /// When true, complete trace requires a final observer.status with
+    /// {"kind":"adapter.summary","adapter_delivery_failed":bool} after all callbacks.
+    /// Business completion alone must not certify the observation tail.
     fn internal_observation(&self) -> bool {
         false
     }
