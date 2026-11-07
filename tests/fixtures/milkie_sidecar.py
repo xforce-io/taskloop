@@ -44,14 +44,15 @@ for line in sys.stdin:
   if mode=='harness_exit':finish('failed');continue
   if payload['flow_input'].get('hold') or mode=='stop_unknown':continue
   if mode=='empty':finish();continue
-  pending=2 if mode=='duplicate' else 1
+  pending=2 if mode in ['duplicate','duplicate_wire'] else 1
   call(wrong=mode=='wrong_context')
   if mode=='duplicate':call(request_id='tool:2')
+  if mode=='duplicate_wire':call(call_id='different-call',request_id='tool:1')
  elif method=='execution.query':send({'id':m['id'],'result':r})
  elif method=='execution.cancel':
   finish('unknown' if mode=='stop_unknown' else 'cancelled',mode!='stop_unknown')
   send({'id':m['id'],'result':r})
   if mode=='late':call(call_id='late-call',request_id='tool:late')
- elif method=='tool.pending':send({'id':m['id'],'result':[]})
+ elif method=='tool.pending':send({'id':m['id'],'result':[{'callId':'unknown-effect'}] if mode=='pending_effect' else []})
  elif method=='observation.read':send({'id':m['id'],'result':{'events':[],'nextSequence':0,'status':{'complete':False}}})
  else:send({'id':m['id'],'error':{'code':-32601,'message':'unknown fixture method'}})

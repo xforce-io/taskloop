@@ -158,6 +158,10 @@ struct Owner {
     milkie_run_id: Option<String>,
     start_sent: bool,
     stopped: bool,
+    #[serde(default)]
+    native_stop_confirmed: bool,
+    #[serde(default)]
+    pending_tools: Option<usize>,
 }
 fn write_owner(root: &Path, owner: &Owner) -> Result<()> {
     let temp = root.join("owner.tmp");
@@ -340,6 +344,8 @@ impl Executor for MilkieExecutor {
             if result? && closed {
                 let mut owner = owner.clone();
                 owner.stopped = true;
+                owner.native_stop_confirmed = true;
+                owner.pending_tools = Some(0);
                 write_owner(&root, &owner)?;
                 Ok::<bool, Error>(true)
             } else {
@@ -524,6 +530,7 @@ impl Rpc {
             let mut jobs = JoinSet::new();
             let permits = Arc::new(Semaphore::new(32));
             let mut calls = BTreeSet::new();
+            let mut request_ids = BTreeSet::new();
             let mut line = Vec::new();
             loop {
                 let mut bounded =
@@ -569,7 +576,7 @@ impl Rpc {
                 match message["method"].as_str().unwrap_or("") {
                     "tool.call" => {
                         let id = message["id"].clone();
-                        if !id.is_string() && !id.is_number() { break; }
+                        if !(id.as_str().is_some_and(|v| !v.is_empty() && v.len() <= 128) || id.as_i64().is_some_and(|v| v.unsigned_abs() <= 9_007_199_254_740_991)) || !request_ids.insert(id.to_string()) { break; }
                         let key = message["params"]["callId"].as_str().unwrap_or("");
                         let permit = permits.clone().try_acquire_owned();
                         if key.is_empty() || !calls.insert(key.to_owned()) || permit.is_err() {
@@ -761,6 +768,8 @@ async fn perform(
         milkie_run_id: None,
         start_sent: false,
         stopped: false,
+        native_stop_confirmed: false,
+        pending_tools: None,
     };
     let setup = (|| {
         if crate::json::digest(&std::fs::read(&config.connection_file)?) != digest {
@@ -899,9 +908,11 @@ async fn perform(
             };
             if record["runId"] != source_run || record["contextId"] != source_context { return Err(failure("harness_protocol_invalid")); }
             if record.get("finishedAt").is_some() {
+                owner.native_stop_confirmed = record["stopped"] == true;
                 if record["stopped"] != true { return Err(failure("stop_unconfirmed")); }
                 let pending = rpc.request("tool.pending", json!({"contextId":source_context})).await?;
-                if !pending.as_array().is_some_and(Vec::is_empty) { return Err(failure("stop_unconfirmed")); }
+                owner.pending_tools = pending.as_array().map(Vec::len);
+                if owner.pending_tools != Some(0) { return Err(failure("effect_unconfirmed")); }
                 owner.stopped = true;
                 if observer.is_some() {
                     let mut after = 0;
@@ -937,8 +948,16 @@ async fn perform(
         };
     }
     if !stopped {
+        if owner.native_stop_confirmed {
+            context.offer(true,json!({"runId":owner.milkie_run_id,"kind":"adapter.termination","agentStopConfirmed":true,"pendingToolCalls":owner.pending_tools,"adapterStopConfirmed":false}));
+        }
         return ExecutionOutcome::StopUnknown {
-            message: "Milkie did not supply confirmed native stop evidence".into(),
+            message: if owner.native_stop_confirmed {
+                "Native stop confirmed; host tool effects remain unconfirmed"
+            } else {
+                "Milkie did not supply confirmed native stop evidence"
+            }
+            .into(),
         };
     }
     match result {

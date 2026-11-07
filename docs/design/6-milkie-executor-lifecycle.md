@@ -1,6 +1,6 @@
 # #6 Milkie Executor 与生命周期
 
-版本 v0.1；状态：既有 Epic 范围的技术契约，真实验收尚未完成。
+版本 v0.2；状态：既有 Epic 范围的技术契约，真实验收尚未完成。
 Issue：https://github.com/xforce-io/taskloop/issues/6 。L1: reuse + 整理，依据为本次会话确认 TaskLoop→Milkie→Harness、宿主保留工具授权/产物接纳及可靠停止，以及本票 S1/S2。L2: write；公共执行接口和跨进程所有权变化。采用用户规定的十三节结构，§11 对应 L1.8。
 
 ## 1 背景
@@ -62,7 +62,7 @@ MilkieExecutor 管理配置、Run 所有权和结果；统一 RPC 通道只处�
 
 ## 9 边界
 
-每个 TaskLoop Run 独立目录、Milkie context/run 对应关系和取消令牌。TaskLoop 仍验证 epoch 与授权；晚到工具即使原生请求关联正确也不能越过原 Bridge。取消不保证外部副作用回滚；未送达/pending 不自动重放。最终聊天不等于产物提交，trace 不参与业务接纳。
+每个 TaskLoop Run 独立目录、Milkie context/run 对应关系和取消令牌。TaskLoop 仍验证 epoch 与授权；晚到工具即使原生请求关联正确也不能越过原 Bridge。取消不保证外部副作用回滚；未送达/pending 不自动重放。原生 stopped 与未核对宿主效果分别记录：Agent 已停止但工具效果未知时继续阻塞，不伪称 Agent 未停止。最终聊天不等于产物提交，trace 不参与业务接纳。
 
 ## 10 迁移/兼容/回滚
 

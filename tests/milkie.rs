@@ -337,3 +337,33 @@ async fn blocked_observation_delivery_cannot_block_tools_or_native_stop() {
     assert!(matches!(result, ExecutionOutcome::Completed { .. }));
     assert_eq!(executor.stop_or_confirm(&id).await, StopState::Confirmed);
 }
+
+#[tokio::test]
+async fn native_stop_and_unconfirmed_host_effects_remain_distinct() {
+    let f = Fixture::new(false);
+    let executor = adapter(&f, "pending_effect");
+    let inv = invocation(&f, false, 3000);
+    let run = inv.run_id.clone();
+    let result = executor
+        .execute(inv, Arc::new(Spy::default()), CancellationToken::new())
+        .await;
+    assert!(
+        matches!(result,ExecutionOutcome::StopUnknown { ref message } if message.contains("Native stop confirmed") && message.contains("host tool effects"))
+    );
+    assert_eq!(executor.stop_or_confirm(&run).await, StopState::Unknown);
+}
+
+#[tokio::test]
+async fn reused_rpc_identity_cannot_cross_tool_results() {
+    let f = Fixture::new(false);
+    let executor = adapter(&f, "duplicate_wire");
+    let inv = invocation(&f, false, 3000);
+    let spy = Arc::new(Spy::default());
+    assert!(matches!(
+        executor
+            .execute(inv, spy.clone(), CancellationToken::new())
+            .await,
+        ExecutionOutcome::StopUnknown { .. }
+    ));
+    assert!(spy.0.load(Ordering::SeqCst) <= 1);
+}
