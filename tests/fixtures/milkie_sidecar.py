@@ -10,6 +10,8 @@ try:
  with open(file) as f:r=json.load(f)
 except FileNotFoundError:r={}
 pending=0
+tail_events=[]
+replay_attempts=0
 
 def save():
  with open(file,'w') as f:json.dump(r,f)
@@ -21,7 +23,7 @@ def send(m):
 def finish(status='succeeded',stopped=True):
  r.update(status=status,stopped=stopped,finishedAt=int(time.time()*1000));save()
 def call(call_id='host-call',request_id='tool:1',wrong=False):
- send({'id':request_id,'method':'tool.call','params':{'callId':call_id,'nativeCallId':'native-'+call_id,'name':r['tool'],'input':{'slot':'result','value':{'nonce':r['nonce']}},'runId':r['runId'],'contextId':'wrong' if wrong else r['contextId'],'traceparent':r.get('traceparent')}})
+ send({'id':request_id,'method':'tool.call','params':{'callId':call_id,'nativeCallId':'native-'+call_id,'name':r['tool'],'input':{'slot':'result','value':{'nonce':r['nonce']}},'runId':r['runId'],'contextId':'wrong' if wrong else r['contextId'],'traceparent':r.get('tooltrace',r.get('traceparent'))}})
 for line in sys.stdin:
  m=json.loads(line);method=m.get('method');params=m.get('params',{})
  if not method:
@@ -42,7 +44,13 @@ for line in sys.stdin:
   if os.environ.get('MILKIE_FIXTURE_STARTED_FILE'):
    with open(os.environ['MILKIE_FIXTURE_STARTED_FILE'],'a') as marker:marker.write(r['runId']+'\n')
   save();send({'id':m['id'],'result':{'runId':r['runId']}})
-  if r.get('traceparent'):send({'method':'execution.observation','params':{'version':1,'id':str(uuid.uuid4()),'runId':r['runId'],'contextId':r['contextId'],'traceId':r['traceparent'][3:35],'kind':'agent.activity','data':{'category':'message'}}})
+  if mode.startswith('tail_'):
+   total=600 if mode=='tail_overflow' else 126
+   parent=r['traceparent']
+   r['tooltrace']=parent[:36]+'2222222222222222'+parent[52:]
+   tail_events=[{'version':1,'id':f"{r['runId']}:{n}",'sourceId':r['runId'],'sequence':n,'runId':r['runId'],'contextId':r['contextId'],'traceId':parent[3:35],'timestamp':int(time.time()*1000),'monotonicNs':str(n),'spanId':'1111111111111111','parentSpanId':parent[36:52],'kind':'execution.started' if n==1 else 'execution.finished' if n==total else 'agent.activity','data':{'runtime':'fixture'} if n==1 else {'status':'succeeded','stopped':True} if n==total else {'category':'message'}} for n in range(1,total+1)]
+   for event in tail_events[:-1]:send({'method':'execution.observation','params':event})
+  elif r.get('traceparent'):send({'method':'execution.observation','params':{'version':1,'id':str(uuid.uuid4()),'runId':r['runId'],'contextId':r['contextId'],'traceId':r['traceparent'][3:35],'kind':'agent.activity','data':{'category':'message'}}})
   if mode=='crash':os._exit(7)
   if mode=='harness_exit':finish('failed');continue
   if payload['flow_input'].get('hold') or mode=='stop_unknown':continue
@@ -57,10 +65,20 @@ for line in sys.stdin:
   send({'id':m['id'],'result':r})
   if mode=='late':call(call_id='late-call',request_id='tool:late')
  elif method=='tool.pending':
-  send({'id':m['id'],'result':[{'callId':'unknown-effect'}] if mode=='pending_effect' else []})
-  if mode=='late_after_finish':
+  send({'id':m['id'],'result':[{'callId':'unknown-effect'}] if mode in ['pending_effect','tail_pending_effect'] else []})
+  if mode in ['late_after_finish','tail_pending_effect']:
    time.sleep(.05);call(call_id='after-finish',request_id='tool:after-finish')
  elif method=='observation.read':
+  if mode.startswith('tail_'):
+   replay_attempts+=1
+   if mode=='tail_delayed':time.sleep(.65)
+   if mode=='tail_retry' and replay_attempts==1:time.sleep(1.2)
+   if mode=='tail_timeout':time.sleep(5)
+   if mode=='tail_protocol':
+    send({'id':m['id'],'result':{'events':'invalid','nextSequence':0,'status':{'complete':True}}});continue
+   source=tail_events[:-1] if mode=='tail_missing' else tail_events
+   page=[e for e in source if e['sequence']>params.get('afterSequence',0)][:params.get('limit',100)]
+   send({'id':m['id'],'result':{'events':page,'nextSequence':page[-1]['sequence']if page else params.get('afterSequence',0),'status':{'complete':mode!='tail_missing','lastSequence':source[-1]['sequence'],'dropped':1 if mode=='tail_missing'else 0,'state':'incomplete'if mode=='tail_missing'else'finished'}}});continue
   if mode in ['slow_observation','late_after_finish']:
    with open(os.environ['MILKIE_FIXTURE_OBSERVATION_FILE'],'w') as marker:marker.write('native result and pending tools were checked')
    time.sleep(2)

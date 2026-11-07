@@ -472,7 +472,7 @@ async fn observation_replay_cannot_hold_an_already_stopped_execution_result() {
         Ok(v) => v.unwrap(),
         Err(_) => job.await.unwrap(),
     };
-    tokio::time::timeout(Duration::from_secs(4), summary.notified())
+    tokio::time::timeout(Duration::from_secs(8), summary.notified())
         .await
         .unwrap();
     assert!(matches!(result, ExecutionOutcome::Completed { .. }));
@@ -607,4 +607,287 @@ async fn retention_waits_for_observation_tail_after_business_completion() {
     let cleanup = executor.cleanup_observation(&run).await;
     executor.finish_observations().await.unwrap();
     assert_eq!(cleanup, ObservationCleanup::Deferred);
+}
+
+#[derive(Default)]
+struct TailObserver {
+    sequences: std::sync::Mutex<std::collections::BTreeSet<u64>>,
+    summary: std::sync::Mutex<Value>,
+    fail_terminal_once: std::sync::atomic::AtomicBool,
+    delay_all: bool,
+    timeout_terminal: bool,
+    panic_terminal: bool,
+}
+#[async_trait::async_trait]
+impl MilkieObserver for TailObserver {
+    fn options(&self, inv: &Invocation) -> MilkieObservationOptions {
+        ReplayObserver(Arc::new(tokio::sync::Notify::new())).options(inv)
+    }
+    async fn event(&self, _: &Invocation, e: Value) -> Result<()> {
+        if self.delay_all {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        if e["kind"] == "execution.finished"
+            && self.fail_terminal_once.swap(false, Ordering::SeqCst)
+        {
+            if self.timeout_terminal {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            assert!(!self.panic_terminal, "controlled observer panic");
+            return Err(Error::new(
+                "diagnostic_callback",
+                "/observer",
+                "controlled callback rejection",
+            ));
+        }
+        assert!(
+            self.sequences
+                .lock()
+                .unwrap()
+                .insert(e["sequence"].as_u64().unwrap()),
+            "duplicate observer effect"
+        );
+        Ok(())
+    }
+    async fn status(&self, _: &Invocation, s: Value) -> Result<()> {
+        if s["kind"] == "adapter.summary" {
+            *self.summary.lock().unwrap() = s;
+        }
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn delayed_and_failed_tail_recovers_with_contiguous_ack_and_one_tool_effect() {
+    for (mode, callback_error, timeout_terminal, panic_terminal) in [
+        ("tail_normal", false, false, false),
+        ("tail_delayed", false, false, false),
+        ("tail_retry", false, false, false),
+        ("tail_normal", true, false, false),
+        ("tail_normal", true, true, false),
+        ("tail_normal", true, false, true),
+    ] {
+        let f = Fixture::new(false);
+        let executor = adapter(&f, mode);
+        let observer = Arc::new(TailObserver {
+            fail_terminal_once: std::sync::atomic::AtomicBool::new(callback_error),
+            timeout_terminal,
+            panic_terminal,
+            ..Default::default()
+        });
+        let spy = Arc::new(Spy::default());
+        let result = executor
+            .execute_observed(
+                invocation(&f, false, 5000),
+                spy.clone(),
+                CancellationToken::new(),
+                Some(observer.clone()),
+            )
+            .await;
+        assert!(matches!(result, ExecutionOutcome::Completed { .. }));
+        tokio::time::timeout(Duration::from_secs(8), executor.finish_observations())
+            .await
+            .unwrap()
+            .unwrap();
+        let summary = observer.summary.lock().unwrap().clone();
+        assert_eq!(
+            summary["adapter_delivery_failed"], false,
+            "mode={mode}: {summary}"
+        );
+        assert_eq!(summary["delivered_sequence"], 126);
+        assert_eq!(summary["source_last_sequence"], 126);
+        assert_eq!(observer.sequences.lock().unwrap().len(), 126);
+        assert_eq!(spy.0.load(Ordering::SeqCst), 1);
+        if callback_error {
+            assert!(
+                summary["delivery_failures"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(if timeout_terminal {
+                        "callback_timeout"
+                    } else {
+                        "callback_error"
+                    }))
+            );
+        }
+        if mode == "tail_retry" {
+            assert!(summary["replay_attempts"].as_u64().unwrap() > 1);
+        }
+    }
+}
+#[tokio::test]
+async fn unrecoverable_tail_has_bounded_typed_diagnostics_without_changing_business() {
+    for (mode, reason) in [
+        ("tail_timeout", "replay_timeout"),
+        ("tail_protocol", "protocol_invalid"),
+        ("tail_missing", "source_incomplete"),
+        ("tail_overflow", "queue_overflow"),
+    ] {
+        let f = Fixture::new(false);
+        let executor = adapter(&f, mode);
+        let observer = Arc::new(TailObserver {
+            delay_all: mode == "tail_overflow",
+            ..Default::default()
+        });
+        let spy = Arc::new(Spy::default());
+        let start = std::time::Instant::now();
+        let result = executor
+            .execute_observed(
+                invocation(&f, false, 5000),
+                spy.clone(),
+                CancellationToken::new(),
+                Some(observer.clone()),
+            )
+            .await;
+        assert!(matches!(result, ExecutionOutcome::Completed { .. }));
+        tokio::time::timeout(Duration::from_secs(8), executor.finish_observations())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(start.elapsed() < Duration::from_secs(9));
+        let s = observer.summary.lock().unwrap().clone();
+        assert_eq!(s["adapter_delivery_failed"], true, "{mode}: {s}");
+        assert!(
+            s["delivery_failures"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(reason)),
+            "{mode}: {s}"
+        );
+        assert!(s["replay_attempts"].as_u64().unwrap() <= 3);
+        assert_eq!(spy.0.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn recovered_tail_is_complete_in_public_trace_with_export_and_closed_execution_span() {
+    let f = Fixture::new(false);
+    let executor = adapter(&f, "tail_delayed");
+    let mut bindings = f.bindings("pass");
+    bindings.executors.insert("test.executor".into(), executor);
+    let rt = Runtime::open_with_trace(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        bindings,
+        TraceOptions {
+            max_events_per_run: 1000,
+            max_bytes_per_run: 1048576,
+            source_max_events: 1000,
+            source_max_bytes: 262144,
+        },
+    )
+    .await
+    .unwrap();
+    let id = rt
+        .start(f.request("tail-public", "PUBLIC", false), &Caller::local())
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_for(&rt, &id, |s| s.status.terminal()).await.status,
+        Status::Completed
+    );
+    let mut page = None;
+    for _ in 0..300 {
+        let p = rt
+            .trace(
+                &id,
+                TraceQuery {
+                    limit: 1000,
+                    ..Default::default()
+                },
+                &Caller::local(),
+            )
+            .unwrap();
+        if p.complete {
+            page = Some(p);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let p = page.expect("recovered tail never became complete");
+    let native: Vec<_> = p
+        .events
+        .iter()
+        .filter(|e| e.event.source_id.starts_with("milkie:"))
+        .collect();
+    assert_eq!(native.len(), 126);
+    assert!(p.open_spans.is_empty());
+    assert!(p.issues.is_empty());
+    let s = p
+        .events
+        .iter()
+        .find(|e| e.event.kind == "source.status" && e.event.data["kind"] == "adapter.summary")
+        .unwrap();
+    assert_eq!(s.event.data["delivered_sequence"], 126);
+    assert_eq!(s.event.data["source_last_sequence"], 126);
+    let exported = rt
+        .export_trace(
+            &id,
+            TraceQuery {
+                limit: 1000,
+                ..Default::default()
+            },
+            &Caller::local(),
+        )
+        .unwrap();
+    let exported: TracePage = serde_json::from_slice(&exported).unwrap();
+    assert_eq!(
+        p.events.iter().map(|e| &e.event.id).collect::<Vec<_>>(),
+        exported
+            .events
+            .iter()
+            .map(|e| &e.event.id)
+            .collect::<Vec<_>>()
+    );
+    rt.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn rejected_prestart_handshake_does_not_invent_a_missing_native_tail() {
+    let f = Fixture::new(false);
+    let executor = adapter(&f, "bad_version");
+    let observer = Arc::new(TailObserver::default());
+    let spy = Arc::new(Spy::default());
+    let outcome = executor
+        .execute_observed(
+            invocation(&f, false, 5000),
+            spy.clone(),
+            CancellationToken::new(),
+            Some(observer.clone()),
+        )
+        .await;
+    assert!(matches!(outcome, ExecutionOutcome::Failed { .. }));
+    executor.finish_observations().await.unwrap();
+    let s = observer.summary.lock().unwrap();
+    assert_eq!(s["adapter_delivery_failed"], false);
+    assert_eq!(s["replay_attempts"], 0);
+    assert!(s["source_last_sequence"].is_null());
+    assert_eq!(spy.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn native_stop_with_unknown_host_effects_can_have_a_complete_tail_but_never_reopen_tools() {
+    let f = Fixture::new(false);
+    let executor = adapter(&f, "tail_pending_effect");
+    let observer = Arc::new(TailObserver::default());
+    let spy = Arc::new(Spy::default());
+    let inv = invocation(&f, false, 5000);
+    let run = inv.run_id.clone();
+    let result = executor
+        .execute_observed(
+            inv,
+            spy.clone(),
+            CancellationToken::new(),
+            Some(observer.clone()),
+        )
+        .await;
+    assert!(matches!(result, ExecutionOutcome::StopUnknown { .. }));
+    tokio::time::timeout(Duration::from_secs(8), executor.finish_observations())
+        .await
+        .unwrap()
+        .unwrap();
+    let summary = observer.summary.lock().unwrap().clone();
+    assert_eq!(summary["adapter_delivery_failed"], false, "{summary}");
+    assert_eq!(summary["delivered_sequence"], 126);
+    assert_eq!(spy.0.load(Ordering::SeqCst), 1);
+    assert_eq!(executor.stop_or_confirm(&run).await, StopState::Unknown);
 }

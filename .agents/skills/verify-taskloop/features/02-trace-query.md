@@ -20,3 +20,14 @@
 同类失败隔离另覆盖畸形观测尾页只报告不完整、不改业务接纳，以及原生停止证明后迟到宿主请求不得再产生效果。
 
 采集结束屏障：business_and_source_terminal_do_not_complete_an_unfinalized_collector核对业务/来源已终止仍observation_pending，adapter.summary成功后可完整、失败仍不完整；派生摘要v1迁移v2不补造结束证据。
+
+## Issue #15：尾部恢复与诊断
+
+事实源：docs/design/15-trace-tail-recovery-diagnostics.md v0.1 §11。
+
+- S1.A1：公共SDK受控源126条事件，650ms回放延迟后仍收到126条、ID唯一，执行Span闭合，查询/导出一致；业务结果须在观测收尾前交回。
+- S1.A2：首次回放失败、回调失败/超时/异常可在总窗口内恢复，交付确认序号不跳过失败；成功事件不重复交付，宿主工具效果仅一次。
+- S2.A1：回放超时、回调超时、队列溢出、源缺失/协议异常有分项原因且有界结束。关闭未确认的完整性判定用Unit验证，不能称为真实OS关闭失败复现；既有进程停止测试保留实际停止与未知的区别。
+- S2.A2：执行实际Milkie Sidecar的受控原生CLI契约测试，核对公开Trace及取消/保留边界；另由Inquiry #5当前真实Harness研究证明新链路消费者关系。受控原生CLI不是真实模型成功证据。
+
+入口：`cargo test --locked --offline --test milkie --test trace --test trace_policy`；Unit `cargo test --locked --offline --lib`；实际Sidecar按features/01已规定的MILKIE_NODE/MILKIE_CLI运行显式ignored目标。冻结候选另留SHA/依赖与完整原始输出。历史650ms失败、修复后对照与回调重试保持分开。

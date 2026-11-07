@@ -22,6 +22,43 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
+
+pub(crate) const OBSERVATION_TAIL_MS: u32 = 3000;
+const OBSERVATION_ATTEMPTS: u32 = 3;
+
+#[derive(Default)]
+struct ObservationProgress {
+    // Keep a fingerprint while queued or acknowledged. Failed delivery removes it
+    // so source replay can retry, without duplicating still-pending callbacks.
+    events: BTreeMap<String, String>,
+    acknowledged: u64,
+    ahead: BTreeSet<u64>,
+    source_last: Option<u64>,
+    terminal_sequence: Option<u64>,
+    source_complete: bool,
+    replay_attempts: u32,
+    failures: BTreeSet<&'static str>,
+}
+impl ObservationProgress {
+    fn acknowledged(&mut self, sequence: u64) {
+        if sequence > self.acknowledged {
+            self.ahead.insert(sequence);
+        }
+        while self.ahead.remove(&(self.acknowledged + 1)) {
+            self.acknowledged += 1;
+        }
+    }
+    fn caught_up(&self) -> bool {
+        self.source_complete
+            && self.terminal_sequence == self.source_last
+            && self
+                .source_last
+                .is_some_and(|last| last > 0 && self.acknowledged == last)
+    }
+    fn complete(&self, source_expected: bool, bad: bool, pending: u64, closed: bool) -> bool {
+        closed && !bad && pending == 0 && (!source_expected || self.caught_up())
+    }
+}
 const RPC_WAIT: Duration = Duration::from_secs(12);
 const STOP_WAIT: Duration = Duration::from_secs(15);
 const MAX_FRAME: usize = 8 * 1024 * 1024;
@@ -111,6 +148,9 @@ pub struct MilkieObservationOptions {
 #[async_trait]
 pub trait MilkieObserver: Send + Sync {
     fn options(&self, invocation: &Invocation) -> MilkieObservationOptions;
+    /// Failed or timed-out observations may be retried with the same immutable
+    /// event ID. Implementations must make observation storage idempotent by ID;
+    /// this callback must not perform host business tools or advance workflow.
     async fn event(&self, invocation: &Invocation, event: Value) -> Result<()>;
     async fn status(&self, _invocation: &Invocation, _status: Value) -> Result<()> {
         Ok(())
@@ -500,14 +540,36 @@ struct Context {
     delivery: Option<mpsc::Sender<(bool, Value)>>,
     observation_bad: Arc<AtomicBool>,
     delivery_pending: Arc<AtomicU64>,
+    progress: Arc<Mutex<ObservationProgress>>,
 }
 impl Context {
     fn offer(&self, status: bool, value: Value) {
         if let Some(delivery) = &self.delivery {
+            let id = (!status)
+                .then(|| value["id"].as_str())
+                .flatten()
+                .map(str::to_owned);
+            if let Some(id) = &id {
+                let fingerprint =
+                    crate::json::digest(&serde_json::to_vec(&value).unwrap_or_default());
+                let mut p = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(old) = p.events.get(id) {
+                    if old != &fingerprint {
+                        p.failures.insert("protocol_invalid");
+                        self.observation_bad.store(true, Ordering::Release);
+                    }
+                    return;
+                }
+                p.events.insert(id.clone(), fingerprint);
+            }
             self.delivery_pending.fetch_add(1, Ordering::AcqRel);
             if delivery.try_send((status, value)).is_err() {
                 self.delivery_pending.fetch_sub(1, Ordering::AcqRel);
-                self.observation_bad.store(true, Ordering::Release);
+                let mut p = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(id) = id {
+                    p.events.remove(&id);
+                }
+                p.failures.insert("queue_overflow");
             }
         }
     }
@@ -527,6 +589,11 @@ impl Context {
                 .is_some_and(|trace| event["traceId"] != *trace)
         {
             self.observation_bad.store(true, Ordering::Release);
+            self.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .failures
+                .insert("protocol_invalid");
             return;
         }
         self.offer(false, event);
@@ -540,6 +607,11 @@ impl Context {
             .is_some_and(|(run, _)| value["runId"] == *run)
         {
             self.observation_bad.store(true, Ordering::Release);
+            self.progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .failures
+                .insert("protocol_invalid");
             return;
         }
         self.offer(true, value);
@@ -608,6 +680,19 @@ impl Context {
 }
 
 type Pending = Arc<Mutex<BTreeMap<u64, (String, oneshot::Sender<Value>)>>>;
+struct PendingRequest {
+    pending: Pending,
+    id: u64,
+}
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
+
 type Writer = Arc<tokio::sync::Mutex<Option<ChildStdin>>>;
 struct Rpc {
     child: Child,
@@ -770,6 +855,10 @@ impl Rpc {
             }
             p.insert(id, (method.to_owned(), tx));
         }
+        let _request = PendingRequest {
+            pending: self.pending.clone(),
+            id,
+        };
         let result = async {
             send(
                 &self.writer,
@@ -960,45 +1049,61 @@ async fn perform(
     let observation_options = observer.as_ref().map(|observer| observer.options(&inv));
     let observation_bad = Arc::new(AtomicBool::new(false));
     let delivery_pending = Arc::new(AtomicU64::new(0));
+    let progress = Arc::new(Mutex::new(ObservationProgress::default()));
     let delivery = observer.as_ref().map(|observer| {
         let (tx, mut rx) = mpsc::channel::<(bool, Value)>(256);
-        let (observer, invocation, bad, pending) = (
+        let (observer, invocation, bad, pending, progress) = (
             observer.clone(),
             inv.clone(),
             observation_bad.clone(),
             delivery_pending.clone(),
+            progress.clone(),
         );
         let task = tokio::spawn(async move {
-            let mut seen = BTreeMap::new();
             while let Some((status, mut value)) = rx.recv().await {
                 let id = value["id"].as_str().map(str::to_owned);
-                let fingerprint =
-                    crate::json::digest(&serde_json::to_vec(&value).unwrap_or_default());
-                if !status && let Some(old) = id.as_ref().and_then(|id| seen.get(id)) {
-                    if old != &fingerprint {
-                        bad.store(true, Ordering::Release);
-                    }
-                    pending.fetch_sub(1, Ordering::AcqRel);
-                    continue;
-                }
+                let sequence = value["sequence"].as_u64();
+                let terminal = value["kind"] == "execution.finished";
                 if status {
                     value["adapter_delivery_failed"] = json!(bad.load(Ordering::Acquire));
                 }
-                let delivered = tokio::time::timeout(Duration::from_millis(200), async {
-                    if status {
-                        observer.status(&invocation, value).await
-                    } else {
-                        observer.event(&invocation, value).await
+                let result = tokio::time::timeout(
+                    Duration::from_millis(200),
+                    std::panic::AssertUnwindSafe(async {
+                        if status {
+                            observer.status(&invocation, value).await
+                        } else {
+                            observer.event(&invocation, value).await
+                        }
+                    })
+                    .catch_unwind(),
+                )
+                .await;
+                let mut p = progress.lock().unwrap_or_else(|e| e.into_inner());
+                match result {
+                    Ok(Ok(Ok(()))) => {
+                        if !status {
+                            if let Some(sequence) = sequence.filter(|s| *s > 0) {
+                                p.acknowledged(sequence);
+                                if terminal {
+                                    p.terminal_sequence = Some(sequence);
+                                }
+                            } else {
+                                p.failures.insert("protocol_invalid");
+                                bad.store(true, Ordering::Release);
+                            }
+                        }
                     }
-                })
-                .await
-                .is_ok_and(|result| result.is_ok());
-                if delivered {
-                    if let Some(id) = id {
-                        seen.insert(id, fingerprint);
+                    other => {
+                        p.failures.insert(if other.is_err() {
+                            "callback_timeout"
+                        } else {
+                            "callback_error"
+                        });
+                        if let Some(id) = id {
+                            p.events.remove(&id);
+                        }
                     }
-                } else {
-                    bad.store(true, Ordering::Release);
                 }
                 pending.fetch_sub(1, Ordering::AcqRel);
             }
@@ -1020,6 +1125,7 @@ async fn perform(
         delivery,
         observation_bad,
         delivery_pending,
+        progress,
     });
     let mut rpc = match Rpc::spawn(&config, &root, Some(context.clone())).await {
         Ok(rpc) => rpc,
@@ -1090,15 +1196,20 @@ async fn perform(
             tokio::select! { _ = control.cancel.cancelled(), if !cancel_sent => {}, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
         }
     }.await;
-    if owner.stopped {
+    if owner.native_stop_confirmed {
         context.cancel.cancel();
     }
     // A confirmed native stop and empty host-effect ledger are business facts.
     // Observation replay/delivery is a separate tail, never part of that result's deadline.
-    let early = if observer.is_some() && owner.stopped {
+    let early = if observer.is_some() && owner.native_stop_confirmed {
         let saved = write_owner(&root, &owner).is_ok();
-        control.stopped.store(true, Ordering::Release);
-        let mut outcome = if saved {
+        control.stopped.store(owner.stopped, Ordering::Release);
+        let mut outcome = if !owner.stopped {
+            context.offer(true, json!({"runId":owner.milkie_run_id,"kind":"adapter.termination","agentStopConfirmed":true,"pendingToolCalls":owner.pending_tools,"adapterStopConfirmed":false}));
+            ExecutionOutcome::StopUnknown {
+                message: "Native stop confirmed; host tool effects remain unconfirmed".into(),
+            }
+        } else if saved {
             result
                 .as_ref()
                 .cloned()
@@ -1121,44 +1232,120 @@ async fn perform(
     } else {
         None
     };
+    let tail_until =
+        tokio::time::Instant::now() + Duration::from_millis(OBSERVATION_TAIL_MS.into());
     if observer.is_some()
-        && owner.stopped
+        && owner.native_stop_confirmed
         && let Some(source_run) = &owner.milkie_run_id
     {
-        let replay = async {
-            let mut after = 0;
-            loop {
-                let page = rpc
-                    .request(
-                        "observation.read",
-                        json!({"runId":source_run,"afterSequence":after,"limit":100}),
-                    )
-                    .await?;
-                let events = page["events"]
-                    .as_array()
-                    .ok_or_else(|| failure("harness_protocol_invalid"))?;
-                for event in events {
-                    context.event(event.clone());
-                }
-                let mut status = page["status"].clone();
-                status["runId"] = json!(source_run);
-                context.status(status);
-                if page["status"]["complete"] != true {
-                    context.observation_bad.store(true, Ordering::Release);
-                }
-                let next = page["nextSequence"].as_u64().unwrap_or(after);
-                if events.len() < 100 || next <= after {
-                    break;
-                }
-                after = next;
+        for attempt in 0..OBSERVATION_ATTEMPTS {
+            if tokio::time::Instant::now() >= tail_until {
+                break;
             }
-            Ok::<(), Error>(())
-        };
-        if !matches!(
-            tokio::time::timeout(Duration::from_millis(500), replay).await,
-            Ok(Ok(()))
-        ) {
-            context.observation_bad.store(true, Ordering::Release);
+            context
+                .progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .replay_attempts += 1;
+            let replay = async {
+                let mut after = context
+                    .progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .acknowledged;
+                loop {
+                    let page = rpc
+                        .request(
+                            "observation.read",
+                            json!({"runId":source_run,"afterSequence":after,"limit":100}),
+                        )
+                        .await?;
+                    let events = page["events"]
+                        .as_array()
+                        .ok_or_else(|| failure("harness_protocol_invalid"))?;
+                    if events.len() > 100 {
+                        return Err(failure("harness_protocol_invalid"));
+                    }
+                    for event in events {
+                        context.event(event.clone());
+                    }
+                    {
+                        let mut p = context.progress.lock().unwrap_or_else(|e| e.into_inner());
+                        p.source_last = page["status"]["lastSequence"].as_u64();
+                        p.source_complete = page["status"]["complete"] == true;
+                        if !p.source_complete {
+                            p.failures.insert("source_incomplete");
+                        }
+                    }
+                    let mut status = page["status"].clone();
+                    status["runId"] = json!(source_run);
+                    context.status(status);
+                    let next = page["nextSequence"]
+                        .as_u64()
+                        .ok_or_else(|| failure("harness_protocol_invalid"))?;
+                    if !events.is_empty() && next <= after {
+                        return Err(failure("harness_protocol_invalid"));
+                    }
+                    if events.len() < 100 {
+                        break;
+                    }
+                    after = next;
+                }
+                Ok::<(), Error>(())
+            };
+            let attempt_until =
+                tail_until.min(tokio::time::Instant::now() + Duration::from_millis(1000));
+            let result = tokio::time::timeout_at(attempt_until, replay).await;
+            if !matches!(result, Ok(Ok(()))) {
+                let code = match &result {
+                    Err(_) => "replay_timeout",
+                    Ok(Err(e)) if e.code == "harness_protocol_invalid" => "protocol_invalid",
+                    _ => "replay_error",
+                };
+                context
+                    .progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .failures
+                    .insert(code);
+            }
+            let settle_until =
+                tail_until.min(tokio::time::Instant::now() + Duration::from_millis(200));
+            while context.delivery_pending.load(Ordering::Acquire) > 0
+                && tokio::time::Instant::now() < settle_until
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            if context.delivery_pending.load(Ordering::Acquire) == 0
+                && context
+                    .progress
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .caught_up()
+            {
+                break;
+            }
+            if attempt + 1 < OBSERVATION_ATTEMPTS {
+                tokio::time::sleep_until(
+                    tail_until.min(
+                        tokio::time::Instant::now() + Duration::from_millis(50 * (1 << attempt)),
+                    ),
+                )
+                .await;
+            }
+        }
+        if !context
+            .progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .caught_up()
+        {
+            context
+                .progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .failures
+                .insert("tail_timeout");
         }
     }
     let closed = rpc.close().await;
@@ -1204,21 +1391,110 @@ async fn perform(
     };
     // Startup/protocol failures also publish before diagnostic callbacks can delay them.
     control.finish(outcome.clone());
-    let drain_until = tokio::time::Instant::now() + Duration::from_millis(500);
+    let drain_until = tail_until;
     while context.delivery_pending.load(Ordering::Acquire) > 0
         && tokio::time::Instant::now() < drain_until
     {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    let observation_incomplete = !closed
-        || context.observation_bad.load(Ordering::Acquire)
-        || context.delivery_pending.load(Ordering::Acquire) > 0;
+    if !closed {
+        context
+            .progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failures
+            .insert("shutdown_unconfirmed");
+    }
+    if context.delivery_pending.load(Ordering::Acquire) > 0 {
+        context
+            .progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failures
+            .insert("tail_timeout");
+    }
+    let observation_incomplete = !context
+        .progress
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .complete(
+            owner.start_sent,
+            context.observation_bad.load(Ordering::Acquire),
+            context.delivery_pending.load(Ordering::Acquire),
+            closed,
+        );
     if let Some(task) = delivery_task {
         task.abort();
         let _ = task.await;
     }
     if let Some(observer) = &observer {
-        let _=tokio::time::timeout(Duration::from_millis(200),observer.status(&inv,json!({"runId":owner.milkie_run_id,"kind":"adapter.summary","adapter_delivery_failed":observation_incomplete}))).await;
+        let summary = {
+            let p = context.progress.lock().unwrap_or_else(|e| e.into_inner());
+            json!({"runId":owner.milkie_run_id,"kind":"adapter.summary","adapter_delivery_failed":observation_incomplete,
+                "delivery_failures":p.failures,"replay_attempts":p.replay_attempts,"source_last_sequence":p.source_last,
+                "delivered_sequence":p.acknowledged})
+        };
+        let _ =
+            tokio::time::timeout(Duration::from_millis(200), observer.status(&inv, summary)).await;
     }
     outcome
+}
+
+#[cfg(test)]
+mod observation_progress_tests {
+    use super::*;
+    #[test]
+    fn acknowledged_progress_cannot_skip_a_failed_event_or_invent_terminal_delivery() {
+        let mut p = ObservationProgress {
+            source_complete: true,
+            source_last: Some(126),
+            ..Default::default()
+        };
+        p.acknowledged(1);
+        for n in 3..=126 {
+            p.acknowledged(n);
+        }
+        p.terminal_sequence = Some(126);
+        assert_eq!(p.acknowledged, 1);
+        assert!(!p.caught_up());
+        p.acknowledged(2);
+        assert_eq!(p.acknowledged, 126);
+        assert!(p.caught_up());
+        p.terminal_sequence = None;
+        assert!(!p.caught_up());
+    }
+    #[test]
+    fn complete_delivery_does_not_imply_transport_shutdown_or_ignore_pending_callbacks() {
+        let p = ObservationProgress {
+            acknowledged: 2,
+            terminal_sequence: Some(2),
+            source_last: Some(2),
+            source_complete: true,
+            ..Default::default()
+        };
+        assert!(p.complete(true, false, 0, true));
+        assert!(!p.complete(true, false, 0, false));
+        assert!(!p.complete(true, false, 1, true));
+        assert!(!p.complete(true, true, 0, true));
+        assert!(ObservationProgress::default().complete(false, false, 0, true));
+    }
+    #[tokio::test]
+    async fn cancelled_rpc_wait_removes_its_pending_slot() {
+        let pending: Pending = Arc::default();
+        let (tx, _rx) = oneshot::channel();
+        pending
+            .lock()
+            .unwrap()
+            .insert(1, ("observation.read".into(), tx));
+        let result = tokio::time::timeout(Duration::from_millis(1), async {
+            let _guard = PendingRequest {
+                pending: pending.clone(),
+                id: 1,
+            };
+            std::future::pending::<()>().await;
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(pending.lock().unwrap().is_empty());
+    }
 }
