@@ -376,6 +376,8 @@ struct CleanupExecutor {
     block: bool,
     startup_delay_ms: u64,
     not_started_no_source: bool,
+    hold: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Notify,
 }
 #[async_trait::async_trait]
 impl Executor for CleanupExecutor {
@@ -400,6 +402,9 @@ impl Executor for CleanupExecutor {
             )
             .await
             .unwrap();
+        if self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+            self.release.notified().await;
+        }
         ExecutionOutcome::Completed {
             usage: json!({"fixture":true}),
         }
@@ -429,6 +434,8 @@ fn cleanup_executor(label: &'static str) -> Arc<CleanupExecutor> {
         block: false,
         startup_delay_ms: 0,
         not_started_no_source: false,
+        hold: std::sync::atomic::AtomicBool::new(false),
+        release: tokio::sync::Notify::new(),
     })
 }
 async fn open_cleanup(f: &Fixture, executor: Arc<CleanupExecutor>) -> Runtime {
@@ -489,13 +496,27 @@ async fn pending_source_cleanup_survives_restart_and_is_not_evicted_for_capacity
     );
     executor.allow.store(true, Ordering::SeqCst);
     cleanup_state(&rt, &a, "purged").await;
-    let c = completed(&rt, &f, "c").await;
-    assert!(
-        !rt.trace(&c, q(), &Caller::local())
+    // Keep C active while checking capacity; completed Trace is intentionally
+    // eligible for expiry after only 150ms on this fixture's retention policy.
+    executor.hold.store(true, Ordering::SeqCst);
+    let c = rt
+        .start(f.request("c", "c", false), &Caller::local())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while rt
+            .trace(&c, q(), &Caller::local())
             .unwrap()
             .events
             .is_empty()
-    );
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("purged source must release trace capacity for active C");
+    executor.release.notify_one();
+    wait_for(&rt, &c, |s| s.status.terminal()).await;
     assert_eq!(executor.calls.load(Ordering::SeqCst), 3);
     rt.shutdown().await.unwrap();
 }
