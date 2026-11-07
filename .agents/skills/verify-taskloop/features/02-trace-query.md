@@ -1,6 +1,6 @@
 # 统一 Trace 查询与导出
 
-主要覆盖 #7 S1/S2，详细验收为 `docs/design/7-unified-trace-query-export.md` v0.2 §11 S1.A1/S1.A2/S2.A1/S2.A2。
+主要覆盖 #7 S1/S2，详细验收为 `docs/design/7-unified-trace-query-export.md` v0.3 §11 S1.A1/S1.A2/S2.A1/S2.A2。
 
 公开入口：Runtime::open_with_trace、Runtime::trace、Runtime::export_trace；不是读取 SQLite。
 
@@ -18,3 +18,5 @@
 新增回归：tests/milkie.rs的observation_replay_cannot_hold_an_already_stopped_execution_result及observation_only_wait_cannot_turn_a_completed_runtime_phase_into_timeout，前者已在原e7ae5a1复现后修复；后者补充公共Runtime阶段期限验证。src/trace.rs的固定SQLite指令预算测试验证一万条历史后的单条尾页不全量读正文，另覆盖旧事件摘要回填/整Run退役隔离/原始时间范围。边界不能仅靠计时快慢判定。
 
 同类失败隔离另覆盖畸形观测尾页只报告不完整、不改业务接纳，以及原生停止证明后迟到宿主请求不得再产生效果。
+
+采集结束屏障：business_and_source_terminal_do_not_complete_an_unfinalized_collector核对业务/来源已终止仍observation_pending，adapter.summary成功后可完整、失败仍不完整；派生摘要v1迁移v2不补造结束证据。
