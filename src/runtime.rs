@@ -244,7 +244,7 @@ impl Runtime {
             validate(d, &bindings)?;
         }
         let fingerprint = digest(&serde_json::to_vec(
-            &json!({"host_binary":digest(&std::fs::read(std::env::current_exe()?)?),"configuration_version":bindings.configuration_version,"entry_budgets":options.entry_budgets,"host_tool_limit":options.max_tool_calls_per_run,"host_candidate_limit":options.max_candidate_bytes,"tools":bindings.tools.iter().map(|(id,t)|(id,t.spec())).collect::<BTreeMap<_,_>>(),"executors":bindings.executors.iter().map(|(id,e)|(id,e.identity())).collect::<BTreeMap<_,_>>(),"gates":bindings.gates.keys().collect::<Vec<_>>(),"grants":bindings.grants}),
+            &json!({"host_binary":digest(&std::fs::read(std::env::current_exe()?)?),"configuration_version":bindings.configuration_version,"entry_budgets":options.entry_budgets,"host_tool_limit":options.max_tool_calls_per_run,"host_candidate_limit":options.max_candidate_bytes,"tools":bindings.tools.iter().map(|(id,t)|(id,t.spec())).collect::<BTreeMap<_,_>>(),"executors":bindings.executors.iter().map(|(id,e)|(id,e.identity())).collect::<BTreeMap<_,_>>(),"executor_budget_limits":bindings.executors.iter().map(|(id,e)|(id,e.budget_limits())).collect::<BTreeMap<_,_>>(),"gates":bindings.gates.keys().collect::<Vec<_>>(),"grants":bindings.grants}),
         )?);
         let store = Store::open(&options.store_dir)?;
         for d in &definitions {

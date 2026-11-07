@@ -1,6 +1,6 @@
 # 执行预算与受控收尾
 
-主要覆盖 #9 S1/S2；标准为 `docs/design/9-explicit-execution-budget-finalization.md` v0.1 §11。
+主要覆盖 #9 S1/S2；标准为 `docs/design/9-explicit-execution-budget-finalization.md` v0.3 §11。
 
 公开入口：RuntimeOptions.entry_budgets、Runtime::budgets、Invocation、ToolBridge、MilkieExecutor。
 
@@ -17,3 +17,5 @@
 - `MILKIE_NODE=<固定绝对路径> MILKIE_CLI=<Milkie 固定候选 dist/cli/index.js> cargo test --locked --offline --test milkie_actual_sidecar -- --ignored`：实际 Sidecar 完成合法提交/取消；迭代用确定性 Pi API 执行实际生成的钩子，核对2次请求、0次宿主工具、model_iteration_limit。原生 Pi、模型服务和真实账号在 Epic 另验，不能替代。
 - `cargo run --locked --offline --manifest-path tests/consumer/Cargo.toml`：独立 crate 仅通过公共 API 配置并读取预算、产物和 trace。
 - 回归执行、存储错误、停止未知和 trace：`cargo test --locked --offline`。不运行 ignored 真实服务测试也不能将其记为已通过。
+
+绑定恢复补充：executor_budget_capability_changes_cannot_resume_a_locked_waiting_instance从Waiting关闭/重开后经公开signal进入后续Run，对照相同配置继续成功，分别仅改变时间上限/迭代支持/迭代上限/帧上限均binding_changed且不启动新执行。原dc0f524先复现时间能力改变仍Completed，再修复摘要；其它三种变化是同类边界补验。

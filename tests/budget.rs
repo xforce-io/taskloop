@@ -623,3 +623,140 @@ async fn gate_panic_does_not_claim_that_a_time_budget_was_exhausted() {
     );
     rt.shutdown().await.unwrap();
 }
+
+struct ConfiguredBudgetExecutor {
+    limits: ExecutorBudgetLimits,
+    starts: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl Executor for ConfiguredBudgetExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    fn budget_limits(&self) -> ExecutorBudgetLimits {
+        self.limits.clone()
+    }
+    async fn execute(
+        &self,
+        inv: Invocation,
+        tools: Arc<dyn ToolBridge>,
+        _: CancellationToken,
+    ) -> ExecutionOutcome {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        tools
+            .call(
+                "artifact.write",
+                json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}}),
+            )
+            .await
+            .unwrap();
+        ExecutionOutcome::Completed { usage: json!({}) }
+    }
+    async fn stop_or_confirm(&self, _: &str) -> StopState {
+        StopState::Confirmed
+    }
+}
+#[tokio::test]
+async fn executor_budget_capability_changes_cannot_resume_a_locked_waiting_instance() {
+    for change in [
+        "same",
+        "run_time",
+        "model_support",
+        "iteration_max",
+        "frame_max",
+    ] {
+        let mut f = Fixture::new(true);
+        let path = f.root.path().join("flow.json");
+        let mut bundle: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        bundle["flow"]["states"]["await"]["signals"]["resume"]["target"] = json!("again");
+        bundle["flow"]["states"]["again"] = json!({"kind":"work","entry":"test.work","accepted":{"ready":"done"},"rejected":"failed","failed":"failed"});
+        std::fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        f.definition = Definition::load(
+            path,
+            &std::collections::BTreeMap::from([(
+                "demo-skill@0.1.0".into(),
+                f.root.path().join("demo-skill"),
+            )]),
+        )
+        .unwrap();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let limits = ExecutorBudgetLimits {
+            max_run_ms: Some(10000),
+            ..Default::default()
+        };
+        let mut bindings = f.bindings("pass");
+        bindings.executors.insert(
+            "test.executor".into(),
+            Arc::new(ConfiguredBudgetExecutor {
+                limits: limits.clone(),
+                starts: starts.clone(),
+            }),
+        );
+        let rt = Runtime::open(
+            options(&f, policy()),
+            vec![f.definition.clone()],
+            bindings.clone(),
+        )
+        .await
+        .unwrap();
+        let id = rt
+            .start(f.request("locked-cap", "VALUE", false), &Caller::local())
+            .await
+            .unwrap();
+        let waiting = wait_for(&rt, &id, |s| s.status == Status::Waiting).await;
+        rt.shutdown().await.unwrap();
+        drop(rt);
+        let mut changed = limits;
+        match change {
+            "run_time" => changed.max_run_ms = Some(20000),
+            "model_support" => changed.model_iterations = ModelIterationSupport::RuntimeValidated,
+            "iteration_max" => changed.max_model_iterations = Some(64),
+            "frame_max" => changed.max_frame_bytes = Some(4096),
+            _ => {}
+        }
+        bindings.executors.insert(
+            "test.executor".into(),
+            Arc::new(ConfiguredBudgetExecutor {
+                limits: changed,
+                starts: starts.clone(),
+            }),
+        );
+        let rt = Runtime::open(options(&f, policy()), vec![f.definition.clone()], bindings)
+            .await
+            .unwrap();
+        rt.signal(
+            &id,
+            SignalRequest {
+                event_name: "resume".into(),
+                payload: json!({"confirm":true}),
+                request_key: "resume-cap".into(),
+                expected_revision: waiting.revision,
+            },
+            &Caller::local(),
+        )
+        .await
+        .unwrap();
+        let result = wait_for(&rt, &id, |s| {
+            s.status.terminal() || s.status == Status::Blocked
+        })
+        .await;
+        rt.shutdown().await.unwrap();
+        if change == "same" {
+            assert_eq!(result.status, Status::Completed);
+            assert_eq!(starts.load(Ordering::SeqCst), 2);
+        } else {
+            assert_eq!(
+                result.status,
+                Status::Blocked,
+                "changed {change} silently resumed: {result:?}"
+            );
+            assert_eq!(result.error.unwrap().code, "binding_changed");
+            assert_eq!(
+                starts.load(Ordering::SeqCst),
+                1,
+                "a changed-capability executor was started"
+            );
+        }
+    }
+}

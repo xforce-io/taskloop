@@ -1,6 +1,6 @@
 # #9 显式执行预算与受控收尾
 
-版本：v0.2（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/9 。L1: write（[v0.1 概要评论](https://github.com/xforce-io/taskloop/issues/9#issuecomment-6702967746)）；L2: write（本文件为唯一详细契约）。产品基线为用户确认预算问题及 Epic #5 S6、本票 S1/S2；不自行选择新的默认阶段时限、提高任务总限额或重跑研究质量实验。章节遵循用户 AGENTS；细化验收见 §11。
+版本：v0.3（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/9 。L1: write（[v0.1 概要评论](https://github.com/xforce-io/taskloop/issues/9#issuecomment-6702967746)）；L2: write（本文件为唯一详细契约）。产品基线为用户确认预算问题及 Epic #5 S6、本票 S1/S2；不自行选择新的默认阶段时限、提高任务总限额或重跑研究质量实验。章节遵循用户 AGENTS；细化验收见 §11。
 
 ## 1 背景
 
@@ -38,7 +38,7 @@ flowchart TD
 
 ## 5 思路与折衷
 
-每 Run 锁定策略，时间为任务 active 剩余、wall 剩余、可选阶段、适配器上限的交集；检查另取任务剩余和检查策略；同步回调在一次 poll 中越过期限也不能因返回 Completed/pass 被接纳。运行时用单调时钟执行期限，UTC 只作公开定位；清理停止有独立确认窗口，不把停止未知写成已停止。宿主预算属于执行政策事实，持久化于业务记录而不是依赖可丢失 Trace。策略变化进入宿主绑定摘要，避免恢复时静默套用新政策。
+每 Run 锁定策略，时间为任务 active 剩余、wall 剩余、可选阶段、适配器上限的交集；检查另取任务剩余和检查策略；同步回调在一次 poll 中越过期限也不能因返回 Completed/pass 被接纳。运行时用单调时钟执行期限，UTC 只作公开定位；清理停止有独立确认窗口，不把停止未知写成已停止。宿主预算属于执行政策事实，持久化于业务记录而不是依赖可丢失 Trace。策略及每个执行器的完整预算能力（max_run_ms、model_iterations、max_model_iterations、max_frame_bytes）进入宿主绑定摘要；同一执行器类型/identity不等于相同预算配置。仅能力配置变化后重开时，后续Run必须blocked/binding_changed，不能静默恢复；能力不变仍可继续。
 
 只为 artifact.write 保留提交次数，探索拒绝不占用该保留；提交也消耗总次数，失败不会返还。进入时间收尾后拒绝其它工具，硬截止后所有调用拒绝；已发起外部效果不可保证回滚。保留额度不保证 Schema/gate 成功，也不放宽字节、权限或取消。放弃未计量的无限预算查询工具、自动重试直到成稿和仅把常数改大。
 
