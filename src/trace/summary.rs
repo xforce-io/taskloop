@@ -95,15 +95,22 @@ impl TraceStore {
         q: &TraceQuery,
     ) -> Result<Vec<TraceItem>> {
         let sql = if q.run_id.is_some() {
-            "SELECT cursor,body FROM trace_events WHERE execution_id=?1 AND run_id=?2 AND cursor>?3 ORDER BY cursor LIMIT ?4"
+            "SELECT cursor,body FROM trace_events WHERE execution_id=?1 AND run_id=?2 AND cursor>?3  AND (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status!='expired' AND (expires_ms IS NULL OR expires_ms>?5)) ORDER BY cursor LIMIT ?4"
         } else {
-            "SELECT cursor,body FROM trace_events WHERE execution_id=?1 AND ?2 IS NULL AND cursor>?3 ORDER BY cursor LIMIT ?4"
+            "SELECT cursor,body FROM trace_events WHERE execution_id=?1 AND ?2 IS NULL AND cursor>?3  AND (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status!='expired' AND (expires_ms IS NULL OR expires_ms>?5)) ORDER BY cursor LIMIT ?4"
         };
         let mut stmt = conn.prepare(sql)?;
         let mut events = vec![];
-        for row in stmt.query_map(params![execution, q.run_id, q.after as i64, q.limit], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })? {
+        for row in stmt.query_map(
+            params![
+                execution,
+                q.run_id,
+                q.after as i64,
+                q.limit,
+                crate::runtime::now_ms() as i64
+            ],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )? {
             let (cursor, body) = row?;
             let event = serde_json::from_str(&body).map_err(|_| {
                 Error::new("trace_corrupt", "/trace", "invalid persisted trace record")
@@ -123,17 +130,20 @@ impl TraceStore {
         let mut issues = BTreeSet::new();
         let mut expected = BTreeSet::new();
         let mut statuses = BTreeMap::<String, Value>::new();
-        let mut stmt=conn.prepare("SELECT run_id,expected,unavailable,adapter_failed,status,finalized FROM trace_summary_runs WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2)")?;
-        for row in stmt.query_map(params![execution, q.run_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, bool>(1)?,
-                r.get::<_, bool>(2)?,
-                r.get::<_, bool>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, bool>(5)?,
-            ))
-        })? {
+        let mut stmt=conn.prepare("SELECT run_id,expected,unavailable,adapter_failed,status,finalized FROM trace_summary_runs WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2) AND (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status!='expired' AND (expires_ms IS NULL OR expires_ms>?3))")?;
+        for row in stmt.query_map(
+            params![execution, q.run_id, crate::runtime::now_ms() as i64],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, bool>(1)?,
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, bool>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, bool>(5)?,
+                ))
+            },
+        )? {
             let (run, wanted, unavailable, failed, status, finalized) = row?;
             if wanted && !finalized {
                 issues.insert(format!("observation_pending:{run}"));
@@ -161,18 +171,21 @@ impl TraceStore {
             }
         }
         let mut sources = vec![];
-        let mut stmt=conn.prepare("SELECT run_id,source_id,last_sequence,observed,terminal,activity_sequence,activity_timestamp FROM trace_summary_sources WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2) ORDER BY run_id,source_id")?;
-        for row in stmt.query_map(params![execution, q.run_id], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, bool>(4)?,
-                r.get::<_, Option<i64>>(5)?,
-                r.get::<_, Option<String>>(6)?,
-            ))
-        })? {
+        let mut stmt=conn.prepare("SELECT run_id,source_id,last_sequence,observed,terminal,activity_sequence,activity_timestamp FROM trace_summary_sources WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2) AND (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status!='expired' AND (expires_ms IS NULL OR expires_ms>?3)) ORDER BY run_id,source_id")?;
+        for row in stmt.query_map(
+            params![execution, q.run_id, crate::runtime::now_ms() as i64],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, bool>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )? {
             let (run, source, last, observed, terminal, activity, time) = row?;
             let reported = if source.starts_with("milkie:") {
                 statuses
@@ -213,15 +226,18 @@ impl TraceStore {
                 issues.insert(format!("source_unavailable:{run}"));
             }
         }
-        let mut stmt=conn.prepare("SELECT run_id,span_id,kind FROM trace_summary_spans WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2) AND kind IS NOT NULL AND ended=0 ORDER BY run_id,span_id")?;
+        let mut stmt=conn.prepare("SELECT run_id,span_id,kind FROM trace_summary_spans WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2) AND (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status!='expired' AND (expires_ms IS NULL OR expires_ms>?3)) AND kind IS NOT NULL AND ended=0 ORDER BY run_id,span_id")?;
         let open_spans = stmt
-            .query_map(params![execution, q.run_id], |r| {
-                Ok(OpenSpan {
-                    run_id: r.get(0)?,
-                    span_id: r.get(1)?,
-                    kind: r.get(2)?,
-                })
-            })?
+            .query_map(
+                params![execution, q.run_id, crate::runtime::now_ms() as i64],
+                |r| {
+                    Ok(OpenSpan {
+                        run_id: r.get(0)?,
+                        span_id: r.get(1)?,
+                        kind: r.get(2)?,
+                    })
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(Summary {
             sources,

@@ -37,12 +37,16 @@ fn adapter(f: &Fixture, mode: &str) -> Arc<MilkieExecutor> {
     ])
     .env("MILKIE_FIXTURE_MODE", mode)
     .env(
-        "MILKIE_FIXTURE_OBSERVATION_FILE",
-        root.join("observation-reading.marker").into_os_string(),
-    )
-    .env(
         "MILKIE_FIXTURE_STARTED_FILE",
         root.join("started.log").into_os_string(),
+    );
+    let config = config.env(
+        "MILKIE_FIXTURE_HANDSHAKE_FILE",
+        root.join("handshake.log").into_os_string(),
+    );
+    let config = config.env(
+        "MILKIE_FIXTURE_OBSERVATION_FILE",
+        root.join("observation-reading.marker").into_os_string(),
     );
     Arc::new(MilkieExecutor::new(config).unwrap())
 }
@@ -372,6 +376,49 @@ async fn reused_rpc_identity_cannot_cross_tool_results() {
     assert!(spy.0.load(Ordering::SeqCst) <= 1);
 }
 
+#[tokio::test]
+async fn old_source_without_purge_capability_is_explicitly_unsupported() {
+    let f = Fixture::new(false);
+    let a = adapter(&f, "normal");
+    let inv = invocation(&f, false, 10000);
+    let run = inv.run_id.clone();
+    assert!(matches!(
+        a.execute(inv, Arc::new(Spy::default()), CancellationToken::new())
+            .await,
+        ExecutionOutcome::Completed { .. }
+    ));
+    a.finish_observations().await.unwrap();
+    assert_eq!(
+        a.cleanup_observation(&run).await,
+        ObservationCleanup::Unsupported
+    );
+}
+
+#[tokio::test]
+async fn cleanup_during_handshake_cannot_claim_no_source_will_start() {
+    let f = Fixture::new(false);
+    let a = adapter(&f, "slow_handshake");
+    let inv = invocation(&f, false, 10000);
+    let run = inv.run_id.clone();
+    let executor = a.clone();
+    let task = tokio::spawn(async move {
+        executor
+            .execute(inv, Arc::new(Spy::default()), CancellationToken::new())
+            .await
+    });
+    for _ in 0..100 {
+        if f.root.path().join("handshake.log").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(f.root.path().join("handshake.log").exists());
+    let cleanup = a.cleanup_observation(&run).await;
+    let result = task.await.unwrap();
+    assert!(matches!(result, ExecutionOutcome::Completed { .. }));
+    assert_eq!(cleanup, ObservationCleanup::Deferred);
+}
+
 struct ReplayObserver(Arc<tokio::sync::Notify>);
 #[async_trait::async_trait]
 impl MilkieObserver for ReplayObserver {
@@ -538,4 +585,25 @@ async fn observation_tail_never_reopens_host_tools_after_native_stop_proof() {
         1,
         "a late sidecar request acquired a second host effect after native completion"
     );
+}
+
+#[tokio::test]
+async fn retention_waits_for_observation_tail_after_business_completion() {
+    let f = Fixture::new(false);
+    let executor = adapter(&f, "slow_observation");
+    let inv = invocation(&f, false, 5000);
+    let run = inv.run_id.clone();
+    let observer = Arc::new(ReplayObserver(Arc::new(tokio::sync::Notify::new())));
+    let outcome = executor
+        .execute_observed(
+            inv,
+            Arc::new(Spy::default()),
+            CancellationToken::new(),
+            Some(observer),
+        )
+        .await;
+    assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
+    let cleanup = executor.cleanup_observation(&run).await;
+    executor.finish_observations().await.unwrap();
+    assert_eq!(cleanup, ObservationCleanup::Deferred);
 }

@@ -239,7 +239,7 @@ impl Executor for MilkieExecutor {
         bridge: Arc<dyn ToolBridge>,
         cancel: CancellationToken,
     ) -> ExecutionOutcome {
-        self.execute_observed(invocation, bridge, cancel, None)
+        self.execute_observed(invocation, bridge, cancel, self.observer.clone())
             .await
     }
     fn internal_observation(&self) -> bool {
@@ -305,7 +305,7 @@ impl Executor for MilkieExecutor {
         let worker = control.clone();
         let config = self.config.clone();
         let digest = self.connection_digest.clone();
-        let observer = observer.or_else(|| self.observer.clone());
+        // The observed entry is authoritative; None explicitly suppresses source capture.
         tokio::spawn(async move {
             let _finalized = worker.finalized.clone().drop_guard();
             let result = std::panic::AssertUnwindSafe(perform(
@@ -330,6 +330,84 @@ impl Executor for MilkieExecutor {
             });
         });
         tokio::select! { result = control.result() => result, _ = cancel.cancelled() => { control.cancel.cancel(); control.result().await } }
+    }
+    async fn cleanup_observation(&self, run_id: &str) -> crate::ObservationCleanup {
+        use crate::ObservationCleanup as C;
+        // A live supervisor may still launch the source or drain its observation tail.
+        // The framework separately proves that this invocation cannot start again.
+        let control = self
+            .runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(run_id)
+            .cloned();
+        if let Some(control) = control
+            && !control.finalized.is_cancelled()
+        {
+            return C::Deferred;
+        }
+        let root = self.root(run_id);
+        if !root.exists() {
+            return C::NotApplicable;
+        }
+        let owner = std::fs::read(root.join("owner.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Owner>(&b).ok());
+        let Some(owner) = owner.filter(|o| o.version == 1 && o.taskloop_run_id == run_id) else {
+            return C::Deferred;
+        };
+        if !owner.start_sent {
+            return C::NotApplicable;
+        }
+        let (Some(source), Some(context)) = (owner.milkie_run_id, owner.context_id) else {
+            return C::Deferred;
+        };
+        let operation = async {
+            let mut rpc = Rpc::spawn(&self.config, &root, None).await?;
+            let result = async {
+                let capabilities = rpc.handshake().await?;
+                if capabilities["capabilities"]["observation"]["purge"] != true {
+                    return Ok(C::Unsupported);
+                }
+                let record = rpc
+                    .request("execution.query", json!({"runId":source}))
+                    .await?;
+                if record["runId"] != source || record["contextId"] != context {
+                    return Ok(C::Failed);
+                }
+                if record["stopped"] != true || record["finishedAt"].as_u64().is_none() {
+                    return Ok(C::Deferred);
+                }
+                let pending = rpc
+                    .request("tool.pending", json!({"contextId":context}))
+                    .await?;
+                if !pending.as_array().is_some_and(Vec::is_empty) {
+                    return Ok(C::Deferred);
+                }
+                let purged = rpc
+                    .request("observation.purge", json!({"runId":source}))
+                    .await?;
+                if purged["version"] != 1
+                    || purged["runId"] != source
+                    || purged["contextId"] != context
+                {
+                    return Ok(C::Failed);
+                }
+                Ok::<_, Error>(match purged["state"].as_str() {
+                    Some("purged") => C::Purged,
+                    Some("disabled") => C::NotApplicable,
+                    _ => C::Failed,
+                })
+            }
+            .await;
+            let closed = rpc.close().await;
+            result.map(|result| if closed { result } else { C::Failed })
+        };
+        match tokio::time::timeout(Duration::from_secs(5), operation).await {
+            Ok(Ok(state)) => state,
+            Ok(Err(error)) if error.code == "source_busy" => C::Deferred,
+            _ => C::Failed,
+        }
     }
     async fn stop_or_confirm(&self, run_id: &str) -> StopState {
         let control = self
@@ -493,7 +571,13 @@ impl Context {
         }) {
             return json!({"ok":false,"code":"rejected","message":"Mismatched trace context"});
         }
-        if metadata.call_id.is_empty() || metadata.call_id.len() > 128 {
+        if metadata.call_id.is_empty()
+            || metadata.call_id.len() > 128
+            || metadata
+                .native_call_id
+                .as_ref()
+                .is_some_and(|s| s.is_empty() || s.len() > 128)
+        {
             return json!({"ok":false,"code":"rejected","message":"Invalid call identity"});
         }
         let result = tokio::select! { _ = self.cancel.cancelled() => return json!({"ok":false,"code":"rejected","message":"Execution cancelled"}), result = self.bridge.call_with_metadata(tool, args["input"].clone(), metadata) => result };
@@ -680,7 +764,15 @@ impl Rpc {
                 .map_err(|_| failure("harness_unavailable"))?
                 .map_err(|_| failure("harness_unavailable"))?;
             if message.get("error").is_some() {
-                return Err(failure("harness_rejected"));
+                return Err(failure(
+                    if method == "observation.purge"
+                        && message["error"]["data"]["code"] == "context_busy"
+                    {
+                        "source_busy"
+                    } else {
+                        "harness_rejected"
+                    },
+                ));
             }
             message
                 .get("result")

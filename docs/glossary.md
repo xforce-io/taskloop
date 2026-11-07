@@ -69,3 +69,6 @@
 | TraceCursor | 统一 Trace 按接收持久化顺序续读的位置，不表示全局发生顺序。 | — |
 | SourceSequence | 同一观测来源提供的原始序号，不能跨来源比较。 | — |
 | Span | 以 trace 和 span 标识关联开始、结束或活动的观测操作。 | — |
+| TracePolicy | 宿主显式提供的 Trace 内容选择、容量、保留与降级契约。 | — |
+| TraceContentRef | 受同一实例授权和观测容量期限约束的脱敏内容引用，不是业务产物或文件路径。 | — |
+| SourceCleanup | 单个 Run 的源观测缓冲清理状态及其执行器绑定，不代表业务终态。 | — |

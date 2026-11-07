@@ -33,6 +33,7 @@ impl RuntimeOptions {
 pub struct Runtime {
     pub(crate) inner: Arc<Inner>,
     task: Mutex<Option<JoinHandle<()>>>,
+    trace_task: Mutex<Option<JoinHandle<()>>>,
     shutdown_lock: tokio::sync::Mutex<()>,
 }
 pub(crate) struct Inner {
@@ -188,7 +189,7 @@ impl Runtime {
         definitions: Vec<Definition>,
         bindings: HostBindings,
     ) -> Result<Self> {
-        Self::open_impl(options, definitions, bindings, None).await
+        Self::open_impl(options, definitions, bindings, None, None).await
     }
     pub async fn open_with_trace(
         options: RuntimeOptions,
@@ -196,13 +197,23 @@ impl Runtime {
         bindings: HostBindings,
         trace: crate::TraceOptions,
     ) -> Result<Self> {
-        Self::open_impl(options, definitions, bindings, Some(trace)).await
+        Self::open_impl(options, definitions, bindings, Some(trace), None).await
+    }
+    pub async fn open_with_trace_policy(
+        options: RuntimeOptions,
+        definitions: Vec<Definition>,
+        bindings: HostBindings,
+        trace: crate::TraceOptions,
+        policy: crate::TracePolicy,
+    ) -> Result<Self> {
+        Self::open_impl(options, definitions, bindings, Some(trace), Some(policy)).await
     }
     async fn open_impl(
         options: RuntimeOptions,
         definitions: Vec<Definition>,
         bindings: HostBindings,
         trace_options: Option<crate::TraceOptions>,
+        trace_policy: Option<crate::TracePolicy>,
     ) -> Result<Self> {
         if options.max_admitted_instances == 0 || options.max_admitted_instances > 1024 {
             return Err(Error::new(
@@ -229,7 +240,12 @@ impl Runtime {
             store.save_definition(d)?;
         }
         let trace = trace_options
-            .map(|t| crate::trace::TraceStore::open(&options.store_dir, t))
+            .map(|t| match trace_policy {
+                Some(p) => {
+                    crate::trace::TraceStore::open_with_policy(&options.store_dir, t, Some(p))
+                }
+                None => crate::trace::TraceStore::open(&options.store_dir, t),
+            })
             .transpose()?;
         let inner = Arc::new(Inner {
             store,
@@ -261,9 +277,18 @@ impl Runtime {
         let task = tokio::spawn(async move {
             worker_loop(work).await;
         });
+        let trace_task = if inner.trace.is_some() {
+            let gc = inner.clone();
+            Some(tokio::spawn(
+                async move { crate::trace::cleanup_loop(gc).await },
+            ))
+        } else {
+            None
+        };
         Ok(Self {
             inner,
             task: Mutex::new(Some(task)),
+            trace_task: Mutex::new(trace_task),
             shutdown_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -410,6 +435,23 @@ impl Runtime {
         caller: &Caller,
     ) -> Result<Vec<u8>> {
         Ok(serde_json::to_vec(&self.trace(id, query, caller)?)?)
+    }
+    pub fn read_trace_content(
+        &self,
+        id: &str,
+        content_id: &str,
+        caller: &Caller,
+    ) -> Result<crate::TraceContent> {
+        self.inner.authorized(id, caller)?;
+        self.inner
+            .trace
+            .as_ref()
+            .ok_or_else(|| Error::new("not_found", "/trace/content", "trace content not found"))?
+            .read_content(id, content_id)
+    }
+    /// Host maintenance; no other principal's records or identifiers are returned.
+    pub fn maintain_trace(&self) -> Result<usize> {
+        self.inner.trace.as_ref().map_or(Ok(0), |s| s.maintain())
     }
     pub async fn signal(
         &self,
@@ -602,6 +644,11 @@ impl Runtime {
             token.cancel();
         }
         self.inner.notify.notify_waiters();
+        let trace_task = self.trace_task.lock().map_err(Error::io)?.take();
+        if let Some(trace_task) = trace_task {
+            trace_task.abort();
+            let _ = trace_task.await;
+        }
         let task = self.task.lock().map_err(Error::io)?.take();
         if let Some(mut task) = task {
             match tokio::time::timeout_at(deadline, &mut task).await {
@@ -656,11 +703,28 @@ impl Runtime {
                     )
                 })??;
         }
+        if let Some(trace) = &self.inner.trace {
+            tokio::time::timeout_at(deadline, trace.finish_content())
+                .await
+                .map_err(|_| {
+                    Error::new(
+                        "trace_cleanup_unconfirmed",
+                        "/shutdown/content",
+                        "content collectors have not finished",
+                    )
+                })??;
+            let _ = trace.finish_observation();
+        }
         Ok(())
     }
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
+        if let Ok(mut task) = self.trace_task.lock()
+            && let Some(task) = task.take()
+        {
+            task.abort();
+        }
         self.inner.stop.cancel();
         if let Ok(tokens) = self.inner.handles.lock() {
             for t in tokens.values() {
@@ -931,6 +995,9 @@ pub(crate) fn enter(r: &mut Record, d: &Definition, target: &str, transition: bo
 }
 async fn worker_loop(inner: Arc<Inner>) {
     while !inner.stop.is_cancelled() {
+        if let Some(trace) = &inner.trace {
+            trace.background_maintenance();
+        }
         let rows = match inner.store.all() {
             Ok(rows) => rows,
             Err(_) => {

@@ -29,6 +29,9 @@ for line in sys.stdin:
   if pending<=0:finish()
   continue
  if method=='initialize':
+  if mode=='slow_handshake':
+   with open(os.environ['MILKIE_FIXTURE_HANDSHAKE_FILE'],'w') as marker:marker.write('waiting')
+   time.sleep(1.2)
   send({'id':m['id'],'result':{'protocolVersion':99 if mode=='bad_version' else 1,'capabilities':{'supported':True,'hostTools':True,'cancel':True,'timeout':True,'observation':{'version':1}}}})
  elif method=='context.create':
   r['contextId']=str(uuid.uuid4());save();send({'id':m['id'],'result':{'contextId':r['contextId']}})

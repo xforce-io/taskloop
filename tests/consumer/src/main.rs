@@ -36,6 +36,13 @@ impl Executor for ExecutorImpl {
         StopState::Confirmed
     }
 }
+struct ContentFilter;
+#[async_trait]
+impl TraceContentFilter for ContentFilter {
+    async fn redact(&self, _: &str, _: &str, value: Value) -> Result<Value> {
+        Ok(value)
+    }
+}
 struct Gate;
 #[async_trait]
 impl DomainGate for Gate {
@@ -102,7 +109,7 @@ async fn main() {
         );
     assert!(validate(&definition, &bindings).unwrap().valid);
     let digest = definition.digest.clone();
-    let rt = Runtime::open_with_trace(
+    let rt = Runtime::open_with_trace_policy(
         RuntimeOptions::new(root.path().join("store")),
         vec![definition],
         bindings,
@@ -111,6 +118,23 @@ async fn main() {
             max_bytes_per_run: 1048576,
             source_max_events: 1000,
             source_max_bytes: 262144,
+        },
+        TracePolicy {
+            policy_id: "consumer-v1".into(),
+            max_total_events: 10000,
+            max_total_bytes: 4194304,
+            max_runs: 16,
+            retention_ms: 60000,
+            max_content_bytes: 4096,
+            content_tools: BTreeMap::from([(
+                "artifact.write".into(),
+                TraceToolContent {
+                    input: vec!["/value".into()],
+                    output: vec![],
+                },
+            )]),
+            filter_version: Some("consumer-fields-v1".into()),
+            filter: Some(Arc::new(ContentFilter)),
         },
     )
     .await
@@ -157,6 +181,26 @@ async fn main() {
             .status,
         Status::Cancelled
     );
+    for _ in 0..100 {
+        let pending = rt
+            .trace(
+                &a,
+                TraceQuery {
+                    limit: 100,
+                    ..Default::default()
+                },
+                &Caller::local(),
+            )
+            .unwrap();
+        if !pending
+            .issues
+            .iter()
+            .any(|s| s.starts_with("content_pending:"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let trace = rt
         .trace(
             &a,
@@ -194,9 +238,38 @@ async fn main() {
     )
     .unwrap();
     assert_eq!(exported.events.len(), trace.events.len());
+    let content_ref: TraceContentRef = serde_json::from_value(
+        trace
+            .events
+            .iter()
+            .find_map(|e| {
+                let value =
+                    if e.event.kind == "tool.content" && e.event.data["direction"] == "input" {
+                        e.event.data.get("content")
+                    } else if e.event.kind == "tool.started" {
+                        e.event.data.get("input_content")
+                    } else {
+                        None
+                    };
+                value.filter(|v| !v.is_null()).cloned()
+            })
+            .expect("no settled input content reference"),
+    )
+    .unwrap();
+    let content = rt
+        .read_trace_content(&a, &content_ref.id, &Caller::local())
+        .unwrap();
+    assert_eq!(content.value["/value"]["answer"], "external-host");
+    assert_eq!(
+        rt.read_trace_content(&b, &content_ref.id, &Caller::local())
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    rt.maintain_trace().unwrap();
     rt.shutdown().await.unwrap();
     println!(
         "{}",
-        json!({"external_consumer":"pass","operations":["start","get","signal","cancel","read_artifact","trace","export_trace"],"private_modules_imported":false,"execution":"deterministic; real Harness is tested separately"})
+        json!({"external_consumer":"pass","operations":["start","get","signal","cancel","read_artifact","trace","export_trace","read_trace_content","maintain_trace"],"private_modules_imported":false,"execution":"deterministic; real Harness is tested separately"})
     );
 }

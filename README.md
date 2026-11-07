@@ -46,7 +46,7 @@ let executor = std::sync::Arc::new(taskloop::MilkieExecutor::new(config)?);
 let bindings = taskloop::HostBindings::default().executor("research.agent", executor);
 ```
 
-Milkie 依赖固定于上游 #277/#278 的契约与提交，当前兼容补充候选为60b08f1；从该提交构建/打包并记录宿主配置版本，不能把旧 registry 0.1.1 当作已包含 Sidecar。公开协议与能力在执行前核对。详情见 [设计](docs/design/6-milkie-executor-lifecycle.md) 和 [验收路径](.agents/skills/verify-taskloop/features/01-milkie-execution.md)。原生模型成功验收仍待补齐。
+Milkie 依赖固定于上游 #277/#278 的契约与提交，基础兼容候选为60b08f1，#8 源端治理需包含公开 purge 的275a917（或后续兼容提交）；从该提交构建/打包并记录宿主配置版本，不能把旧 registry 0.1.1 当作已包含 Sidecar。公开协议与能力在执行前核对。详情见 [设计](docs/design/6-milkie-executor-lifecycle.md) 和 [验收路径](.agents/skills/verify-taskloop/features/01-milkie-execution.md)。原生模型成功验收仍待补齐。
 
 ### 统一 Trace（显式启用）
 
@@ -57,3 +57,15 @@ Milkie 依赖固定于上游 #277/#278 的契约与提交，当前兼容补充�
 `state.sqlite` 仍是业务事实；同目录 `trace.sqlite` 是版本化观测。每 Run 一个 trace，按实例可聚合多 Run。接收游标不表示跨进程发生顺序；`source_sequence`、来源单调时钟、原生标识和 Milkie 映射保留各自语义。`complete`、`issues`、`sources`、`open_spans` 明确描述缺号、冲突、未结束和能力不可见；最近活动来自已观察事件，不宣称模型仍在运行。观测异常不改变业务结果。默认记录的元数据不含提示或工具正文；累计 usage 保留原 scope，不当成本 Run 增量，也不将未知用量填零。
 
 详见 [#7 契约](docs/design/7-unified-trace-query-export.md)。当前统一治理扩展由 #8 跟踪；这里没有自动导出到远端或自动删除记录。
+
+### Trace 内容与保留治理
+
+新应用使用 `Runtime::open_with_trace_policy(..., TraceOptions, TracePolicy)`。策略必须显式指定 `policy_id`、全局事件/逻辑字节/Run 限额、`retention_ms`、单内容引用限额；`content_tools` 为空即摘要模式。查询返回当前策略和每 Run 的固定策略，兼容入口显示 `legacy-metadata-manual`，不会伪称已配置全局保留。
+
+显式内容模式须列出工具及输入/输出 JSON Pointer，并提供版本化 `TraceContentFilter`。只把选定字段传给过滤器；TaskLoop 随后再次屏蔽敏感键。过滤器负责业务特有秘密；默认不保存正文，摘要 hash 也不是匿名化保证。引用通过 `read_trace_content(execution_id, content_id, caller)` 读取，跨实例或 owner 返回 `not_found`，导出不内联正文。
+
+容量拒收、过滤失败和超时可查，业务继续；过滤并行最多 8、单次等待 200ms。按接纳时间到期，重启不延长；维护、查询和写入都会检查，后台也按现有调度周期清理。清理只删除观测事件和内容；有界过期标记被淘汰后查询保留“未知缺口”，晚到事件不重新接纳。逻辑字节配额不等于 SQLite 文件大小，文件空闲页可复用；清理不承诺磁盘安全擦除。
+
+[详细契约 #8](docs/design/8-trace-policy-data-governance.md)；观测库升级为 v3，业务库版本保持不变。
+
+中央到期后，独立后台通过 Executor 调用 Milkie 的公开 `observation.purge`。`source_cleanup` 单列 scheduled/pending/deferred/unsupported/failed/purged/not_applicable 等状态；未确认清理记录不因容量而淘汰。绑定变化或旧记录缺绑定时明确不可确认，不猜测已清理。中央观测接纳失败会关闭本次源采集，业务继续；普通未托管入口保留原 observer 行为。源清理不删除认证、原生功能会话、业务执行或工具记录。
