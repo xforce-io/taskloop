@@ -234,6 +234,19 @@ impl Executor for MilkieExecutor {
         bridge: Arc<dyn ToolBridge>,
         cancel: CancellationToken,
     ) -> ExecutionOutcome {
+        self.execute_observed(invocation, bridge, cancel, None)
+            .await
+    }
+    fn internal_observation(&self) -> bool {
+        true
+    }
+    async fn execute_observed(
+        &self,
+        invocation: Invocation,
+        bridge: Arc<dyn ToolBridge>,
+        cancel: CancellationToken,
+        observer: Option<Arc<dyn MilkieObserver>>,
+    ) -> ExecutionOutcome {
         if cancel.is_cancelled() {
             return ExecutionOutcome::Cancelled;
         }
@@ -267,7 +280,7 @@ impl Executor for MilkieExecutor {
         let worker = control.clone();
         let config = self.config.clone();
         let digest = self.connection_digest.clone();
-        let observer = self.observer.clone();
+        let observer = observer.or_else(|| self.observer.clone());
         tokio::spawn(async move {
             let result = std::panic::AssertUnwindSafe(perform(
                 config,
@@ -815,10 +828,15 @@ async fn perform(
             delivery_pending.clone(),
         );
         tokio::spawn(async move {
-            let mut seen = BTreeSet::new();
+            let mut seen = BTreeMap::new();
             while let Some((status, mut value)) = rx.recv().await {
                 let id = value["id"].as_str().map(str::to_owned);
-                if !status && id.as_ref().is_some_and(|id| seen.contains(id)) {
+                let fingerprint =
+                    crate::json::digest(&serde_json::to_vec(&value).unwrap_or_default());
+                if !status && let Some(old) = id.as_ref().and_then(|id| seen.get(id)) {
+                    if old != &fingerprint {
+                        bad.store(true, Ordering::Release);
+                    }
                     pending.fetch_sub(1, Ordering::AcqRel);
                     continue;
                 }
@@ -836,7 +854,7 @@ async fn perform(
                 .is_ok_and(|result| result.is_ok());
                 if delivered {
                     if let Some(id) = id {
-                        seen.insert(id);
+                        seen.insert(id, fingerprint);
                     }
                 } else {
                     bad.store(true, Ordering::Release);
@@ -921,6 +939,7 @@ async fn perform(
                             Ok(page) => {
                                 let events = page["events"].as_array().ok_or_else(|| failure("harness_protocol_invalid"))?;
                                 for event in events { context.event(event.clone()); }
+                                let mut status=page["status"].clone(); status["runId"]=json!(source_run); context.status(status);
                                 if page["status"]["complete"] != true { context.observation_bad.store(true, Ordering::Release); }
                                 let next = page["nextSequence"].as_u64().unwrap_or(after);
                                 if events.len() < 100 || next <= after { break; } after = next;
@@ -937,6 +956,18 @@ async fn perform(
         }
     }.await;
     let closed = rpc.close().await;
+    // Bound the whole drain, not each queued event; diagnostics cannot delay stopping indefinitely.
+    let drain_until = tokio::time::Instant::now() + Duration::from_millis(500);
+    while context.delivery_pending.load(Ordering::Acquire) > 0
+        && tokio::time::Instant::now() < drain_until
+    {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let observation_incomplete = context.observation_bad.load(Ordering::Acquire)
+        || context.delivery_pending.load(Ordering::Acquire) > 0;
+    if let Some(observer) = &observer {
+        let _=tokio::time::timeout(Duration::from_millis(200),observer.status(&inv,json!({"runId":owner.milkie_run_id,"kind":"adapter.summary","adapter_delivery_failed":observation_incomplete}))).await;
+    }
     let stopped = closed && (!owner.start_sent || owner.stopped);
     owner.stopped = stopped;
     let saved = write_owner(&root, &owner).is_ok();
@@ -961,6 +992,10 @@ async fn perform(
         };
     }
     match result {
+        Ok(ExecutionOutcome::Completed { mut usage }) => {
+            usage["observation_incomplete"] = json!(observation_incomplete);
+            ExecutionOutcome::Completed { usage }
+        }
         Ok(outcome) => outcome,
         Err(error) => ExecutionOutcome::Failed {
             code: error.code,
