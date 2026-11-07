@@ -9,10 +9,12 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
+
+mod governance;
 
 #[derive(Debug, Clone)]
 pub struct TraceOptions {
@@ -59,6 +61,8 @@ pub struct TraceEvent {
     pub source_id: String,
     pub source_sequence: u64,
     pub timestamp_ms: u64,
+    #[serde(default)]
+    pub run_observed_at_ms: u64,
     pub monotonic_ns: String,
     pub kind: String,
     pub data: Value,
@@ -101,6 +105,14 @@ pub struct TracePage {
     pub issues: Vec<String>,
     pub sources: Vec<TraceSource>,
     pub open_spans: Vec<OpenSpan>,
+    #[serde(default)]
+    pub policy: Option<crate::TracePolicySnapshot>,
+    #[serde(default)]
+    pub run_policies: BTreeMap<String, crate::TracePolicySnapshot>,
+    #[serde(default)]
+    pub expired_runs: Vec<String>,
+    #[serde(default)]
+    pub collector_degraded: bool,
 }
 pub(crate) struct TraceStore {
     conn: Mutex<Connection>,
@@ -108,14 +120,27 @@ pub(crate) struct TraceStore {
     faults: Mutex<BTreeSet<(String, String, String)>>,
     source_id: String,
     started: Instant,
+    policy: Option<Arc<crate::TracePolicy>>,
+    content_slots: Arc<tokio::sync::Semaphore>,
+    degraded: AtomicBool,
 }
 impl TraceStore {
     pub fn open(root: &Path, options: TraceOptions) -> Result<Arc<Self>> {
+        Self::open_with_policy(root, options, None)
+    }
+    pub fn open_with_policy(
+        root: &Path,
+        options: TraceOptions,
+        policy: Option<crate::TracePolicy>,
+    ) -> Result<Arc<Self>> {
         options.validate()?;
+        if let Some(policy) = &policy {
+            policy.validate()?;
+        }
         let conn = Connection::open(root.join("trace.sqlite"))?;
         conn.busy_timeout(std::time::Duration::from_millis(5))?;
         let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(Error::new(
                 "storage_incompatible",
                 "/trace",
@@ -134,30 +159,41 @@ impl TraceStore {
           CREATE TRIGGER IF NOT EXISTS trace_account_delete AFTER DELETE ON trace_events BEGIN
             UPDATE trace_totals SET events=events-1,bytes=bytes-OLD.bytes WHERE execution_id=OLD.execution_id AND run_id=OLD.run_id;
           END;
-          PRAGMA user_version=1;")?;
+          ")?;
+        Self::migrate_policy(&conn, version)?;
         Ok(Arc::new(Self {
             conn: Mutex::new(conn),
             options,
             faults: Mutex::default(),
             source_id: format!("taskloop:{}", uuid::Uuid::new_v4()),
             started: Instant::now(),
+            policy: policy.map(Arc::new),
+            content_slots: Arc::new(tokio::sync::Semaphore::new(8)),
+            degraded: AtomicBool::new(false),
         }))
     }
     fn fault(&self, execution: &str, run: &str, reason: &str) {
-        self.faults
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert((execution.into(), run.into(), reason.into()));
+        if reason != "retention_expired" {
+            self.degraded.store(true, Ordering::Release);
+        }
+        let mut faults = self.faults.lock().unwrap_or_else(|e| e.into_inner());
+        if faults.len() < 1024
+            || faults
+                .iter()
+                .any(|(e, r, s)| e == execution && r == run && s == reason)
+        {
+            faults.insert((execution.into(), run.into(), reason.into()));
+        }
+        drop(faults);
         if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(
-                "INSERT OR IGNORE INTO trace_faults VALUES(?1,?2,?3)",
-                params![execution, run, reason],
-            );
+            let _=conn.execute("UPDATE trace_health SET value=min(value+1,9223372036854775807) WHERE key='dropped'",[]);
+            let _=conn.execute("INSERT OR IGNORE INTO trace_faults SELECT ?1,?2,?3 WHERE EXISTS(SELECT 1 FROM trace_runs WHERE execution_id=?1 AND run_id=?2)",params![execution,run,reason]);
         }
     }
     fn insert(&self, e: &TraceEvent) -> Result<()> {
         let body = serde_json::to_string(e)?;
         let conn = self.conn.lock().map_err(Error::io)?;
+        self.admit(&conn, &e.execution_id, &e.run_id, e.run_observed_at_ms)?;
         let old:Option<String>=conn.query_row("SELECT body FROM trace_events WHERE execution_id=?1 AND run_id=?2 AND (id=?3 OR (source_id=?4 AND source_sequence=?5)) LIMIT 1",params![e.execution_id,e.run_id,e.id,e.source_id,e.source_sequence as i64],|r|r.get(0)).optional()?;
         if let Some(old) = old {
             if old == body {
@@ -177,8 +213,16 @@ impl TraceStore {
             )
             .optional()?
             .unwrap_or((0, 0));
+        let content_bytes: i64 = conn.query_row(
+            "SELECT coalesce(sum(bytes),0) FROM trace_content WHERE execution_id=?1 AND run_id=?2",
+            params![e.execution_id, e.run_id],
+            |r| r.get(0),
+        )?;
         if count as u64 >= self.options.max_events_per_run
-            || (bytes as u64).saturating_add(body.len() as u64) > self.options.max_bytes_per_run
+            || (bytes as u64)
+                .saturating_add(content_bytes as u64)
+                .saturating_add(body.len() as u64)
+                > self.options.max_bytes_per_run
         {
             return Err(Error::new(
                 "trace_capacity",
@@ -186,10 +230,14 @@ impl TraceStore {
                 "trace capacity exhausted",
             ));
         }
+        self.global_capacity(&conn, body.len(), true)?;
         conn.execute("INSERT INTO trace_events(execution_id,run_id,id,source_id,source_sequence,bytes,body) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![e.execution_id,e.run_id,e.id,e.source_id,e.source_sequence as i64,body.len() as i64,body])?;
         Ok(())
     }
     fn record(&self, e: TraceEvent) {
+        if self.maintain().is_err() {
+            self.fault(&e.execution_id, &e.run_id, "retention_storage");
+        }
         if let Err(error) = self.insert(&e) {
             self.fault(
                 &e.execution_id,
@@ -197,6 +245,7 @@ impl TraceStore {
                 match error.code.as_str() {
                     "trace_capacity" => "capacity",
                     "trace_conflict" => "source_conflict",
+                    "trace_expired" => "retention_expired",
                     _ => "storage",
                 },
             );
@@ -216,23 +265,37 @@ impl TraceStore {
             state: state.into(),
             visit,
             sequence: AtomicU64::new(0),
+            observed_ms: crate::runtime::now_ms(),
         })
     }
     pub fn read(&self, execution: &str, q: &TraceQuery) -> Result<TracePage> {
         validate_query(q)?;
+        let _ = self.maintain();
+        let (run_policies, expired_runs) = self.query_policies(execution, q.run_id.as_deref())?;
         let conn = self
             .conn
             .lock()
             .map_err(|_| Error::new("trace_unavailable", "/trace", "trace store unavailable"))?;
         // The per-run admission bound makes each source scan bounded; no original Harness files are read.
-        let mut stmt=conn.prepare("SELECT cursor,body FROM trace_events WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2) ORDER BY cursor")?;
-        let rows = stmt.query_map(params![execution, q.run_id], |r| {
-            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?))
-        })?;
+        let mut stmt=conn.prepare("SELECT cursor,body FROM trace_events WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2) AND (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status!='expired' AND (expires_ms IS NULL OR expires_ms>?3)) ORDER BY cursor")?;
+        let rows = stmt.query_map(
+            params![execution, q.run_id, crate::runtime::now_ms() as i64],
+            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?)),
+        )?;
         let mut events = Vec::new();
         let mut sources: BTreeMap<(String, String), (BTreeSet<u64>, bool)> = BTreeMap::new();
         let mut spans: BTreeMap<(String, String), (Option<String>, bool)> = BTreeMap::new();
         let mut issues = BTreeSet::new();
+        let dropped: i64 = conn.query_row(
+            "SELECT value FROM trace_health WHERE key='dropped'",
+            [],
+            |r| r.get(0),
+        )?;
+        let collector_degraded = self.degraded.load(Ordering::Acquire) || dropped > 0;
+
+        for run in &expired_runs {
+            issues.insert(format!("retention_expired:{run}"));
+        }
         let mut latest_status = BTreeMap::new();
         let mut activities: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
         let mut expected_runs = BTreeSet::new();
@@ -362,6 +425,9 @@ impl TraceStore {
                 }
             })
             .collect();
+        if sources.is_empty() {
+            issues.insert("not_recorded_or_expired".into());
+        }
         let complete = !sources.is_empty()
             && sources.iter().all(|s| s.terminal)
             && open_spans.is_empty()
@@ -377,6 +443,10 @@ impl TraceStore {
             issues: issues.into_iter().collect(),
             sources,
             open_spans,
+            policy: Some(self.policy_snapshot()),
+            run_policies,
+            expired_runs,
+            collector_degraded,
         })
     }
 }
@@ -408,6 +478,10 @@ pub(crate) fn disabled(q: &TraceQuery) -> Result<TracePage> {
         issues: vec!["disabled".into()],
         sources: vec![],
         open_spans: vec![],
+        policy: None,
+        run_policies: BTreeMap::new(),
+        expired_runs: vec![],
+        collector_degraded: false,
     })
 }
 pub(crate) struct RunTrace {
@@ -417,6 +491,7 @@ pub(crate) struct RunTrace {
     state: String,
     visit: u64,
     sequence: AtomicU64,
+    observed_ms: u64,
 }
 impl RunTrace {
     pub fn trace_id(&self) -> String {
@@ -443,6 +518,7 @@ impl RunTrace {
             source_id: self.store.source_id.clone(),
             source_sequence: self.sequence.fetch_add(1, Ordering::AcqRel) + 1,
             timestamp_ms: crate::runtime::now_ms(),
+            run_observed_at_ms: self.observed_ms,
             monotonic_ns: self.store.started.elapsed().as_nanos().to_string(),
             kind: kind.into(),
             data,
@@ -593,6 +669,7 @@ impl MilkieObserver for RunTrace {
                 source_id: format!("milkie:{source}"),
                 source_sequence: sequence,
                 timestamp_ms: e["timestamp"].as_u64()?,
+                run_observed_at_ms: self.observed_ms,
                 monotonic_ns: mono,
                 kind: kind.clone(),
                 data: source_data(&kind, &e["data"])?,
@@ -665,6 +742,7 @@ mod tests {
             source_id: "milkie:source".into(),
             source_sequence: sequence,
             timestamp_ms: 1000 - sequence,
+            run_observed_at_ms: 1000,
             monotonic_ns: sequence.to_string(),
             kind: kind.into(),
             data: json!({}),

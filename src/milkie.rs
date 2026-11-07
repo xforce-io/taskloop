@@ -461,7 +461,13 @@ impl Context {
         }) {
             return json!({"ok":false,"code":"rejected","message":"Mismatched trace context"});
         }
-        if metadata.call_id.is_empty() || metadata.call_id.len() > 128 {
+        if metadata.call_id.is_empty()
+            || metadata.call_id.len() > 128
+            || metadata
+                .native_call_id
+                .as_ref()
+                .is_some_and(|s| s.is_empty() || s.len() > 128)
+        {
             return json!({"ok":false,"code":"rejected","message":"Invalid call identity"});
         }
         let result = tokio::select! { _ = self.cancel.cancelled() => return json!({"ok":false,"code":"rejected","message":"Execution cancelled"}), result = self.bridge.call_with_metadata(tool, args["input"].clone(), metadata) => result };

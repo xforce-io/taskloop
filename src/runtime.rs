@@ -188,7 +188,7 @@ impl Runtime {
         definitions: Vec<Definition>,
         bindings: HostBindings,
     ) -> Result<Self> {
-        Self::open_impl(options, definitions, bindings, None).await
+        Self::open_impl(options, definitions, bindings, None, None).await
     }
     pub async fn open_with_trace(
         options: RuntimeOptions,
@@ -196,13 +196,23 @@ impl Runtime {
         bindings: HostBindings,
         trace: crate::TraceOptions,
     ) -> Result<Self> {
-        Self::open_impl(options, definitions, bindings, Some(trace)).await
+        Self::open_impl(options, definitions, bindings, Some(trace), None).await
+    }
+    pub async fn open_with_trace_policy(
+        options: RuntimeOptions,
+        definitions: Vec<Definition>,
+        bindings: HostBindings,
+        trace: crate::TraceOptions,
+        policy: crate::TracePolicy,
+    ) -> Result<Self> {
+        Self::open_impl(options, definitions, bindings, Some(trace), Some(policy)).await
     }
     async fn open_impl(
         options: RuntimeOptions,
         definitions: Vec<Definition>,
         bindings: HostBindings,
         trace_options: Option<crate::TraceOptions>,
+        trace_policy: Option<crate::TracePolicy>,
     ) -> Result<Self> {
         if options.max_admitted_instances == 0 || options.max_admitted_instances > 1024 {
             return Err(Error::new(
@@ -229,7 +239,12 @@ impl Runtime {
             store.save_definition(d)?;
         }
         let trace = trace_options
-            .map(|t| crate::trace::TraceStore::open(&options.store_dir, t))
+            .map(|t| match trace_policy {
+                Some(p) => {
+                    crate::trace::TraceStore::open_with_policy(&options.store_dir, t, Some(p))
+                }
+                None => crate::trace::TraceStore::open(&options.store_dir, t),
+            })
             .transpose()?;
         let inner = Arc::new(Inner {
             store,
@@ -410,6 +425,23 @@ impl Runtime {
         caller: &Caller,
     ) -> Result<Vec<u8>> {
         Ok(serde_json::to_vec(&self.trace(id, query, caller)?)?)
+    }
+    pub fn read_trace_content(
+        &self,
+        id: &str,
+        content_id: &str,
+        caller: &Caller,
+    ) -> Result<crate::TraceContent> {
+        self.inner.authorized(id, caller)?;
+        self.inner
+            .trace
+            .as_ref()
+            .ok_or_else(|| Error::new("not_found", "/trace/content", "trace content not found"))?
+            .read_content(id, content_id)
+    }
+    /// Host maintenance; no other principal's records or identifiers are returned.
+    pub fn maintain_trace(&self) -> Result<usize> {
+        self.inner.trace.as_ref().map_or(Ok(0), |s| s.maintain())
     }
     pub async fn signal(
         &self,
@@ -644,6 +676,9 @@ impl Runtime {
                 }
                 self.inner.save(&row, &record, false, None, &[])?;
             }
+        }
+        if let Some(trace) = &self.inner.trace {
+            let _ = trace.finish_observation();
         }
         Ok(())
     }
@@ -920,6 +955,9 @@ pub(crate) fn enter(r: &mut Record, d: &Definition, target: &str, transition: bo
 }
 async fn worker_loop(inner: Arc<Inner>) {
     while !inner.stop.is_cancelled() {
+        if let Some(trace) = &inner.trace {
+            trace.background_maintenance();
+        }
         let rows = match inner.store.all() {
             Ok(rows) => rows,
             Err(_) => {

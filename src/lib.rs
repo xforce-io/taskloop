@@ -37,3 +37,9 @@ mod trace;
 pub use trace::{
     OpenSpan, TraceEvent, TraceItem, TraceOptions, TracePage, TraceQuery, TraceSource,
 };
+
+mod trace_policy;
+pub use trace_policy::{
+    TraceContent, TraceContentFilter, TraceContentRef, TracePolicy, TracePolicySnapshot,
+    TraceToolContent,
+};

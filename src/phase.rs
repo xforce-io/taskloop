@@ -241,12 +241,21 @@ impl Bridge {
                     }
                 })
                 .unwrap_or_else(|| trace.phase_span());
-            // No arguments or arbitrary caller error text enter observation storage.
-            trace.emit("tool.started", &span, Some(parent), json!({"tool":id,"call_id":metadata.as_ref().map(|m|&m.call_id),"source_run_id":metadata.as_ref().map(|m|&m.source_run_id),"native_call_id":metadata.as_ref().and_then(|m|m.native_call_id.as_ref())}));
+            let content = if self.active().is_ok() && self.entry.tools.iter().any(|t| t == id) {
+                trace.content(id, "input", &span, &args).await
+            } else {
+                None
+            };
+            trace.emit("tool.started", &span, Some(parent), json!({"tool":if self.entry.tools.iter().any(|t|t==id){id}else{"<undeclared>"},"call_id":metadata.as_ref().map(|m|&m.call_id),"source_run_id":metadata.as_ref().map(|m|&m.source_run_id),"native_call_id":metadata.as_ref().and_then(|m|m.native_call_id.as_ref()),"input_content":content}));
         }
         let result = self.call_inner(id, args).await;
         if let Some(trace) = &self.trace {
-            trace.emit("tool.finished", &span, None, json!({"outcome":if result.is_ok(){"succeeded"}else{"failed"},"code":result.as_ref().err().map(|e|&e.code)}));
+            let content = if let Ok(value) = &result {
+                trace.content(id, "output", &span, value).await
+            } else {
+                None
+            };
+            trace.emit("tool.finished", &span, None, json!({"outcome":if result.is_ok(){"succeeded"}else{"failed"},"code":result.as_ref().err().map(|e|&e.code),"output_content":content}));
         }
         if let Err(error) = &result
             && matches!(error.code.as_str(), "storage_error" | "revision_conflict")

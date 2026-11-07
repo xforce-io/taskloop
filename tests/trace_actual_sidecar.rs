@@ -2,8 +2,16 @@
 mod common;
 use common::*;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use taskloop::*;
+struct SelectedFilter;
+#[async_trait::async_trait]
+impl TraceContentFilter for SelectedFilter {
+    async fn redact(&self, _: &str, _: &str, selected: Value) -> Result<Value> {
+        Ok(selected)
+    }
+}
 #[tokio::test]
 #[ignore = "requires exact upstream Milkie CLI and Node paths; never a real model success test"]
 async fn real_milkie_trace_public_query_and_cancel() {
@@ -52,7 +60,7 @@ async fn real_milkie_trace_public_query_and_cancel() {
     let executor = Arc::new(MilkieExecutor::new(config).unwrap());
     let mut bindings = f.bindings("pass");
     bindings.executors.insert("test.executor".into(), executor);
-    let rt = Runtime::open_with_trace(
+    let rt = Runtime::open_with_trace_policy(
         RuntimeOptions::new(root.join("store")),
         vec![f.definition.clone()],
         bindings,
@@ -61,6 +69,23 @@ async fn real_milkie_trace_public_query_and_cancel() {
             max_bytes_per_run: 1048576,
             source_max_events: 1000,
             source_max_bytes: 262144,
+        },
+        TracePolicy {
+            policy_id: "cross-language-v1".into(),
+            max_total_events: 10000,
+            max_total_bytes: 4194304,
+            max_runs: 16,
+            retention_ms: 60000,
+            max_content_bytes: 4096,
+            content_tools: BTreeMap::from([(
+                "artifact.write".into(),
+                TraceToolContent {
+                    input: vec!["/value".into()],
+                    output: vec![],
+                },
+            )]),
+            filter_version: Some("selected-fixture-v1".into()),
+            filter: Some(Arc::new(SelectedFilter)),
         },
     )
     .await
@@ -153,6 +178,18 @@ async fn real_milkie_trace_public_query_and_cancel() {
             .iter()
             .filter(|e| e.event.source_id.starts_with("milkie:"))
             .all(|e| e.event.milkie_run_id.is_some() && e.event.milkie_context_id.is_some())
+    );
+    let reference: TraceContentRef =
+        serde_json::from_value(tool.event.data["input_content"].clone()).unwrap();
+    let content = rt
+        .read_trace_content(&id, &reference.id, &Caller::local())
+        .unwrap();
+    assert_eq!(content.value["/value"]["nonce"], "CROSS-LANGUAGE");
+    assert_eq!(
+        rt.read_trace_content(&held, &reference.id, &Caller::local())
+            .unwrap_err()
+            .code,
+        "not_found"
     );
     let cancelled = rt
         .trace(
