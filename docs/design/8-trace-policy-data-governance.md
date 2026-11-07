@@ -1,6 +1,6 @@
 # #8 Trace 内容与数据治理
 
-版本：v0.2（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/8 。L1: write（Issue 概要）；L2: write（本文件为唯一详细契约）。沿用用户确认的“TaskLoop 集成 Milkie Trace 并统一治理”和本票 S1/S2；不将推荐的保留天数或容量当成批准默认值。章节和存放位置遵循用户 AGENTS；细化验收放 §11。
+版本：v0.3（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/8 。L1: write（Issue 概要）；L2: write（本文件为唯一详细契约）。沿用用户确认的“TaskLoop 集成 Milkie Trace 并统一治理”和本票 S1/S2；不将推荐的保留天数或容量当成批准默认值。章节和存放位置遵循用户 AGENTS；细化验收放 §11。
 
 ## 1 背景
 
@@ -89,7 +89,7 @@ flowchart TD
 
 [本票 #8](https://github.com/xforce-io/taskloop/issues/8)、[依赖 #7](https://github.com/xforce-io/taskloop/issues/7)、[Epic #5](https://github.com/xforce-io/taskloop/issues/5)。
 
-### v0.2 源缓冲与恢复契约
+### v0.3 源缓冲与恢复契约
 
 新增 Executor::cleanup_observation(run_id)，默认内部不可观测执行器返回 not_applicable，声称内部观测但未实现清理者为 unsupported。MilkieExecutor 只查自有 owner 关联和 Milkie execution.query/observation.purge；验证 run/context 和能力，不启动/取消原生执行，不碰认证或原生功能会话。活动、原生停止未确认或工具 pending 返回 deferred；公开协议/存储失败 failed；只有确认返回才记 purged。请求/回复丢失可幂等重试。
 
@@ -98,3 +98,9 @@ flowchart TD
 接纳失败时继续业务但关闭该 invocation 的源观测，避免中央配额已满仍无限创建源 journal；这要求 Milkie 的 observed 入口把 None 解释为显式关闭，普通 execute 保留独立 observer 行为。已接纳源仍由每 Run 源容量和中央 max_runs 共同限制；未确认源清理记录不得淘汰。清理失败可阻止新观测接纳，不阻止业务执行。晚到事件根据原接纳时间拒收，不得建立新 journal。
 
 旧 v1 无期限事件仍为 legacy；旧 v2 有期限而无执行器绑定者迁移为 unbound 并明确未清理，不能虚构成功。业务库不变，旧观测实现拒绝新格式。
+
+### v0.3 审查修正
+
+清理前必须由 Runtime 的 active Run/已结束 attempt 事实确认同一 invocation 不会再启动；原生停止未知继续 deferred。适配器还需确认本机 supervisor 已完成，不能把 owner.start_sent=false 或目录尚未创建当作不会启动的证据。该约束覆盖保留期限短于启动握手的情况，不修改业务生命周期。
+
+降低 max_runs 后，接纳必须批量淘汰足够的、已确认源清理的过期记录，并重新核对剩余数量；未确认记录阻止降到新上限时拒绝新观测，不改变业务结果，不强制删除未确认来源。历史策略与新策略分别保留，不能通过只删一条再新增一条绕过降低后的限制。

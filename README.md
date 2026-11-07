@@ -46,7 +46,7 @@ let executor = std::sync::Arc::new(taskloop::MilkieExecutor::new(config)?);
 let bindings = taskloop::HostBindings::default().executor("research.agent", executor);
 ```
 
-Milkie 依赖固定于上游 #277/#278 的契约与提交，当前兼容补充候选为60b08f1；从该提交构建/打包并记录宿主配置版本，不能把旧 registry 0.1.1 当作已包含 Sidecar。公开协议与能力在执行前核对。详情见 [设计](docs/design/6-milkie-executor-lifecycle.md) 和 [验收路径](.agents/skills/verify-taskloop/features/01-milkie-execution.md)。原生模型成功验收仍待补齐。
+Milkie 依赖固定于上游 #277/#278 的契约与提交，基础兼容候选为60b08f1，#8 源端治理需包含公开 purge 的275a917（或后续兼容提交）；从该提交构建/打包并记录宿主配置版本，不能把旧 registry 0.1.1 当作已包含 Sidecar。公开协议与能力在执行前核对。详情见 [设计](docs/design/6-milkie-executor-lifecycle.md) 和 [验收路径](.agents/skills/verify-taskloop/features/01-milkie-execution.md)。原生模型成功验收仍待补齐。
 
 ### 统一 Trace（显式启用）
 

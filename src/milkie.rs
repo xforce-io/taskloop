@@ -304,6 +304,23 @@ impl Executor for MilkieExecutor {
     }
     async fn cleanup_observation(&self, run_id: &str) -> crate::ObservationCleanup {
         use crate::ObservationCleanup as C;
+        // A live supervisor may still publish start_sent and launch the source.
+        // The framework separately proves that this invocation cannot start again.
+        let control = self
+            .runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(run_id)
+            .cloned();
+        if let Some(control) = control
+            && control
+                .outcome
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+        {
+            return C::Deferred;
+        }
         let root = self.root(run_id);
         if !root.exists() {
             return C::NotApplicable;

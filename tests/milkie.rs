@@ -40,6 +40,10 @@ fn adapter(f: &Fixture, mode: &str) -> Arc<MilkieExecutor> {
         "MILKIE_FIXTURE_STARTED_FILE",
         root.join("started.log").into_os_string(),
     );
+    let config = config.env(
+        "MILKIE_FIXTURE_HANDSHAKE_FILE",
+        root.join("handshake.log").into_os_string(),
+    );
     Arc::new(MilkieExecutor::new(config).unwrap())
 }
 async fn runtime(f: &Fixture, mode: &str, gate: &str) -> Runtime {
@@ -383,4 +387,29 @@ async fn old_source_without_purge_capability_is_explicitly_unsupported() {
         a.cleanup_observation(&run).await,
         ObservationCleanup::Unsupported
     );
+}
+
+#[tokio::test]
+async fn cleanup_during_handshake_cannot_claim_no_source_will_start() {
+    let f = Fixture::new(false);
+    let a = adapter(&f, "slow_handshake");
+    let inv = invocation(&f, false, 10000);
+    let run = inv.run_id.clone();
+    let executor = a.clone();
+    let task = tokio::spawn(async move {
+        executor
+            .execute(inv, Arc::new(Spy::default()), CancellationToken::new())
+            .await
+    });
+    for _ in 0..100 {
+        if f.root.path().join("handshake.log").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(f.root.path().join("handshake.log").exists());
+    let cleanup = a.cleanup_observation(&run).await;
+    let result = task.await.unwrap();
+    assert!(matches!(result, ExecutionOutcome::Completed { .. }));
+    assert_eq!(cleanup, ObservationCleanup::Deferred);
 }

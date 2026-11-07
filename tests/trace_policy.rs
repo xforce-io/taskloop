@@ -362,6 +362,8 @@ struct CleanupExecutor {
     calls: Arc<std::sync::atomic::AtomicUsize>,
     cleanups: Arc<std::sync::atomic::AtomicUsize>,
     block: bool,
+    startup_delay_ms: u64,
+    not_started_no_source: bool,
 }
 #[async_trait::async_trait]
 impl Executor for CleanupExecutor {
@@ -377,6 +379,7 @@ impl Executor for CleanupExecutor {
         tools: Arc<dyn ToolBridge>,
         _: tokio_util::sync::CancellationToken,
     ) -> ExecutionOutcome {
+        tokio::time::sleep(Duration::from_millis(self.startup_delay_ms)).await;
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         tools
             .call(
@@ -392,6 +395,9 @@ impl Executor for CleanupExecutor {
     async fn cleanup_observation(&self, _: &str) -> ObservationCleanup {
         self.cleanups
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.not_started_no_source && self.calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            return ObservationCleanup::NotApplicable;
+        }
         if self.block {
             std::future::pending::<()>().await;
         }
@@ -409,6 +415,8 @@ fn cleanup_executor(label: &'static str) -> Arc<CleanupExecutor> {
         calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         cleanups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         block: false,
+        startup_delay_ms: 0,
+        not_started_no_source: false,
     })
 }
 async fn open_cleanup(f: &Fixture, executor: Arc<CleanupExecutor>) -> Runtime {
@@ -517,5 +525,42 @@ async fn blocked_source_cleanup_does_not_block_shutdown_or_change_business_state
     assert_eq!(
         rt.get(&a, &Caller::local()).await.unwrap().status,
         Status::Completed
+    );
+}
+
+#[tokio::test]
+async fn retention_cleanup_waits_until_framework_cannot_start_the_run() {
+    use std::sync::atomic::Ordering;
+    let f = Fixture::new(false);
+    let mut executor = cleanup_executor("delayed");
+    Arc::get_mut(&mut executor).unwrap().startup_delay_ms = 1200;
+    Arc::get_mut(&mut executor).unwrap().not_started_no_source = true;
+    executor.allow.store(true, Ordering::SeqCst);
+    let rt = open_cleanup(&f, executor.clone()).await;
+    let id = rt
+        .start(
+            f.request("delayed", "PUBLIC SYNTHETIC-KEY", false),
+            &Caller::local(),
+        )
+        .await
+        .unwrap();
+    wait_for(&rt, &id, |s| s.status == Status::Running).await;
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    let before = executor.cleanups.load(Ordering::SeqCst);
+    assert_eq!(
+        wait_for(&rt, &id, |s| s.status.terminal()).await.status,
+        Status::Completed
+    );
+    let page = rt.trace(&id, q(), &Caller::local()).unwrap();
+    rt.shutdown().await.unwrap();
+    assert_eq!(
+        before, 0,
+        "collector must not ask an executor to retire a run still starting"
+    );
+    assert!(
+        !page
+            .source_cleanup
+            .iter()
+            .any(|s| s.state == "not_applicable")
     );
 }

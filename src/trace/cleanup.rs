@@ -103,6 +103,22 @@ pub(crate) async fn cleanup_loop(inner: Arc<Inner>) {
         match trace.cleanup_due() {
             Ok(Some(job)) => {
                 let operation = async {
+                    let Ok(row) = inner.store.load(&job.execution) else {
+                        return "binding_unavailable";
+                    };
+                    let Ok(record) = crate::runtime::decode(&row) else {
+                        return "binding_unavailable";
+                    };
+                    // Expiry is not retirement: an admitted/starting invocation can
+                    // still create a source after its observation deadline passes.
+                    let active = record.active.as_ref().is_some_and(|r| r.id == job.run);
+                    let settled = record.attempts.iter().any(|a| {
+                        a.run_id == job.run
+                            && !matches!(a.outcome, crate::ExecutionOutcome::StopUnknown { .. })
+                    });
+                    if active && !settled || record.stop_unknown && record.active.is_none() {
+                        return "deferred";
+                    }
                     let Some(executor) = inner.bindings.executors.get(&job.executor) else {
                         return "binding_unavailable";
                     };

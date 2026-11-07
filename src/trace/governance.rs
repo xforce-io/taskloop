@@ -78,12 +78,18 @@ impl TraceStore {
             let count: i64 =
                 conn.query_row("SELECT runs FROM trace_global WHERE id=1", [], |r| r.get(0))?;
             if count >= policy.max_runs as i64 {
-                // Bounded tombstones may be evicted; missing history must remain unknown.
-                conn.execute("DELETE FROM trace_faults WHERE (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status='expired' AND NOT EXISTS(SELECT 1 FROM trace_cleanup c WHERE c.execution_id=trace_runs.execution_id AND c.run_id=trace_runs.run_id AND c.state NOT IN ('purged','not_applicable')) LIMIT 1)",[])?;
-                conn.execute("DELETE FROM trace_totals WHERE (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status='expired' AND NOT EXISTS(SELECT 1 FROM trace_cleanup c WHERE c.execution_id=trace_runs.execution_id AND c.run_id=trace_runs.run_id AND c.state NOT IN ('purged','not_applicable')) LIMIT 1)",[])?;
-                let removed=conn.execute("DELETE FROM trace_runs WHERE rowid IN (SELECT rowid FROM trace_runs WHERE status='expired' AND NOT EXISTS(SELECT 1 FROM trace_cleanup c WHERE c.execution_id=trace_runs.execution_id AND c.run_id=trace_runs.run_id AND c.state NOT IN ('purged','not_applicable')) LIMIT 1)",[])?;
+                // A lowered policy may require evicting multiple confirmed tombstones.
+                // Batch the bounded cleanup instead of scanning once per record.
+                let needed = count
+                    .saturating_sub(policy.max_runs as i64)
+                    .saturating_add(1);
+                conn.execute("DELETE FROM trace_faults WHERE (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status='expired' AND NOT EXISTS(SELECT 1 FROM trace_cleanup c WHERE c.execution_id=trace_runs.execution_id AND c.run_id=trace_runs.run_id AND c.state NOT IN ('purged','not_applicable')) LIMIT ?1)",[needed])?;
+                conn.execute("DELETE FROM trace_totals WHERE (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status='expired' AND NOT EXISTS(SELECT 1 FROM trace_cleanup c WHERE c.execution_id=trace_runs.execution_id AND c.run_id=trace_runs.run_id AND c.state NOT IN ('purged','not_applicable')) LIMIT ?1)",[needed])?;
+                let removed=conn.execute("DELETE FROM trace_runs WHERE rowid IN (SELECT rowid FROM trace_runs WHERE status='expired' AND NOT EXISTS(SELECT 1 FROM trace_cleanup c WHERE c.execution_id=trace_runs.execution_id AND c.run_id=trace_runs.run_id AND c.state NOT IN ('purged','not_applicable')) LIMIT ?1)",[needed])?;
                 conn.execute("DELETE FROM trace_cleanup WHERE NOT EXISTS(SELECT 1 FROM trace_runs r WHERE r.execution_id=trace_cleanup.execution_id AND r.run_id=trace_cleanup.run_id)",[])?;
-                if removed == 0 {
+                let remaining: i64 =
+                    conn.query_row("SELECT runs FROM trace_global WHERE id=1", [], |r| r.get(0))?;
+                if removed == 0 || remaining >= policy.max_runs as i64 {
                     return Err(Error::new(
                         "trace_capacity",
                         "/trace",
@@ -499,6 +505,54 @@ mod tests {
             .unwrap();
         assert!(p.issues.iter().any(|e| e.starts_with("host_unflushed:")));
         assert!(!p.complete);
+    }
+    #[test]
+    fn reduced_run_quota_evicts_enough_settled_records_or_refuses_admission() {
+        for pending in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut old = policy();
+            old.max_runs = 4;
+            old.retention_ms = 20;
+            {
+                let s = TraceStore::open_with_policy(temp.path(), options(), Some(old)).unwrap();
+                for i in 0..4 {
+                    let t = s.session("e", &format!("r{i}"), "work", 1);
+                    assert!(t.reserve_executor("test", &json!({"fixture":true})));
+                    t.emit("phase.started", &t.phase_span(), None, json!({}));
+                }
+                s.finish_observation().unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            let mut new = policy();
+            new.retention_ms = 60000;
+            let s = TraceStore::open_with_policy(temp.path(), options(), Some(new)).unwrap();
+            s.maintain().unwrap();
+            s.conn
+                .lock()
+                .unwrap()
+                .execute("UPDATE trace_cleanup SET state='not_applicable'", [])
+                .unwrap();
+            if pending {
+                s.conn
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE trace_cleanup SET state='deferred' WHERE run_id='r3'",
+                        [],
+                    )
+                    .unwrap();
+            }
+            let t = s.session("e", "new", "work", 1);
+            let admitted = t.reserve_executor("test", &json!({"fixture":true}));
+            assert_eq!(admitted, !pending);
+            let count: i64 = s
+                .conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT runs FROM trace_global WHERE id=1", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        }
     }
     #[test]
     fn v2_migration_does_not_invent_missing_executor_binding() {

@@ -232,7 +232,8 @@ pub trait Executor: Send + Sync {
     ) -> ExecutionOutcome {
         self.execute(invocation, tools, cancel).await
     }
-    /// Retention only: must not start/cancel execution or delete functional native sessions.
+    /// Retention only: caller must establish that this Run's invocation cannot start again.
+    /// Must not start/cancel execution or delete functional native sessions.
     async fn cleanup_observation(&self, _run_id: &str) -> ObservationCleanup {
         if self.internal_observation() {
             ObservationCleanup::Unsupported
