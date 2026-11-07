@@ -32,3 +32,8 @@ pub use milkie::{
     MilkieConfig, MilkieExecutor, MilkieObservationOptions, MilkieObserver, MilkieStorage,
     ToolCallMetadata,
 };
+
+mod trace;
+pub use trace::{
+    OpenSpan, TraceEvent, TraceItem, TraceOptions, TracePage, TraceQuery, TraceSource,
+};

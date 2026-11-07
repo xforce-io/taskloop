@@ -102,10 +102,16 @@ async fn main() {
         );
     assert!(validate(&definition, &bindings).unwrap().valid);
     let digest = definition.digest.clone();
-    let rt = Runtime::open(
+    let rt = Runtime::open_with_trace(
         RuntimeOptions::new(root.path().join("store")),
         vec![definition],
         bindings,
+        TraceOptions {
+            max_events_per_run: 1000,
+            max_bytes_per_run: 1048576,
+            source_max_events: 1000,
+            source_max_bytes: 262144,
+        },
     )
     .await
     .unwrap();
@@ -151,9 +157,46 @@ async fn main() {
             .status,
         Status::Cancelled
     );
+    let trace = rt
+        .trace(
+            &a,
+            TraceQuery {
+                limit: 100,
+                ..Default::default()
+            },
+            &Caller::local(),
+        )
+        .unwrap();
+    assert!(trace.enabled);
+    assert!(trace.events.iter().any(|e| e.event.kind == "tool.started"));
+    assert!(
+        trace
+            .events
+            .iter()
+            .any(|e| e.event.kind == "check.finished")
+    );
+    assert!(
+        trace
+            .issues
+            .iter()
+            .any(|s| s.starts_with("internal_unavailable:"))
+    );
+    let exported: TracePage = serde_json::from_slice(
+        &rt.export_trace(
+            &a,
+            TraceQuery {
+                limit: 100,
+                ..Default::default()
+            },
+            &Caller::local(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(exported.events.len(), trace.events.len());
     rt.shutdown().await.unwrap();
     println!(
         "{}",
-        json!({"external_consumer":"pass","operations":["start","get","signal","cancel","read_artifact"],"private_modules_imported":false,"execution":"deterministic; real Harness is tested separately"})
+        json!({"external_consumer":"pass","operations":["start","get","signal","cancel","read_artifact","trace","export_trace"],"private_modules_imported":false,"execution":"deterministic; real Harness is tested separately"})
     );
 }

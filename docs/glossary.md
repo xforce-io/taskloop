@@ -66,3 +66,6 @@
 | ToolCallMetadata | 关联一次宿主工具调用的 Milkie 调用标识、原生标识及可选 traceparent，不赋予额外权限。 | — |
 | Milkie | 用于统一执行与适配 Agent Harness 的 TypeScript 框架。 | — |
 | Trace | 关联业务阶段、Agent 和工具等运行时观测事实的时间线，不作为业务状态权威。 | — |
+| TraceCursor | 统一 Trace 按接收持久化顺序续读的位置，不表示全局发生顺序。 | — |
+| SourceSequence | 同一观测来源提供的原始序号，不能跨来源比较。 | — |
+| Span | 以 trace 和 span 标识关联开始、结束或活动的观测操作。 | — |

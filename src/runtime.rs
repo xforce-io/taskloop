@@ -37,6 +37,7 @@ pub struct Runtime {
 }
 pub(crate) struct Inner {
     pub store: Store,
+    pub trace: Option<Arc<crate::trace::TraceStore>>,
     pub bindings: HostBindings,
     pub options: RuntimeOptions,
     pub binding_fingerprint: String,
@@ -187,6 +188,22 @@ impl Runtime {
         definitions: Vec<Definition>,
         bindings: HostBindings,
     ) -> Result<Self> {
+        Self::open_impl(options, definitions, bindings, None).await
+    }
+    pub async fn open_with_trace(
+        options: RuntimeOptions,
+        definitions: Vec<Definition>,
+        bindings: HostBindings,
+        trace: crate::TraceOptions,
+    ) -> Result<Self> {
+        Self::open_impl(options, definitions, bindings, Some(trace)).await
+    }
+    async fn open_impl(
+        options: RuntimeOptions,
+        definitions: Vec<Definition>,
+        bindings: HostBindings,
+        trace_options: Option<crate::TraceOptions>,
+    ) -> Result<Self> {
         if options.max_admitted_instances == 0 || options.max_admitted_instances > 1024 {
             return Err(Error::new(
                 "input_invalid",
@@ -211,8 +228,12 @@ impl Runtime {
         for d in &definitions {
             store.save_definition(d)?;
         }
+        let trace = trace_options
+            .map(|t| crate::trace::TraceStore::open(&options.store_dir, t))
+            .transpose()?;
         let inner = Arc::new(Inner {
             store,
+            trace,
             bindings,
             options,
             binding_fingerprint: fingerprint,
@@ -367,6 +388,28 @@ impl Runtime {
         self.inner.expire(id)?;
         let row = self.inner.authorized(id, caller)?;
         self.inner.snapshot(&row)
+    }
+    /// Authorized, versioned observation page. Does not drive workflow state.
+    pub fn trace(
+        &self,
+        id: &str,
+        query: crate::TraceQuery,
+        caller: &Caller,
+    ) -> Result<crate::TracePage> {
+        self.inner.authorized(id, caller)?;
+        match &self.inner.trace {
+            Some(store) => store.read(id, &query),
+            None => crate::trace::disabled(&query),
+        }
+    }
+    /// Bounded JSON export; continue with the returned page cursor.
+    pub fn export_trace(
+        &self,
+        id: &str,
+        query: crate::TraceQuery,
+        caller: &Caller,
+    ) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&self.trace(id, query, caller)?)?)
     }
     pub async fn signal(
         &self,
@@ -601,6 +644,17 @@ impl Runtime {
                 }
                 self.inner.save(&row, &record, false, None, &[])?;
             }
+        }
+        for executor in self.inner.bindings.executors.values() {
+            tokio::time::timeout_at(deadline, executor.finish_observations())
+                .await
+                .map_err(|_| {
+                    Error::new(
+                        "trace_cleanup_unconfirmed",
+                        "/shutdown/observation",
+                        "native stops confirmed but observation collectors have not finished",
+                    )
+                })??;
         }
         Ok(())
     }

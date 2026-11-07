@@ -53,6 +53,13 @@ for line in sys.stdin:
   finish('unknown' if mode=='stop_unknown' else 'cancelled',mode!='stop_unknown')
   send({'id':m['id'],'result':r})
   if mode=='late':call(call_id='late-call',request_id='tool:late')
- elif method=='tool.pending':send({'id':m['id'],'result':[{'callId':'unknown-effect'}] if mode=='pending_effect' else []})
- elif method=='observation.read':send({'id':m['id'],'result':{'events':[],'nextSequence':0,'status':{'complete':False}}})
+ elif method=='tool.pending':
+  send({'id':m['id'],'result':[{'callId':'unknown-effect'}] if mode=='pending_effect' else []})
+  if mode=='late_after_finish':
+   time.sleep(.05);call(call_id='after-finish',request_id='tool:after-finish')
+ elif method=='observation.read':
+  if mode in ['slow_observation','late_after_finish']:
+   with open(os.environ['MILKIE_FIXTURE_OBSERVATION_FILE'],'w') as marker:marker.write('native result and pending tools were checked')
+   time.sleep(2)
+  send({'id':m['id'],'result':{'events':'malformed-observation-page' if mode=='bad_observation' else [],'nextSequence':0,'status':{'complete':False}}})
  else:send({'id':m['id'],'error':{'code':-32601,'message':'unknown fixture method'}})

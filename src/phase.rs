@@ -26,6 +26,7 @@ struct Bridge {
     calls: Mutex<u64>,
     written_bytes: Mutex<u64>,
     storage_failure: Mutex<Option<Error>>,
+    trace: Option<Arc<crate::trace::RunTrace>>,
 }
 impl Bridge {
     fn write(&self, candidate: Candidate) -> Result<()> {
@@ -202,7 +203,51 @@ impl ToolBridge for Bridge {
     }).collect()
     }
     async fn call(&self, id: &str, args: Value) -> Result<Value> {
+        self.call_traced(id, args, None).await
+    }
+    async fn call_with_metadata(
+        &self,
+        id: &str,
+        args: Value,
+        metadata: ToolCallMetadata,
+    ) -> Result<Value> {
+        self.call_traced(id, args, Some(metadata)).await
+    }
+}
+impl Bridge {
+    async fn call_traced(
+        &self,
+        id: &str,
+        args: Value,
+        metadata: Option<ToolCallMetadata>,
+    ) -> Result<Value> {
+        let span = crate::trace::RunTrace::span();
+        if let Some(trace) = &self.trace {
+            let parent = metadata
+                .as_ref()
+                .and_then(|m| m.traceparent.as_ref())
+                .and_then(|p| {
+                    let parts: Vec<_> = p.split('-').collect();
+                    if parts.len() == 4
+                        && parts[0] == "00"
+                        && parts[1] == trace.trace_id()
+                        && parts[2].len() == 16
+                        && parts[2].bytes().all(|b| b.is_ascii_hexdigit())
+                        && parts[2].bytes().any(|b| b != b'0')
+                    {
+                        Some(parts[2].to_owned())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| trace.phase_span());
+            // No arguments or arbitrary caller error text enter observation storage.
+            trace.emit("tool.started", &span, Some(parent), json!({"tool":id,"call_id":metadata.as_ref().map(|m|&m.call_id),"source_run_id":metadata.as_ref().map(|m|&m.source_run_id),"native_call_id":metadata.as_ref().and_then(|m|m.native_call_id.as_ref())}));
+        }
         let result = self.call_inner(id, args).await;
+        if let Some(trace) = &self.trace {
+            trace.emit("tool.finished", &span, None, json!({"outcome":if result.is_ok(){"succeeded"}else{"failed"},"code":result.as_ref().err().map(|e|&e.code)}));
+        }
         if let Err(error) = &result
             && matches!(error.code.as_str(), "storage_error" | "revision_conflict")
         {
@@ -334,8 +379,26 @@ impl Bridge {
     }
 }
 pub(crate) async fn run(inner: Arc<Inner>, row: Row) {
+    let trace = decode(&row).ok().and_then(|r| {
+        let a = r.active.as_ref()?;
+        Some(inner.trace.as_ref()?.session(
+            &row.id,
+            &a.id,
+            &r.current_state,
+            *r.visits.get(&r.current_state)?,
+        ))
+    });
+    if let Some(trace) = &trace {
+        trace.emit("phase.started", &trace.phase_span(), None, json!({}));
+    }
     let mut execution_stopped = true;
-    if let Err(error) = run_checked(inner.clone(), row.clone(), &mut execution_stopped).await
+    if let Err(error) = run_checked(
+        inner.clone(),
+        row.clone(),
+        &mut execution_stopped,
+        trace.clone(),
+    )
+    .await
         && let Ok(latest) = inner.store.load(&row.id)
         && let Ok(mut record) = decode(&latest)
         && !record.status.terminal()
@@ -377,11 +440,20 @@ pub(crate) async fn run(inner: Arc<Inner>, row: Row) {
             }
         }
     }
+    if let Some(trace) = &trace {
+        let data=inner.store.load(&row.id).and_then(|r|decode(&r)).ok().map(|r|json!({"status":r.status,"stop_unknown":r.stop_unknown,"code":r.error.map(|e|e.code)})).unwrap_or_else(||json!({"status":"unknown"}));
+        trace.emit("phase.finished", &trace.phase_span(), None, data);
+    }
     if let Ok(mut handles) = inner.handles.lock() {
         handles.remove(&row.id);
     }
 }
-async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) -> Result<()> {
+async fn run_checked(
+    inner: Arc<Inner>,
+    row: Row,
+    execution_stopped: &mut bool,
+    trace: Option<Arc<crate::trace::RunTrace>>,
+) -> Result<()> {
     let mut record = decode(&row)?;
     let definition = inner.store.definition(&record.definition_digest)?;
     if record.binding_fingerprint != inner.binding_fingerprint {
@@ -485,6 +557,7 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
         calls: Mutex::new(0),
         written_bytes: Mutex::new(0),
         storage_failure: Mutex::new(None),
+        trace: trace.clone(),
     });
     let time_left = record
         .limits
@@ -517,6 +590,9 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
         work_dir: inner.store.run_dir(&active.id)?,
         timeout_ms: time_left,
     };
+    if let Some(t) = &trace {
+        t.emit("executor.capabilities",&t.phase_span(),None,json!({"internal_observation":if executor.internal_observation(){"available"}else{"unavailable"}}));
+    }
     let mut internal_stop = false;
     *execution_stopped = false;
     let outcome = if time_left == 0 {
@@ -529,8 +605,13 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
     } else {
         match tokio::time::timeout(
             std::time::Duration::from_millis(time_left.max(1)),
-            AssertUnwindSafe(executor.execute(invocation, bridge.clone(), cancel.clone()))
-                .catch_unwind(),
+            AssertUnwindSafe(executor.execute_observed(
+                invocation,
+                bridge.clone(),
+                cancel.clone(),
+                trace.clone().map(|t| t as Arc<dyn MilkieObserver>),
+            ))
+            .catch_unwind(),
         )
         .await
         {
@@ -562,6 +643,9 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
             }
         }
     };
+    if let Some(t) = &trace {
+        t.emit("executor.finished",&t.phase_span(),None,json!({"outcome":match &outcome {ExecutionOutcome::Completed{..}=>"completed",ExecutionOutcome::Failed{..}=>"failed",ExecutionOutcome::Cancelled=>"cancelled",ExecutionOutcome::StopUnknown{..}=>"stop_unknown"},"code":match &outcome{ExecutionOutcome::Failed{code,..}=>Some(code),_=>None}}));
+    }
     *execution_stopped = !matches!(outcome, ExecutionOutcome::StopUnknown { .. });
     let latest = inner.store.load(&row.id)?;
     let mut current = decode(&latest)?;
@@ -696,10 +780,27 @@ async fn run_checked(inner: Arc<Inner>, row: Row, execution_stopped: &mut bool) 
         inner.save(&check_row, &current, false, None, &[])?;
         return Ok(());
     }
+    let check_span = crate::trace::RunTrace::span();
+    if let Some(t) = &trace {
+        t.emit(
+            "check.started",
+            &check_span,
+            Some(t.phase_span()),
+            json!({"gate":contract.gate,"check_ref":check_ref}),
+        );
+    }
     let checked = tokio::select! {
         _=cancel.cancelled()=>CheckResult::unavailable("check cancelled"),
         result=tokio::time::timeout(std::time::Duration::from_millis(check_budget),AssertUnwindSafe(gate.check(context)).catch_unwind())=>match result {Ok(Ok(v))=>v,_=>CheckResult::unavailable("gate failed or timed out")}
     };
+    if let Some(t) = &trace {
+        t.emit(
+            "check.finished",
+            &check_span,
+            None,
+            json!({"verdict":checked.verdict}),
+        );
+    }
     let latest = inner.store.load(&row.id)?;
     let mut current = decode(&latest)?;
     if current.status == Status::Cancelling || current.epoch != active.epoch {

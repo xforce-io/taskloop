@@ -47,3 +47,13 @@ let bindings = taskloop::HostBindings::default().executor("research.agent", exec
 ```
 
 Milkie 依赖固定于上游 #277/#278 的契约与提交，当前兼容补充候选为60b08f1；从该提交构建/打包并记录宿主配置版本，不能把旧 registry 0.1.1 当作已包含 Sidecar。公开协议与能力在执行前核对。详情见 [设计](docs/design/6-milkie-executor-lifecycle.md) 和 [验收路径](.agents/skills/verify-taskloop/features/01-milkie-execution.md)。原生模型成功验收仍待补齐。
+
+### 统一 Trace（显式启用）
+
+`Runtime::open_with_trace(options, definitions, bindings, TraceOptions { max_events_per_run, max_bytes_per_run, source_max_events, source_max_bytes })` 启用独立观测投影；四项容量均由宿主提供，事件为 2..100000、字节为 4096..67108864。普通 `open` 保持不采集。
+
+通过 `runtime.trace(&execution_id, TraceQuery { run_id: None, after: 0, limit: 100 }, &caller)` 读取；保存 `next` 续读，空页保持游标。`export_trace` 导出相同过滤和授权下的一页 JSON，逐页可导出全部已保留记录。查询和导出都按实例 owner 授权，不直接读存储。
+
+`state.sqlite` 仍是业务事实；同目录 `trace.sqlite` 是版本化观测。每 Run 一个 trace，按实例可聚合多 Run。接收游标不表示跨进程发生顺序；`source_sequence`、来源单调时钟、原生标识和 Milkie 映射保留各自语义。`complete`、`issues`、`sources`、`open_spans` 明确描述缺号、冲突、未结束和能力不可见；最近活动来自已观察事件，不宣称模型仍在运行。观测异常不改变业务结果。默认记录的元数据不含提示或工具正文；累计 usage 保留原 scope，不当成本 Run 增量，也不将未知用量填零。
+
+详见 [#7 契约](docs/design/7-unified-trace-query-export.md)。当前统一治理扩展由 #8 跟踪；这里没有自动导出到远端或自动删除记录。

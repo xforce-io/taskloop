@@ -210,6 +210,27 @@ pub trait Executor: Send + Sync {
         tools: Arc<dyn ToolBridge>,
         cancel: CancellationToken,
     ) -> ExecutionOutcome;
+    /// Whether this adapter accepts the per-invocation Milkie observation contract.
+    /// When true, complete trace requires a final observer.status with
+    /// {"kind":"adapter.summary","adapter_delivery_failed":bool} after all callbacks.
+    /// Business completion alone must not certify the observation tail.
+    fn internal_observation(&self) -> bool {
+        false
+    }
+    async fn execute_observed(
+        &self,
+        invocation: Invocation,
+        tools: Arc<dyn ToolBridge>,
+        cancel: CancellationToken,
+        _observer: Option<Arc<dyn crate::MilkieObserver>>,
+    ) -> ExecutionOutcome {
+        self.execute(invocation, tools, cancel).await
+    }
+    /// Finish bounded observation-only tails after business execution has settled.
+    /// Runtime calls this during shutdown, outside phase execution deadlines.
+    async fn finish_observations(&self) -> Result<()> {
+        Ok(())
+    }
     /// Only a trusted adapter may confirm that its opaque run has no live execution left.
     async fn stop_or_confirm(&self, _run_id: &str) -> StopState {
         StopState::Unknown
