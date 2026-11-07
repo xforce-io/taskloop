@@ -61,3 +61,8 @@
 | ToolOutput | 领域工具返回的业务 payload 与实际内容，由框架桥接层形成受信回执。 | — |
 | GateContext | 供领域 gate 只读取得当前输入、候选、授权事实与检查证据句柄的上下文。 | — |
 | TaskLoopError | 向宿主返回的稳定错误码、摘要及重试信息，不等于业务结果或生命周期。 | — |
+| MilkieExecutor | 通过 Milkie 本地 Sidecar 实现 Executor 契约的 TaskLoop 适配器。 | — |
+| Sidecar | 宿主启动并通过本地 stdio 管理的 Milkie 执行协议进程。 | — |
+| ToolCallMetadata | 关联一次宿主工具调用的 Milkie 调用标识、原生标识及可选 traceparent，不赋予额外权限。 | — |
+| Milkie | 用于统一执行与适配 Agent Harness 的 TypeScript 框架。 | — |
+| Trace | 关联业务阶段、Agent 和工具等运行时观测事实的时间线，不作为业务状态权威。 | — |
