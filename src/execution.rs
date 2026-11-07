@@ -188,6 +188,14 @@ impl ExecutorCapabilities {
 pub trait ToolBridge: Send + Sync {
     fn specs(&self) -> Vec<ToolSpec>;
     async fn call(&self, id: &str, args: Value) -> Result<Value>;
+    async fn call_with_metadata(
+        &self,
+        id: &str,
+        args: Value,
+        _metadata: crate::ToolCallMetadata,
+    ) -> Result<Value> {
+        self.call(id, args).await
+    }
 }
 #[async_trait]
 pub trait Executor: Send + Sync {
