@@ -692,6 +692,17 @@ impl Runtime {
                 self.inner.save(&row, &record, false, None, &[])?;
             }
         }
+        for executor in self.inner.bindings.executors.values() {
+            tokio::time::timeout_at(deadline, executor.finish_observations())
+                .await
+                .map_err(|_| {
+                    Error::new(
+                        "trace_cleanup_unconfirmed",
+                        "/shutdown/observation",
+                        "native stops confirmed but observation collectors have not finished",
+                    )
+                })??;
+        }
         if let Some(trace) = &self.inner.trace {
             let _ = trace.finish_observation();
         }

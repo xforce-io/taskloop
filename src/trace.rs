@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+mod summary;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -167,6 +168,7 @@ impl TraceStore {
           ")?;
         Self::migrate_policy(&conn, version)?;
         Self::migrate_cleanup(&conn)?;
+        Self::migrate_summary(&conn)?;
         Ok(Arc::new(Self {
             conn: Mutex::new(conn),
             options,
@@ -283,84 +285,20 @@ impl TraceStore {
             .conn
             .lock()
             .map_err(|_| Error::new("trace_unavailable", "/trace", "trace store unavailable"))?;
-        // The per-run admission bound makes each source scan bounded; no original Harness files are read.
-        let mut stmt=conn.prepare("SELECT cursor,body FROM trace_events WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2) AND (execution_id,run_id) IN (SELECT execution_id,run_id FROM trace_runs WHERE status!='expired' AND (expires_ms IS NULL OR expires_ms>?3)) ORDER BY cursor")?;
-        let rows = stmt.query_map(
-            params![execution, q.run_id, crate::runtime::now_ms() as i64],
-            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?)),
-        )?;
-        let mut events = Vec::new();
-        let mut sources: BTreeMap<(String, String), (BTreeSet<u64>, bool)> = BTreeMap::new();
-        let mut spans: BTreeMap<(String, String), (Option<String>, bool)> = BTreeMap::new();
-        let mut issues = BTreeSet::new();
+        let events = Self::event_page(&conn, execution, q)?;
+        let summary::Summary {
+            sources,
+            open_spans,
+            mut issues,
+        } = Self::read_summary(&conn, execution, q)?;
         let dropped: i64 = conn.query_row(
             "SELECT value FROM trace_health WHERE key='dropped'",
             [],
             |r| r.get(0),
         )?;
         let collector_degraded = self.degraded.load(Ordering::Acquire) || dropped > 0;
-
         for run in &expired_runs {
             issues.insert(format!("retention_expired:{run}"));
-        }
-        let mut latest_status = BTreeMap::new();
-        let mut activities: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
-        let mut expected_runs = BTreeSet::new();
-        for row in rows {
-            let (cursor, body) = row?;
-            let e: TraceEvent = serde_json::from_str(&body).map_err(|_| {
-                Error::new("trace_corrupt", "/trace", "invalid persisted trace record")
-            })?;
-            let source = sources
-                .entry((e.run_id.clone(), e.source_id.clone()))
-                .or_default();
-            source.0.insert(e.source_sequence);
-            if matches!(
-                e.kind.as_str(),
-                "agent.activity" | "model.requested" | "model.responded"
-            ) {
-                let key = (e.run_id.clone(), e.source_id.clone());
-                if activities.get(&key).is_none_or(|a| a.0 < e.source_sequence) {
-                    activities.insert(key, (e.source_sequence, e.timestamp_ms));
-                }
-            }
-            source.1 |= matches!(e.kind.as_str(), "phase.finished" | "execution.finished");
-            let span = spans
-                .entry((e.run_id.clone(), e.span_id.clone()))
-                .or_default();
-            if matches!(
-                e.kind.as_str(),
-                "phase.started"
-                    | "execution.started"
-                    | "tool.started"
-                    | "tool.requested"
-                    | "check.started"
-            ) {
-                span.0 = Some(e.kind.clone());
-            }
-            if matches!(
-                e.kind.as_str(),
-                "phase.finished" | "execution.finished" | "tool.finished" | "check.finished"
-            ) || (e.kind == "tool.delivery" && e.data["outcome"] == "delivered")
-            {
-                span.1 = true;
-            }
-            if e.kind == "source.status" && e.data["kind"].is_null() {
-                latest_status.insert(e.run_id.clone(), e.data.clone());
-            }
-            if e.kind == "source.status" && e.data["adapter_delivery_failed"] == true {
-                issues.insert(format!("adapter_delivery_failed:{}", e.run_id));
-            }
-            if e.kind == "executor.capabilities" && e.data["internal_observation"] == "available" {
-                expected_runs.insert(e.run_id.clone());
-            }
-            if e.kind == "executor.capabilities" && e.data["internal_observation"] == "unavailable"
-            {
-                issues.insert(format!("internal_unavailable:{}", e.run_id));
-            }
-            if cursor > q.after && events.len() < q.limit as usize {
-                events.push(TraceItem { cursor, event: e });
-            }
         }
         let mut stmt=conn.prepare("SELECT run_id,reason FROM trace_faults WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2)")?;
         for row in stmt.query_map(params![execution, q.run_id], |r| {
@@ -369,69 +307,15 @@ impl TraceStore {
             let (run, reason) = row?;
             issues.insert(format!("{reason}:{run}"));
         }
-        for (id, run, reason) in self.faults.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        let faults = self.faults.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, run, reason) in faults
+            .range((execution.to_owned(), String::new(), String::new())..)
+            .take_while(|(id, _, _)| id == execution)
+        {
             if id == execution && q.run_id.as_ref().is_none_or(|q| q == run) {
                 issues.insert(format!("{reason}:{run}"));
             }
         }
-        let sources: Vec<_> = sources
-            .into_iter()
-            .map(|((run_id, source_id), (seq, terminal))| {
-                let reported = if source_id.starts_with("milkie:") {
-                    latest_status
-                        .get(&run_id)
-                        .and_then(|s: &Value| s["lastSequence"].as_u64())
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
-                let last_sequence = seq.last().copied().unwrap_or(0).max(reported);
-                let missing_sequences = last_sequence.saturating_sub(seq.len() as u64);
-                if missing_sequences > 0 {
-                    issues.insert(format!("sequence_gap:{run_id}:{source_id}"));
-                }
-                let activity = activities.get(&(run_id.clone(), source_id.clone()));
-                TraceSource {
-                    last_activity_sequence: activity.map(|a| a.0),
-                    last_activity_timestamp_ms: activity.map(|a| a.1),
-                    run_id,
-                    source_id,
-                    last_sequence,
-                    missing_sequences,
-                    terminal,
-                }
-            })
-            .collect();
-        for run in expected_runs {
-            if !sources
-                .iter()
-                .any(|s: &TraceSource| s.run_id == run && s.source_id.starts_with("milkie:"))
-            {
-                issues.insert(format!("source_unavailable:{run}"));
-            }
-        }
-        for (run, status) in latest_status {
-            if status["state"] == "incomplete"
-                || status["fault"].as_str().is_some()
-                || status["dropped"].as_u64().is_some_and(|n| n > 0)
-            {
-                issues.insert(format!("source_incomplete:{run}"));
-            }
-        }
-        let open_spans: Vec<_> = spans
-            .into_iter()
-            .filter_map(|((run_id, span_id), (kind, ended))| {
-                if ended {
-                    None
-                } else {
-                    kind.map(|kind| OpenSpan {
-                        run_id,
-                        span_id,
-                        kind,
-                    })
-                }
-            })
-            .collect();
         if sources.is_empty() {
             issues.insert("not_recorded_or_expired".into());
         }
@@ -855,5 +739,182 @@ mod tests {
                 .iter()
                 .any(|i| i.starts_with("source_unavailable:"))
         );
+    }
+    #[test]
+    fn page_reads_stay_within_a_fixed_sql_budget_after_large_history_and_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let opts = TraceOptions {
+            max_events_per_run: 100000,
+            max_bytes_per_run: 67108864,
+            source_max_events: 100000,
+            source_max_bytes: 67108864,
+        };
+        let store = TraceStore::open(temp.path(), opts.clone()).unwrap();
+        {
+            let mut conn = store.conn.lock().unwrap();
+            store
+                .admit(&conn, "execution", "run", crate::runtime::now_ms())
+                .unwrap();
+            let tx = conn.transaction().unwrap();
+            {
+                let mut insert=tx.prepare("INSERT INTO trace_events(execution_id,run_id,id,source_id,source_sequence,bytes,body) VALUES(?1,?2,?3,?4,?5,?6,?7)").unwrap();
+                for sequence in 1..=10000 {
+                    let mut e = event(1, "agent.activity");
+                    e.id = format!("id-{sequence}");
+                    e.source_sequence = sequence;
+                    e.timestamp_ms = sequence;
+                    let body = serde_json::to_string(&e).unwrap();
+                    insert
+                        .execute(params![
+                            e.execution_id,
+                            e.run_id,
+                            e.id,
+                            e.source_id,
+                            e.source_sequence as i64,
+                            body.len() as i64,
+                            body
+                        ])
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        store.finish_observation().unwrap();
+        drop(store);
+        let store = TraceStore::open(temp.path(), opts).unwrap();
+        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = ticks.clone();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .progress_handler(
+                1000,
+                Some(move || count.fetch_add(1, Ordering::SeqCst) >= 50),
+            )
+            .unwrap();
+        let result = store.read(
+            "execution",
+            &TraceQuery {
+                after: 9999,
+                limit: 1,
+                run_id: Some("run".into()),
+            },
+        );
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .progress_handler(0, None::<fn() -> bool>)
+            .unwrap();
+        let page=result.expect("a one-event tail page scanned the entire history and exceeded 50000 SQLite VM instructions");
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.next, 10000);
+        assert_eq!(page.sources[0].last_sequence, 10000);
+        assert_eq!(page.sources[0].missing_sequences, 0);
+        ticks.store(0, Ordering::SeqCst);
+        let count = ticks.clone();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .progress_handler(
+                1000,
+                Some(move || count.fetch_add(1, Ordering::SeqCst) >= 50),
+            )
+            .unwrap();
+        let mut next = event(1, "agent.activity");
+        next.id = "id-10001".into();
+        next.source_sequence = 10001;
+        let written = store.insert(&next);
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .progress_handler(0, None::<fn() -> bool>)
+            .unwrap();
+        written
+            .expect("event identity lookups exceeded the fixed SQL budget after a large history");
+    }
+    #[test]
+    fn summary_backfill_preserves_old_event_bytes_and_whole_run_retirement_is_isolated() {
+        let (temp, s) = store();
+        for (n, kind) in [
+            (1, "execution.started"),
+            (2, "agent.activity"),
+            (3, "execution.finished"),
+        ] {
+            s.record(event(n, kind));
+        }
+        let before = s.read("execution", &q()).unwrap();
+        assert!(before.complete);
+        let options = s.options.clone();
+        s.finish_observation().unwrap();
+        drop(s);
+        let c = Connection::open(temp.path().join("trace.sqlite")).unwrap();
+        let bodies: Vec<String> = c
+            .prepare("SELECT body FROM trace_events ORDER BY cursor")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        c.execute_batch("DROP TRIGGER trace_summary_insert; DROP TRIGGER trace_summary_delete; DROP TABLE trace_summary_sources; DROP TABLE trace_summary_spans; DROP TABLE trace_summary_runs; DROP TABLE trace_summary_meta;").unwrap();
+        drop(c);
+        let s = TraceStore::open(temp.path(), options).unwrap();
+        let after = s.read("execution", &q()).unwrap();
+        assert!(after.complete);
+        assert_eq!(after.next, before.next);
+        assert_eq!(after.sources[0].last_activity_sequence, Some(2));
+        let mut other = event(1, "execution.started");
+        other.execution_id = "other".into();
+        s.record(other);
+        {
+            let c = s.conn.lock().unwrap();
+            let after: Vec<String> = c
+                .prepare(
+                    "SELECT body FROM trace_events WHERE execution_id='execution' ORDER BY cursor",
+                )
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert_eq!(bodies, after);
+            c.execute(
+                "DELETE FROM trace_events WHERE execution_id='execution' AND run_id='run'",
+                [],
+            )
+            .unwrap();
+            for table in [
+                "trace_summary_sources",
+                "trace_summary_spans",
+                "trace_summary_runs",
+            ] {
+                let count: i64 = c
+                    .query_row(
+                        &format!("SELECT count(*) FROM {table} WHERE execution_id='execution'"),
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, 0);
+            }
+            let version: u32 = c
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 3);
+        }
+        assert!(s.read("execution", &q()).unwrap().sources.is_empty());
+        assert_eq!(s.read("other", &q()).unwrap().events.len(), 1);
+    }
+    #[test]
+    fn activity_summary_preserves_the_full_wire_timestamp_range() {
+        let (_temp, s) = store();
+        let mut e = event(1, "agent.activity");
+        e.timestamp_ms = u64::MAX;
+        s.record(e);
+        let p = s.read("execution", &q()).unwrap();
+        assert_eq!(p.sources[0].last_activity_timestamp_ms, Some(u64::MAX));
     }
 }

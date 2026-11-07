@@ -129,6 +129,8 @@ struct Control {
     outcome: Mutex<Option<ExecutionOutcome>>,
     stopped: AtomicBool,
     done: Notify,
+    finalized: CancellationToken,
+    collector_failed: AtomicBool,
 }
 impl Control {
     async fn result(&self) -> ExecutionOutcome {
@@ -146,8 +148,11 @@ impl Control {
         }
     }
     fn finish(&self, result: ExecutionOutcome) {
-        *self.outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
-        self.done.notify_waiters();
+        let mut outcome = self.outcome.lock().unwrap_or_else(|e| e.into_inner());
+        if outcome.is_none() {
+            *outcome = Some(result);
+            self.done.notify_waiters();
+        }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +245,26 @@ impl Executor for MilkieExecutor {
     fn internal_observation(&self) -> bool {
         true
     }
+    async fn finish_observations(&self) -> Result<()> {
+        let pending: Vec<_> = self
+            .runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        for run in pending {
+            run.finalized.cancelled().await;
+            if run.collector_failed.load(Ordering::Acquire) {
+                return Err(Error::new(
+                    "trace_cleanup_unconfirmed",
+                    "/milkie/observation",
+                    "native stop is known but observation resource cleanup was not confirmed",
+                ));
+            }
+        }
+        Ok(())
+    }
     async fn execute_observed(
         &self,
         invocation: Invocation,
@@ -282,6 +307,7 @@ impl Executor for MilkieExecutor {
         let digest = self.connection_digest.clone();
         // The observed entry is authoritative; None explicitly suppresses source capture.
         tokio::spawn(async move {
+            let _finalized = worker.finalized.clone().drop_guard();
             let result = std::panic::AssertUnwindSafe(perform(
                 config,
                 digest,
@@ -293,6 +319,9 @@ impl Executor for MilkieExecutor {
             ))
             .catch_unwind()
             .await;
+            if result.is_err() {
+                worker.collector_failed.store(true, Ordering::Release);
+            }
             worker.finish(match result {
                 Ok(result) => result,
                 Err(_) => ExecutionOutcome::StopUnknown {
@@ -304,7 +333,7 @@ impl Executor for MilkieExecutor {
     }
     async fn cleanup_observation(&self, run_id: &str) -> crate::ObservationCleanup {
         use crate::ObservationCleanup as C;
-        // A live supervisor may still publish start_sent and launch the source.
+        // A live supervisor may still launch the source or drain its observation tail.
         // The framework separately proves that this invocation cannot start again.
         let control = self
             .runs
@@ -313,11 +342,7 @@ impl Executor for MilkieExecutor {
             .get(run_id)
             .cloned();
         if let Some(control) = control
-            && control
-                .outcome
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_none()
+            && !control.finalized.is_cancelled()
         {
             return C::Deferred;
         }
@@ -512,6 +537,9 @@ impl Context {
         self.offer(true, value);
     }
     async fn tool(&self, args: &Value) -> Value {
+        if self.cancel.is_cancelled() {
+            return json!({"ok":false,"code":"rejected","message":"Execution no longer accepts host tools"});
+        }
         let source = self
             .source
             .lock()
@@ -923,7 +951,7 @@ async fn perform(
             observation_bad.clone(),
             delivery_pending.clone(),
         );
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut seen = BTreeMap::new();
             while let Some((status, mut value)) = rx.recv().await {
                 let id = value["id"].as_str().map(str::to_owned);
@@ -958,8 +986,12 @@ async fn perform(
                 pending.fetch_sub(1, Ordering::AcqRel);
             }
         });
-        tx
+        (tx, task)
     });
+    let (delivery, delivery_task) = match delivery {
+        Some((tx, task)) => (Some(tx), Some(task)),
+        None => (None, None),
+    };
     let context = Arc::new(Context {
         trace_id: observation_options
             .as_ref()
@@ -1028,22 +1060,6 @@ async fn perform(
                 owner.pending_tools = pending.as_array().map(Vec::len);
                 if owner.pending_tools != Some(0) { return Err(failure("effect_unconfirmed")); }
                 owner.stopped = true;
-                if observer.is_some() {
-                    let mut after = 0;
-                    loop {
-                        match rpc.request("observation.read", json!({"runId":source_run,"afterSequence":after,"limit":100})).await {
-                            Ok(page) => {
-                                let events = page["events"].as_array().ok_or_else(|| failure("harness_protocol_invalid"))?;
-                                for event in events { context.event(event.clone()); }
-                                let mut status=page["status"].clone(); status["runId"]=json!(source_run); context.status(status);
-                                if page["status"]["complete"] != true { context.observation_bad.store(true, Ordering::Release); }
-                                let next = page["nextSequence"].as_u64().unwrap_or(after);
-                                if events.len() < 100 || next <= after { break; } after = next;
-                            }
-                            Err(_) => { context.observation_bad.store(true, Ordering::Release); break; }
-                        }
-                    }
-                }
                 if timed_out || record["status"] == "timed_out" { return Ok(ExecutionOutcome::Failed { code: "limit_reached".into(), message: "Milkie execution deadline expired".into() }); }
                 if control.cancel.is_cancelled() || record["status"] == "cancelled" { return Ok(ExecutionOutcome::Cancelled); }
                 return if record["status"] == "succeeded" { Ok(ExecutionOutcome::Completed { usage: json!({"adapter":"milkie-sidecar@1","milkie_run_id":source_run,"milkie_context_id":source_context,"provider_usage":null,"metering":"unavailable","observation_enabled":observer.is_some(),"observation_incomplete":context.observation_bad.load(Ordering::Acquire) || context.delivery_pending.load(Ordering::Acquire) > 0}) }) } else { Ok(ExecutionOutcome::Failed { code: "harness_failed".into(), message: "Milkie reported an unsuccessful native execution".into() }) };
@@ -1051,51 +1067,135 @@ async fn perform(
             tokio::select! { _ = control.cancel.cancelled(), if !cancel_sent => {}, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
         }
     }.await;
-    let closed = rpc.close().await;
-    // Bound the whole drain, not each queued event; diagnostics cannot delay stopping indefinitely.
-    let drain_until = tokio::time::Instant::now() + Duration::from_millis(500);
-    while context.delivery_pending.load(Ordering::Acquire) > 0
-        && tokio::time::Instant::now() < drain_until
+    if owner.stopped {
+        context.cancel.cancel();
+    }
+    // A confirmed native stop and empty host-effect ledger are business facts.
+    // Observation replay/delivery is a separate tail, never part of that result's deadline.
+    let early = if observer.is_some() && owner.stopped {
+        let saved = write_owner(&root, &owner).is_ok();
+        control.stopped.store(true, Ordering::Release);
+        let mut outcome = if saved {
+            result
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|e| ExecutionOutcome::Failed {
+                    code: e.code.clone(),
+                    message: e.message.clone(),
+                })
+        } else {
+            ExecutionOutcome::Failed {
+                code: "storage_error".into(),
+                message: "Could not persist the native stop association".into(),
+            }
+        };
+        if let ExecutionOutcome::Completed { usage } = &mut outcome {
+            usage["observation_incomplete"] = json!(true);
+            usage["observation_state"] = json!("pending");
+        }
+        control.finish(outcome.clone());
+        Some(outcome)
+    } else {
+        None
+    };
+    if observer.is_some()
+        && owner.stopped
+        && let Some(source_run) = &owner.milkie_run_id
     {
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        let replay = async {
+            let mut after = 0;
+            loop {
+                let page = rpc
+                    .request(
+                        "observation.read",
+                        json!({"runId":source_run,"afterSequence":after,"limit":100}),
+                    )
+                    .await?;
+                let events = page["events"]
+                    .as_array()
+                    .ok_or_else(|| failure("harness_protocol_invalid"))?;
+                for event in events {
+                    context.event(event.clone());
+                }
+                let mut status = page["status"].clone();
+                status["runId"] = json!(source_run);
+                context.status(status);
+                if page["status"]["complete"] != true {
+                    context.observation_bad.store(true, Ordering::Release);
+                }
+                let next = page["nextSequence"].as_u64().unwrap_or(after);
+                if events.len() < 100 || next <= after {
+                    break;
+                }
+                after = next;
+            }
+            Ok::<(), Error>(())
+        };
+        if !matches!(
+            tokio::time::timeout(Duration::from_millis(500), replay).await,
+            Ok(Ok(()))
+        ) {
+            context.observation_bad.store(true, Ordering::Release);
+        }
     }
-    let observation_incomplete = context.observation_bad.load(Ordering::Acquire)
-        || context.delivery_pending.load(Ordering::Acquire) > 0;
-    if let Some(observer) = &observer {
-        let _=tokio::time::timeout(Duration::from_millis(200),observer.status(&inv,json!({"runId":owner.milkie_run_id,"kind":"adapter.summary","adapter_delivery_failed":observation_incomplete}))).await;
+    let closed = rpc.close().await;
+    if !closed {
+        control.collector_failed.store(true, Ordering::Release);
     }
-    let stopped = closed && (!owner.start_sent || owner.stopped);
+    let stopped = if early.is_some() {
+        owner.stopped
+    } else {
+        closed && (!owner.start_sent || owner.stopped)
+    };
     owner.stopped = stopped;
-    let saved = write_owner(&root, &owner).is_ok();
+    let saved = if early.is_some() {
+        true
+    } else {
+        write_owner(&root, &owner).is_ok()
+    };
     control.stopped.store(stopped, Ordering::Release);
-    if stopped && !saved {
-        return ExecutionOutcome::Failed {
+    let outcome = if let Some(outcome) = early {
+        outcome
+    } else if stopped && !saved {
+        ExecutionOutcome::Failed {
             code: "storage_error".into(),
             message: "Could not persist the native stop association".into(),
-        };
-    }
-    if !stopped {
+        }
+    } else if !stopped {
         if owner.native_stop_confirmed {
             context.offer(true,json!({"runId":owner.milkie_run_id,"kind":"adapter.termination","agentStopConfirmed":true,"pendingToolCalls":owner.pending_tools,"adapterStopConfirmed":false}));
         }
-        return ExecutionOutcome::StopUnknown {
+        ExecutionOutcome::StopUnknown {
             message: if owner.native_stop_confirmed {
                 "Native stop confirmed; host tool effects remain unconfirmed"
             } else {
                 "Milkie did not supply confirmed native stop evidence"
             }
             .into(),
-        };
-    }
-    match result {
-        Ok(ExecutionOutcome::Completed { mut usage }) => {
-            usage["observation_incomplete"] = json!(observation_incomplete);
-            ExecutionOutcome::Completed { usage }
         }
-        Ok(outcome) => outcome,
-        Err(error) => ExecutionOutcome::Failed {
-            code: error.code,
-            message: error.message,
-        },
+    } else {
+        result.unwrap_or_else(|e| ExecutionOutcome::Failed {
+            code: e.code,
+            message: e.message,
+        })
+    };
+    // Startup/protocol failures also publish before diagnostic callbacks can delay them.
+    control.finish(outcome.clone());
+    let drain_until = tokio::time::Instant::now() + Duration::from_millis(500);
+    while context.delivery_pending.load(Ordering::Acquire) > 0
+        && tokio::time::Instant::now() < drain_until
+    {
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
+    let observation_incomplete = !closed
+        || context.observation_bad.load(Ordering::Acquire)
+        || context.delivery_pending.load(Ordering::Acquire) > 0;
+    if let Some(task) = delivery_task {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(observer) = &observer {
+        let _=tokio::time::timeout(Duration::from_millis(200),observer.status(&inv,json!({"runId":owner.milkie_run_id,"kind":"adapter.summary","adapter_delivery_failed":observation_incomplete}))).await;
+    }
+    outcome
 }

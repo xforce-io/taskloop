@@ -241,6 +241,11 @@ pub trait Executor: Send + Sync {
             ObservationCleanup::NotApplicable
         }
     }
+    /// Finish bounded observation-only tails after business execution has settled.
+    /// Runtime calls this during shutdown, outside phase execution deadlines.
+    async fn finish_observations(&self) -> Result<()> {
+        Ok(())
+    }
     /// Only a trusted adapter may confirm that its opaque run has no live execution left.
     async fn stop_or_confirm(&self, _run_id: &str) -> StopState {
         StopState::Unknown
