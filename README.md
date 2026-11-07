@@ -4,6 +4,8 @@
 
 一期应用只通过 start/get/signal/cancel/read_artifact 使用实例和产物；流程、研究等领域语义属于应用。内部状态、Worker、存储和恢复不成为应用依赖。
 
+工作入口的 `requires` 可显式使用 `optional: true` 表达首次尚无、后续已有的历史产物；存在时仍按 `latest/all` 和原授权规则提供。省略或 `false` 保持必需语义，终态要求保持必需。见 [依赖契约](docs/design/16-optional-artifact-requirements.md)。
+
 - [最小执行契约 Issue #2](https://github.com/xforce-io/taskloop/issues/2)
 - [Issue #2 L2 v0.1.0](docs/design/2-minimal-runtime-contract.md)：前置设计基线，Draft。
 - [设计见证与机器契约](docs/design/2-minimal-runtime-contract/contract/README.md)

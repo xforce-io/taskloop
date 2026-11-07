@@ -6,3 +6,4 @@
 | [02-trace-query](02-trace-query.md) | Runtime Trace SDK | #7 S1/S2 四层关联、查询导出及完整性 |
 | [03-trace-policy](03-trace-policy.md) | TracePolicy 与内容读取 SDK | #8 S1/S2 内容、容量、保留及降级 |
 | [04-execution-budget](04-execution-budget.md) | RunBudgetPolicy、Runtime.budgets | #9 S1/S2 来源、强制与收尾 |
+| [05-optional-requirements](05-optional-requirements.md) | Definition / Runtime / artifact.read SDK | #16 S1/S2 首次空历史、版本选择与授权 |

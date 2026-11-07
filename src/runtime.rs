@@ -908,7 +908,7 @@ pub(crate) fn requirements(
             .filter(|a| a.slot == dep.slot)
             .cloned()
             .collect();
-        if items.is_empty() {
+        if items.is_empty() && !dep.optional {
             return Err(Error::new(
                 "input_missing",
                 format!("{}/{}", dep.state, dep.slot),

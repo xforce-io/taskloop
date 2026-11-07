@@ -39,6 +39,9 @@ pub struct Requirement {
     pub state: String,
     pub slot: String,
     pub selection: String,
+    /// Missing history is permitted only when explicitly declared by a work entry.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub include_attachments: bool,
 }
@@ -400,7 +403,14 @@ impl Definition {
                     targets.insert(timeout_target.clone());
                 }
                 State::Terminal { requires, .. } => {
-                    self.check_requirements(requires, &format!("/flow/states/{id}/requires"))?
+                    self.check_requirements(requires, &format!("/flow/states/{id}/requires"))?;
+                    if requires.iter().any(|r| r.optional) {
+                        return Err(Error::new(
+                            "definition_invalid",
+                            format!("/flow/states/{id}/requires"),
+                            "terminal requirements cannot be optional",
+                        ));
+                    }
                 }
             }
             for t in &targets {
