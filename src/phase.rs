@@ -23,8 +23,7 @@ struct Bridge {
     definition: Definition,
     context: ToolContext,
     candidates: Mutex<BTreeMap<String, Candidate>>,
-    calls: Mutex<u64>,
-    written_bytes: Mutex<u64>,
+    budget: Arc<crate::budget::BudgetState>,
     storage_failure: Mutex<Option<Error>>,
     trace: Option<Arc<crate::trace::RunTrace>>,
 }
@@ -68,13 +67,6 @@ impl Bridge {
             .map(|(_, v)| v.bytes.len() as u64)
             .sum::<u64>()
             .saturating_add(candidate.bytes.len() as u64);
-        if bytes > self.inner.options.max_candidate_bytes {
-            return Err(Error::new(
-                "limit_reached",
-                "/artifacts",
-                "candidate byte limit reached",
-            ));
-        }
         if let Some(policy) = &self.entry.attachments {
             let attachments: Vec<_> = all
                 .values()
@@ -100,17 +92,8 @@ impl Bridge {
                 ));
             }
         }
-        let mut written = self.written_bytes.lock().map_err(Error::io)?;
-        if written.saturating_add(candidate.bytes.len() as u64)
-            > self.inner.options.max_candidate_bytes
-        {
-            return Err(Error::new(
-                "limit_reached",
-                "/artifacts",
-                "cumulative candidate write budget reached",
-            ));
-        }
-        *written += candidate.bytes.len() as u64;
+        self.budget
+            .admit_bytes(candidate.bytes.len() as u64, bytes)?;
         let sha = self.inner.store.write_blob(&candidate.bytes)?;
         let mut saved = false;
         for _ in 0..4 {
@@ -144,12 +127,22 @@ impl Bridge {
                 "could not persist candidate reference",
             ));
         }
+        self.budget.guard_time()?;
         all.insert(candidate.slot.clone(), candidate);
         Ok(())
     }
     fn active(&self) -> Result<()> {
+        self.budget.guard_time()?;
         let row = self.inner.store.load(&self.execution_id)?;
         let r = decode(&row)?;
+        if now_ms() >= r.deadline_ms {
+            self.budget.mark(crate::BudgetLimit::TaskWallTime);
+            return Err(Error::new(
+                "limit_reached",
+                "/budget/task_wall",
+                "task wall deadline reached",
+            ));
+        }
         if r.progress["phase"] != "executing"
             || r.status != Status::Running
             || r.epoch != self.epoch
@@ -162,6 +155,35 @@ impl Bridge {
             ));
         }
         Ok(())
+    }
+    fn persist_budget(&self) -> Result<()> {
+        for _ in 0..4 {
+            let row = self.inner.store.load(&self.execution_id)?;
+            let mut r = decode(&row)?;
+            if r.epoch != self.epoch
+                || r.progress["phase"] != "executing"
+                || r.status != Status::Running
+                || r.active.as_ref().is_none_or(|a| a.id != self.run_id)
+            {
+                return Err(Error::new(
+                    "stale_attempt",
+                    "/budget",
+                    "budget scope no longer active",
+                ));
+            }
+            r.budgets
+                .insert(self.run_id.clone(), self.budget.snapshot());
+            match self.inner.save(&row, &r, false, None, &[]) {
+                Ok(_) => return Ok(()),
+                Err(e) if e.code == "revision_conflict" => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(Error::new(
+            "revision_conflict",
+            "/budget",
+            "could not persist budget facts",
+        ))
     }
     fn receipt(&self, id: &str, args: &Value, payload: &Value) -> Result<String> {
         let receipt_id = format!("{}:receipt-{}", self.execution_id, uuid::Uuid::new_v4());
@@ -195,12 +217,20 @@ impl Bridge {
 }
 #[async_trait]
 impl ToolBridge for Bridge {
+    fn budget_hint(&self) -> Option<crate::BudgetHint> {
+        self.budget.hint()
+    }
     fn specs(&self) -> Vec<ToolSpec> {
-        self.entry.tools.iter().filter_map(|id|match id.as_str(){
+        let specs:Vec<ToolSpec>=self.entry.tools.iter().filter_map(|id|match id.as_str(){
         "artifact.read"=>Some(ToolSpec{id:id.clone(),description:"Read an authorized accepted artifact or a locked Skill resource by exact id; never an arbitrary path.".into(),input_schema:json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false})}),
         "artifact.write"=>Some(ToolSpec{id:id.clone(),description:"Write a JSON candidate to a declared output slot. This does not accept the result or advance the workflow.".into(),input_schema:json!({"type":"object","properties":{"slot":{"type":"string"},"value":{}},"required":["slot","value"],"additionalProperties":false})}),
         _=>self.inner.bindings.tools.get(id).map(|t|t.spec()),
-    }).collect()
+    }).collect();
+        if let Some(hint) = self.budget.hint() {
+            specs.into_iter().map(|mut spec|{spec.description.push_str(&format!(" Host execution budget: {} admitted calls; last {} reserved for artifact.write. Read _taskloop_budget. Stop exploration in finalize mode; submit existing evidence and honest limitations. Hard deadlines, schemas and permissions still apply.",hint.limit,hint.submission_reserve));spec}).collect()
+        } else {
+            specs
+        }
     }
     async fn call(&self, id: &str, args: Value) -> Result<Value> {
         self.call_traced(id, args, None).await
@@ -248,7 +278,33 @@ impl Bridge {
             };
             trace.emit("tool.started", &span, Some(parent), json!({"tool":if self.entry.tools.iter().any(|t|t==id){id}else{"<undeclared>"},"call_id":metadata.as_ref().map(|m|&m.call_id),"source_run_id":metadata.as_ref().map(|m|&m.source_run_id),"native_call_id":metadata.as_ref().and_then(|m|m.native_call_id.as_ref()),"input_content":content}));
         }
-        let result = self.call_inner(id, args).await;
+        let mut result = self.call_inner(id, args).await;
+        if let Err(error) = self.persist_budget() {
+            if ["storage_error", "revision_conflict"].contains(&error.code.as_str()) {
+                let mut failure = self.storage_failure.lock().map_err(Error::io)?;
+                if failure.is_none() {
+                    *failure = Some(error.clone());
+                }
+            }
+            if result.is_ok() {
+                result = Err(error);
+            }
+        }
+        if let Some(hint) = self.budget.hint() {
+            match &mut result {
+                Ok(value) => {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("_taskloop_budget".into(), serde_json::to_value(&hint)?);
+                    }
+                }
+                Err(error) => {
+                    error.message.push_str(&format!(
+                        "; execution budget: {}",
+                        serde_json::to_string(&hint)?
+                    ));
+                }
+            }
+        }
         if let Some(trace) = &self.trace {
             let content = if let Ok(value) = &result {
                 trace.content(id, "output", &span, value).await
@@ -285,17 +341,16 @@ impl Bridge {
             .into_iter()
             .find(|s| s.id == id)
             .ok_or_else(|| Error::new("binding_missing", "/tool", "registered tool unavailable"))?;
+        if self.budget.explicit() {
+            let admitted = self.budget.admit_tool(id);
+            self.persist_budget()?;
+            admitted?;
+        }
         validate_schema(&spec.input_schema, &args, "/tool/input")?;
-        {
-            let mut calls = self.calls.lock().map_err(Error::io)?;
-            if *calls >= self.inner.options.max_tool_calls_per_run {
-                return Err(Error::new(
-                    "limit_reached",
-                    "/tools",
-                    "tool call budget reached",
-                ));
-            }
-            *calls += 1;
+        if !self.budget.explicit() {
+            let admitted = self.budget.admit_tool(id);
+            self.persist_budget()?;
+            admitted?;
         }
         match id {
             "artifact.read" => {
@@ -459,6 +514,12 @@ pub(crate) async fn run(inner: Arc<Inner>, row: Row) {
         let data=inner.store.load(&row.id).and_then(|r|decode(&r)).ok().map(|r|json!({"status":r.status,"stop_unknown":r.stop_unknown,"code":r.error.map(|e|e.code)})).unwrap_or_else(||json!({"status":"unknown"}));
         trace.emit("phase.finished", &trace.phase_span(), None, data);
     }
+    if let Ok(r) = decode(&row)
+        && let Some(active) = r.active
+        && let Ok(mut live) = inner.live_budgets.lock()
+    {
+        live.remove(&active.id);
+    }
     if let Ok(mut handles) = inner.handles.lock() {
         handles.remove(&row.id);
     }
@@ -560,6 +621,47 @@ async fn run_checked(
         signal_facts: record.signals.clone(),
         cancellation: cancel.clone(),
     };
+    let explicit = inner.options.entry_budgets.contains_key(&entry);
+    let policy = inner
+        .options
+        .entry_budgets
+        .get(&entry)
+        .cloned()
+        .unwrap_or_else(|| {
+            crate::RunBudgetPolicy::legacy(
+                inner.options.max_tool_calls_per_run,
+                inner.options.max_candidate_bytes,
+            )
+        });
+    let preparation_ms = now_ms().saturating_sub(active.started_ms);
+    let budget = Arc::new(crate::budget::BudgetState::new(
+        &active.id,
+        &record.current_state,
+        &entry,
+        policy,
+        explicit,
+        record
+            .limits
+            .max_active_ms
+            .saturating_sub(record.active_ms)
+            .saturating_sub(preparation_ms),
+        record.deadline_ms.saturating_sub(now_ms()),
+        preparation_ms,
+        inner.options.max_tool_calls_per_run,
+        inner.options.max_candidate_bytes,
+        executor.budget_limits(),
+    )?);
+    let latest_budget_row = inner.store.load(&row.id)?;
+    let mut budget_record = decode(&latest_budget_row)?;
+    budget_record
+        .budgets
+        .insert(active.id.clone(), budget.snapshot());
+    inner.save(&latest_budget_row, &budget_record, false, None, &[])?;
+    inner
+        .live_budgets
+        .lock()
+        .map_err(Error::io)?
+        .insert(active.id.clone(), budget.clone());
     let bridge = Arc::new(Bridge {
         inner: inner.clone(),
         execution_id: row.id.clone(),
@@ -569,17 +671,11 @@ async fn run_checked(
         definition: definition.clone(),
         context,
         candidates: Mutex::new(BTreeMap::new()),
-        calls: Mutex::new(0),
-        written_bytes: Mutex::new(0),
+        budget: budget.clone(),
         storage_failure: Mutex::new(None),
         trace: trace.clone(),
     });
-    let time_left = record
-        .limits
-        .max_active_ms
-        .saturating_sub(record.active_ms)
-        .min(record.deadline_ms.saturating_sub(now_ms()))
-        .min(240_000);
+    let time_left = budget.snapshot().hint.remaining_ms;
     let output_schemas = contract
         .outputs
         .iter()
@@ -604,22 +700,28 @@ async fn run_checked(
         signal_facts: record.signals.clone(),
         work_dir: inner.store.run_dir(&active.id)?,
         timeout_ms: time_left,
+        budget: Some(budget.snapshot()),
     };
     if let Some(t) = &trace {
         t.emit("executor.capabilities",&t.phase_span(),None,json!({"internal_observation":if executor.internal_observation(){"available"}else{"unavailable"}}));
     }
     let mut internal_stop = false;
     *execution_stopped = false;
-    let outcome = if time_left == 0 {
+    let mut outcome = if time_left == 0 {
         ExecutionOutcome::Failed {
             code: "limit_reached".into(),
             message: "execution budget expired before adapter invocation".into(),
         }
     } else if cancel.is_cancelled() {
         ExecutionOutcome::Cancelled
+    } else if !budget.model_constraint_supported() {
+        ExecutionOutcome::Failed {
+            code: "unsupported_constraint".into(),
+            message: "executor cannot enforce requested model iteration limit".into(),
+        }
     } else {
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(time_left.max(1)),
+        match tokio::time::timeout_at(
+            budget.deadline,
             AssertUnwindSafe(async {
                 if inner.trace.is_some() {
                     executor
@@ -643,6 +745,9 @@ async fn run_checked(
             Ok(Ok(outcome)) => outcome,
             failed_execution => {
                 internal_stop = true;
+                if budget.guard_time().is_err() {
+                    budget.mark(crate::BudgetLimit::RunTime);
+                }
                 let panicked = matches!(failed_execution, Ok(Err(_)));
                 cancel.cancel();
                 if executor.stop_or_confirm(&active.id).await == StopState::Confirmed {
@@ -668,12 +773,22 @@ async fn run_checked(
             }
         }
     };
+    if budget.guard_time().is_err() && matches!(outcome, ExecutionOutcome::Completed { .. }) {
+        internal_stop = true;
+        cancel.cancel();
+        outcome = ExecutionOutcome::Failed {
+            code: "limit_reached".into(),
+            message: "executor returned after the execution deadline".into(),
+        };
+    }
     if let Some(t) = &trace {
         t.emit("executor.finished",&t.phase_span(),None,json!({"outcome":match &outcome {ExecutionOutcome::Completed{..}=>"completed",ExecutionOutcome::Failed{..}=>"failed",ExecutionOutcome::Cancelled=>"cancelled",ExecutionOutcome::StopUnknown{..}=>"stop_unknown"},"code":match &outcome{ExecutionOutcome::Failed{code,..}=>Some(code),_=>None}}));
     }
+    budget.finish(&outcome);
     *execution_stopped = !matches!(outcome, ExecutionOutcome::StopUnknown { .. });
     let latest = inner.store.load(&row.id)?;
     let mut current = decode(&latest)?;
+    current.budgets.insert(active.id.clone(), budget.snapshot());
     current.attempts.push(AttemptRecord {
         run_id: active.id.clone(),
         state: record.current_state.clone(),
@@ -683,7 +798,7 @@ async fn run_checked(
     });
     current.active_ms = current
         .active_ms
-        .saturating_add(now_ms().saturating_sub(active.started_ms));
+        .saturating_add(preparation_ms.saturating_add(budget.snapshot().elapsed_ms));
     if matches!(outcome, ExecutionOutcome::StopUnknown { .. }) {
         if current.status != Status::Cancelling {
             current.status = Status::Blocked;
@@ -786,13 +901,18 @@ async fn run_checked(
         check_evidence_ref: check_ref.clone(),
         cancellation: cancel.clone(),
     };
-    let check_started = now_ms();
-    let check_budget = current
-        .limits
-        .max_active_ms
-        .saturating_sub(current.active_ms)
-        .min(current.deadline_ms.saturating_sub(check_started))
-        .min(120_000);
+    let check_clock = tokio::time::Instant::now();
+    let check_budget = budget.check_start(
+        current
+            .limits
+            .max_active_ms
+            .saturating_sub(current.active_ms),
+        current.deadline_ms.saturating_sub(now_ms()),
+    );
+    current.budgets.insert(active.id.clone(), budget.snapshot());
+    let Commit::Saved(check_row) = inner.save(&check_row, &current, false, None, &[])? else {
+        return Ok(());
+    };
     if check_budget == 0 {
         current.status = Status::Blocked;
         current.active = None;
@@ -814,10 +934,14 @@ async fn run_checked(
             json!({"gate":contract.gate,"check_ref":check_ref}),
         );
     }
-    let checked = tokio::select! {
+    let mut checked = tokio::select! {
         _=cancel.cancelled()=>CheckResult::unavailable("check cancelled"),
-        result=tokio::time::timeout(std::time::Duration::from_millis(check_budget),AssertUnwindSafe(gate.check(context)).catch_unwind())=>match result {Ok(Ok(v))=>v,_=>CheckResult::unavailable("gate failed or timed out")}
+        result=tokio::time::timeout(std::time::Duration::from_millis(check_budget),AssertUnwindSafe(gate.check(context)).catch_unwind())=>match result {Ok(Ok(v))=>v,_=>{budget.mark(crate::BudgetLimit::CheckTime);CheckResult::unavailable("gate failed or timed out")}}
     };
+    if check_clock.elapsed() >= std::time::Duration::from_millis(check_budget) {
+        budget.mark(crate::BudgetLimit::CheckTime);
+        checked = CheckResult::unavailable("gate returned after the check deadline");
+    }
     if let Some(t) = &trace {
         t.emit(
             "check.finished",
@@ -828,15 +952,17 @@ async fn run_checked(
     }
     let latest = inner.store.load(&row.id)?;
     let mut current = decode(&latest)?;
+    budget.check_end(check_clock.elapsed().as_millis().min(u64::MAX as u128) as u64);
+    current.budgets.insert(active.id.clone(), budget.snapshot());
+    current.active_ms = current
+        .active_ms
+        .saturating_add(check_clock.elapsed().as_millis().min(u64::MAX as u128) as u64);
     if current.status == Status::Cancelling || current.epoch != active.epoch {
         current.status = Status::Cancelled;
         current.active = None;
         inner.save(&latest, &current, false, None, &[])?;
         return Ok(());
     }
-    current.active_ms = current
-        .active_ms
-        .saturating_add(now_ms().saturating_sub(check_started));
     if now_ms() >= current.deadline_ms || current.active_ms >= current.limits.max_active_ms {
         current.status = Status::Blocked;
         current.active = None;

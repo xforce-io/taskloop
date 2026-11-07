@@ -396,13 +396,12 @@ impl Executor for BudgetConsumedExecutor {
         bridge: Arc<dyn ToolBridge>,
         _: CancellationToken,
     ) -> ExecutionOutcome {
-        bridge
+        let _ = bridge
             .call(
                 "artifact.write",
                 serde_json::json!({"slot":"result","value":{"nonce":inv.inputs["nonce"]}}),
             )
-            .await
-            .unwrap();
+            .await;
         // A ready future may finish synchronous cleanup after its timer expired.
         std::thread::sleep(Duration::from_millis(50));
         ExecutionOutcome::Completed {
@@ -451,7 +450,7 @@ async fn exhausted_budget_does_not_start_domain_gate() {
         0,
         "a domain gate started after execution consumed its budget"
     );
-    assert_eq!(s.status, Status::Blocked);
+    assert_eq!(s.status, Status::Failed);
     assert_eq!(s.error.unwrap().code, "limit_reached");
     rt.shutdown().await.unwrap();
 }

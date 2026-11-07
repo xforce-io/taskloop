@@ -109,8 +109,22 @@ async fn main() {
         );
     assert!(validate(&definition, &bindings).unwrap().valid);
     let digest = definition.digest.clone();
+    let mut options = RuntimeOptions::new(root.path().join("store"));
+    options.entry_budgets.insert(
+        "consumer.work".into(),
+        RunBudgetPolicy {
+            policy_id: "consumer-budget-v1".into(),
+            max_run_ms: None,
+            max_check_ms: None,
+            max_tool_calls: 4,
+            submission_reserve: 2,
+            finalize_before_ms: 0,
+            max_model_iterations: None,
+            max_candidate_bytes: 4096,
+        },
+    );
     let rt = Runtime::open_with_trace_policy(
-        RuntimeOptions::new(root.path().join("store")),
+        options,
         vec![definition],
         bindings,
         TraceOptions {
@@ -239,10 +253,15 @@ async fn main() {
             .code,
         "not_found"
     );
+    let budget = rt.budgets(&a, &Caller::local()).unwrap();
+    assert_eq!(budget.runs.len(), 1);
+    assert_eq!(budget.runs[0].policy.policy_id, "consumer-budget-v1");
+    assert_eq!(budget.runs[0].calls_used, 1);
+    assert_eq!(budget.runs[0].policy.submission_reserve, 2);
     rt.maintain_trace().unwrap();
     rt.shutdown().await.unwrap();
     println!(
         "{}",
-        json!({"external_consumer":"pass","operations":["start","get","signal","cancel","read_artifact","trace","export_trace","read_trace_content","maintain_trace"],"private_modules_imported":false,"execution":"deterministic; real Harness is tested separately"})
+        json!({"external_consumer":"pass","operations":["start","get","signal","cancel","read_artifact","trace","export_trace","read_trace_content","maintain_trace","budgets"],"private_modules_imported":false,"execution":"deterministic; real Harness is tested separately"})
     );
 }

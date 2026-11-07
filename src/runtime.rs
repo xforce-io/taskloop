@@ -19,6 +19,7 @@ pub struct RuntimeOptions {
     pub max_tool_calls_per_run: u64,
     /// Total candidate bytes per Run; must be in 1..=64 MiB.
     pub max_candidate_bytes: u64,
+    pub entry_budgets: BTreeMap<String, crate::RunBudgetPolicy>,
 }
 impl RuntimeOptions {
     pub fn new(store: impl Into<PathBuf>) -> Self {
@@ -27,6 +28,7 @@ impl RuntimeOptions {
             max_admitted_instances: 8,
             max_tool_calls_per_run: 40,
             max_candidate_bytes: MAX_BLOB_BYTES,
+            entry_budgets: BTreeMap::new(),
         }
     }
 }
@@ -45,6 +47,7 @@ pub(crate) struct Inner {
     pub stop: CancellationToken,
     pub notify: Notify,
     pub handles: Mutex<BTreeMap<String, CancellationToken>>,
+    pub live_budgets: Mutex<BTreeMap<String, Arc<crate::budget::BudgetState>>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ActiveRun {
@@ -85,6 +88,10 @@ pub(crate) struct Record {
     pub grant_ref: String,
     pub inputs: Value,
     pub limits: ResourceLimits,
+    #[serde(default)]
+    pub limit_sources: Option<crate::TaskLimitSources>,
+    #[serde(default)]
+    pub budgets: BTreeMap<String, crate::RunBudgetSnapshot>,
     pub status: Status,
     pub current_state: String,
     pub visits: BTreeMap<String, u64>,
@@ -229,11 +236,15 @@ impl Runtime {
                 "expected 1..=67108864 bytes",
             ));
         }
+        for (entry, policy) in &options.entry_budgets {
+            nonempty(entry, "/entry_budgets")?;
+            policy.validate(options.max_tool_calls_per_run, options.max_candidate_bytes)?;
+        }
         for d in &definitions {
             validate(d, &bindings)?;
         }
         let fingerprint = digest(&serde_json::to_vec(
-            &json!({"host_binary":digest(&std::fs::read(std::env::current_exe()?)?),"configuration_version":bindings.configuration_version,"tools":bindings.tools.iter().map(|(id,t)|(id,t.spec())).collect::<BTreeMap<_,_>>(),"executors":bindings.executors.iter().map(|(id,e)|(id,e.identity())).collect::<BTreeMap<_,_>>(),"gates":bindings.gates.keys().collect::<Vec<_>>(),"grants":bindings.grants}),
+            &json!({"host_binary":digest(&std::fs::read(std::env::current_exe()?)?),"configuration_version":bindings.configuration_version,"entry_budgets":options.entry_budgets,"host_tool_limit":options.max_tool_calls_per_run,"host_candidate_limit":options.max_candidate_bytes,"tools":bindings.tools.iter().map(|(id,t)|(id,t.spec())).collect::<BTreeMap<_,_>>(),"executors":bindings.executors.iter().map(|(id,e)|(id,e.identity())).collect::<BTreeMap<_,_>>(),"gates":bindings.gates.keys().collect::<Vec<_>>(),"grants":bindings.grants}),
         )?);
         let store = Store::open(&options.store_dir)?;
         for d in &definitions {
@@ -256,6 +267,7 @@ impl Runtime {
             stop: CancellationToken::new(),
             notify: Notify::new(),
             handles: Mutex::new(BTreeMap::new()),
+            live_budgets: Mutex::new(BTreeMap::new()),
         });
         for row in inner.store.all()? {
             let mut r = decode(&row)?;
@@ -366,6 +378,17 @@ impl Runtime {
                 "limits must be positive",
             ));
         }
+        if [limits.max_active_ms, limits.max_wall_ms].iter().any(|n| {
+            std::time::Instant::now()
+                .checked_add(std::time::Duration::from_millis(*n))
+                .is_none()
+        }) {
+            return Err(Error::new(
+                "input_invalid",
+                "/limits",
+                "task deadline cannot be represented",
+            ));
+        }
         let time = now_ms();
         let mut r = Record {
             definition_digest: d.digest.clone(),
@@ -373,6 +396,13 @@ impl Runtime {
             grant_ref: request.grant_ref,
             inputs: request.inputs,
             limits: limits.clone(),
+            limit_sources: Some(crate::TaskLimitSources {
+                requested: request.limits.clone(),
+                grant: grant.limits.clone(),
+                definition_max_runs: d.bundle.flow.limits.max_runs,
+                definition_max_transitions: d.bundle.flow.limits.max_transitions,
+            }),
+            budgets: BTreeMap::new(),
             status: Status::Created,
             current_state: d.bundle.flow.initial.clone(),
             visits: BTreeMap::new(),
@@ -413,6 +443,30 @@ impl Runtime {
         self.inner.expire(id)?;
         let row = self.inner.authorized(id, caller)?;
         self.inner.snapshot(&row)
+    }
+    /// Execution-policy facts, independently authorized from observation collection.
+    pub fn budgets(&self, id: &str, caller: &Caller) -> Result<crate::BudgetView> {
+        let row = self.inner.authorized(id, caller)?;
+        let record = decode(&row)?;
+        let live = self.inner.live_budgets.lock().map_err(Error::io)?;
+        let runs = record
+            .budgets
+            .into_iter()
+            .map(|(id, mut snapshot)| {
+                if let Some(state) = live.get(&id) {
+                    return state.snapshot();
+                }
+                if snapshot.execution_outcome.is_none() {
+                    snapshot.hint.mode = "unknown".into();
+                }
+                snapshot
+            })
+            .collect();
+        Ok(crate::BudgetView {
+            task_limits: record.limits,
+            task_limit_sources: record.limit_sources,
+            runs,
+        })
     }
     /// Authorized, versioned observation page. Does not drive workflow state.
     pub fn trace(

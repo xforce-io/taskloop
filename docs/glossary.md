@@ -72,3 +72,5 @@
 | TracePolicy | 宿主显式提供的 Trace 内容选择、容量、保留与降级契约。 | — |
 | TraceContentRef | 受同一实例授权和观测容量期限约束的脱敏内容引用，不是业务产物或文件路径。 | — |
 | SourceCleanup | 单个 Run 的源观测缓冲清理状态及其执行器绑定，不代表业务终态。 | — |
+| RunBudgetPolicy | 宿主为 EntryContract 显式配置的执行期限、工具准入、模型迭代和候选容量策略。 | — |
+| RunBudgetSnapshot | 某次 Run 生效限制、来源、消耗及触发原因的持久化公开视图，不是费用估算。 | — |
