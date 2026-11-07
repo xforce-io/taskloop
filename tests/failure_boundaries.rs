@@ -4,7 +4,7 @@ use common::*;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -460,6 +460,8 @@ struct ConcurrentStopExecutor {
     enabled: Arc<AtomicBool>,
     stop_entered: Arc<tokio::sync::Notify>,
     barrier: Arc<tokio::sync::Barrier>,
+    arrivals: AtomicUsize,
+    confirmed: CancellationToken,
 }
 #[async_trait]
 impl Executor for ConcurrentStopExecutor {
@@ -483,7 +485,13 @@ impl Executor for ConcurrentStopExecutor {
             return StopState::Unknown;
         }
         self.stop_entered.notify_one();
-        self.barrier.wait().await;
+        // 首批三个确认用于制造并发提交；后续查询复用已确认状态。
+        if self.arrivals.fetch_add(1, Ordering::SeqCst) < 3 {
+            self.barrier.wait().await;
+            self.confirmed.cancel();
+        } else {
+            self.confirmed.cancelled().await;
+        }
         StopState::Confirmed
     }
 }
@@ -501,6 +509,8 @@ async fn concurrent_stop_confirmations_do_not_leak_internal_revision_conflicts()
             enabled: enabled.clone(),
             stop_entered: stop_entered.clone(),
             barrier: Arc::new(tokio::sync::Barrier::new(3)),
+            arrivals: AtomicUsize::new(0),
+            confirmed: CancellationToken::new(),
         }),
     );
     let rt = Runtime::open(
