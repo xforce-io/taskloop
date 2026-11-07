@@ -1,6 +1,6 @@
 # #6 Milkie Executor 与生命周期
 
-版本 v0.2；状态：既有 Epic 范围的技术契约，真实验收尚未完成。
+版本 v0.3；状态：既有技术契约及真实环境矩阵已固定；验收与独立审查分别记账。
 Issue：https://github.com/xforce-io/taskloop/issues/6 。L1: reuse + 整理，依据为本次会话确认 TaskLoop→Milkie→Harness、宿主保留工具授权/产物接纳及可靠停止，以及本票 S1/S2。L2: write；公共执行接口和跨进程所有权变化。采用用户规定的十三节结构，§11 对应 L1.8。
 
 ## 1 背景
@@ -82,7 +82,7 @@ MilkieExecutor 管理配置、Run 所有权和结果；统一 RPC 通道只处�
 
 ## 12 开放问题
 
-真实宿主目录与第二 Harness 环境仍待提供，阻止真实验收但不阻止适配代码。统一 trace 默认策略/查询与期限分别在 #7/#8/#9 固定，不在此隐式决定。
+本轮依据用户“这台机器自己找环境，没有就建”的授权准备专用目录，真实验收固定 Codex0.166.0/gpt-6-astra/high 与 Pi1.2.0/openai-codex/gpt-5.6-sol/high，经同一 Milkie Sidecar 接入。环境由宿主准备，适配器仍不发现或复制登录、不自动回退。一个 Runtime 的 phase 执行沿用既有串行调度；并发 Harness 上下文与不同 Runtime 的生命周期不由本票改写。worker 被强杀且缺少受信停止证明时仍须 StopUnknown，shutdown 不能成功。统一 trace 默认策略/查询与期限分别在 #7/#8/#9 固定，不在此隐式决定。
 
 ## 13 关联
 
