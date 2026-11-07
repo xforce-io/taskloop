@@ -1,6 +1,6 @@
 # #9 显式执行预算与受控收尾
 
-版本：v0.1（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/9 。L1: write（[v0.1 概要评论](https://github.com/xforce-io/taskloop/issues/9#issuecomment-6702967746)）；L2: write（本文件为唯一详细契约）。产品基线为用户确认预算问题及 Epic #5 S6、本票 S1/S2；不自行选择新的默认阶段时限、提高任务总限额或重跑研究质量实验。章节遵循用户 AGENTS；细化验收见 §11。
+版本：v0.2（Draft）。Issue：https://github.com/xforce-io/taskloop/issues/9 。L1: write（[v0.1 概要评论](https://github.com/xforce-io/taskloop/issues/9#issuecomment-6702967746)）；L2: write（本文件为唯一详细契约）。产品基线为用户确认预算问题及 Epic #5 S6、本票 S1/S2；不自行选择新的默认阶段时限、提高任务总限额或重跑研究质量实验。章节遵循用户 AGENTS；细化验收见 §11。
 
 ## 1 背景
 
@@ -43,6 +43,8 @@ flowchart TD
 只为 artifact.write 保留提交次数，探索拒绝不占用该保留；提交也消耗总次数，失败不会返还。进入时间收尾后拒绝其它工具，硬截止后所有调用拒绝；已发起外部效果不可保证回滚。保留额度不保证 Schema/gate 成功，也不放宽字节、权限或取消。放弃未计量的无限预算查询工具、自动重试直到成稿和仅把常数改大。
 
 ## 6 架构
+
+原生执行停止与宿主效果账本已确认后，观测补读和回调排空不再占用阶段业务期限；Trace 的最终完整性通过查询呈现，交付时 pending 只作快照。关闭顺序沿用 #7 v0.2 / #8 v0.4，先完成采集资源收尾再清存储标记。工具次数、模型迭代和业务时间的实际限额不变。
 
 分层：宿主按 EntryContract 选政策 → Runtime 记录任务来源 → 每 Run 预算状态统一准入 → Executor 把限制和提示传给 Harness → 工具桥/gate 执行硬边界 → 公共预算查询。主路径先保存生效预算再执行，工具调用和候选写入更新计量，结束后记录触发与终态；Trace 可投影摘要，不能作为预算权威。
 

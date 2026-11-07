@@ -44,6 +44,10 @@ fn adapter(f: &Fixture, mode: &str) -> Arc<MilkieExecutor> {
         "MILKIE_FIXTURE_HANDSHAKE_FILE",
         root.join("handshake.log").into_os_string(),
     );
+    let config = config.env(
+        "MILKIE_FIXTURE_OBSERVATION_FILE",
+        root.join("observation-reading.marker").into_os_string(),
+    );
     Arc::new(MilkieExecutor::new(config).unwrap())
 }
 async fn runtime(f: &Fixture, mode: &str, gate: &str) -> Runtime {
@@ -384,6 +388,7 @@ async fn old_source_without_purge_capability_is_explicitly_unsupported() {
             .await,
         ExecutionOutcome::Completed { .. }
     ));
+    a.finish_observations().await.unwrap();
     assert_eq!(
         a.cleanup_observation(&run).await,
         ObservationCleanup::Unsupported
@@ -412,5 +417,194 @@ async fn cleanup_during_handshake_cannot_claim_no_source_will_start() {
     let cleanup = a.cleanup_observation(&run).await;
     let result = task.await.unwrap();
     assert!(matches!(result, ExecutionOutcome::Completed { .. }));
+    assert_eq!(cleanup, ObservationCleanup::Deferred);
+}
+
+struct ReplayObserver(Arc<tokio::sync::Notify>);
+#[async_trait::async_trait]
+impl MilkieObserver for ReplayObserver {
+    fn options(&self, _: &Invocation) -> MilkieObservationOptions {
+        MilkieObservationOptions {
+            traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into(),
+            max_events: 1000,
+            max_bytes: 262144,
+        }
+    }
+    async fn event(&self, _: &Invocation, _: Value) -> Result<()> {
+        Ok(())
+    }
+    async fn status(&self, _: &Invocation, status: Value) -> Result<()> {
+        if status["kind"] == "adapter.summary" {
+            self.0.notify_one();
+        }
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn observation_replay_cannot_hold_an_already_stopped_execution_result() {
+    let f = Fixture::new(false);
+    let executor = adapter(&f, "slow_observation");
+    let inv = invocation(&f, false, 5000);
+    let run = inv.run_id.clone();
+    let summary = Arc::new(tokio::sync::Notify::new());
+    let observer = Arc::new(ReplayObserver(summary.clone()));
+    let e = executor.clone();
+    let mut job = tokio::spawn(async move {
+        e.execute_observed(
+            inv,
+            Arc::new(Spy::default()),
+            CancellationToken::new(),
+            Some(observer),
+        )
+        .await
+    });
+    // The peer marks this only after native completion and zero pending tools were checked.
+    for _ in 0..200 {
+        if f.root.path().join("observation-reading.marker").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(f.root.path().join("observation-reading.marker").exists());
+    let result = tokio::time::timeout(Duration::from_millis(300), &mut job).await;
+    let delivered_before_observation = result.is_ok();
+    let result = match result {
+        Ok(v) => v.unwrap(),
+        Err(_) => job.await.unwrap(),
+    };
+    tokio::time::timeout(Duration::from_secs(4), summary.notified())
+        .await
+        .unwrap();
+    assert!(matches!(result, ExecutionOutcome::Completed { .. }));
+    assert_eq!(executor.stop_or_confirm(&run).await, StopState::Confirmed);
+    executor.finish_observations().await.unwrap();
+    assert!(
+        delivered_before_observation,
+        "completed native result was held behind observation-only replay"
+    );
+}
+
+#[tokio::test]
+async fn observation_only_wait_cannot_turn_a_completed_runtime_phase_into_timeout() {
+    let f = Fixture::new(false);
+    let base = Arc::try_unwrap(adapter(&f, "slow_observation"))
+        .ok()
+        .unwrap();
+    let observer = Arc::new(ReplayObserver(Arc::new(tokio::sync::Notify::new())));
+    let mut bindings = f.bindings("pass");
+    bindings.executors.insert(
+        "test.executor".into(),
+        Arc::new(base.with_observer(observer)),
+    );
+    let rt = Runtime::open(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        bindings,
+    )
+    .await
+    .unwrap();
+    let mut request = f.request("observer-budget", "A", false);
+    request.limits.max_active_ms = 1000;
+    let id = rt.start(request, &Caller::local()).await.unwrap();
+    let result = wait_for(&rt, &id, |s| {
+        s.status.terminal() || s.status == Status::Blocked
+    })
+    .await;
+    assert_eq!(
+        result.status,
+        Status::Completed,
+        "observation wait changed the business result: {result:?}"
+    );
+    assert_eq!(result.accepted_artifacts.len(), 1);
+    rt.shutdown().await.unwrap();
+}
+
+struct FaultObserver(Arc<std::sync::atomic::AtomicBool>);
+#[async_trait::async_trait]
+impl MilkieObserver for FaultObserver {
+    fn options(&self, inv: &Invocation) -> MilkieObservationOptions {
+        ReplayObserver(Arc::new(tokio::sync::Notify::new())).options(inv)
+    }
+    async fn event(&self, _: &Invocation, _: Value) -> Result<()> {
+        Ok(())
+    }
+    async fn status(&self, _: &Invocation, status: Value) -> Result<()> {
+        if status["adapter_delivery_failed"] == true {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn malformed_observation_tail_is_diagnostic_without_changing_business_acceptance() {
+    let f = Fixture::new(false);
+    let base = Arc::try_unwrap(adapter(&f, "bad_observation"))
+        .ok()
+        .unwrap();
+    let bad = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observer = Arc::new(FaultObserver(bad.clone()));
+    let mut bindings = f.bindings("pass");
+    bindings.executors.insert(
+        "test.executor".into(),
+        Arc::new(base.with_observer(observer)),
+    );
+    let rt = Runtime::open(
+        RuntimeOptions::new(f.root.path().join("store")),
+        vec![f.definition.clone()],
+        bindings,
+    )
+    .await
+    .unwrap();
+    let id = rt
+        .start(
+            f.request("malformed-observation", "A", false),
+            &Caller::local(),
+        )
+        .await
+        .unwrap();
+    let result = wait_for(&rt, &id, |s| s.status.terminal()).await;
+    assert_eq!(result.status, Status::Completed);
+    assert_eq!(result.accepted_artifacts.len(), 1);
+    rt.shutdown().await.unwrap();
+    assert!(bad.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn observation_tail_never_reopens_host_tools_after_native_stop_proof() {
+    let f = Fixture::new(false);
+    let executor = adapter(&f, "late_after_finish");
+    let inv = invocation(&f, false, 5000);
+    let spy = Arc::new(Spy::default());
+    let observer = Arc::new(ReplayObserver(Arc::new(tokio::sync::Notify::new())));
+    let outcome = executor
+        .execute_observed(inv, spy.clone(), CancellationToken::new(), Some(observer))
+        .await;
+    assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
+    executor.finish_observations().await.unwrap();
+    assert_eq!(
+        spy.0.load(Ordering::SeqCst),
+        1,
+        "a late sidecar request acquired a second host effect after native completion"
+    );
+}
+
+#[tokio::test]
+async fn retention_waits_for_observation_tail_after_business_completion() {
+    let f = Fixture::new(false);
+    let executor = adapter(&f, "slow_observation");
+    let inv = invocation(&f, false, 5000);
+    let run = inv.run_id.clone();
+    let observer = Arc::new(ReplayObserver(Arc::new(tokio::sync::Notify::new())));
+    let outcome = executor
+        .execute_observed(
+            inv,
+            Arc::new(Spy::default()),
+            CancellationToken::new(),
+            Some(observer),
+        )
+        .await;
+    assert!(matches!(outcome, ExecutionOutcome::Completed { .. }));
+    let cleanup = executor.cleanup_observation(&run).await;
+    executor.finish_observations().await.unwrap();
     assert_eq!(cleanup, ObservationCleanup::Deferred);
 }
