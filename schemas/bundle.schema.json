@@ -119,6 +119,10 @@
                 "include_attachments": {
                   "type": "boolean",
                   "default": false
+                },
+                "optional": {
+                  "type": "boolean",
+                  "default": false
                 }
               },
               "required": [
@@ -315,6 +319,10 @@
                           ]
                         },
                         "include_attachments": {
+                          "type": "boolean",
+                          "default": false
+                        },
+                        "optional": {
                           "type": "boolean",
                           "default": false
                         }

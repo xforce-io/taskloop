@@ -116,7 +116,7 @@ impl Executor for Ex {
         }
     }
 }
-fn fixture(include: bool, selection: &str) -> Fixture {
+fn fixture(include: bool, selection: &str, optional: bool) -> Fixture {
     let mut f = Fixture::new(false);
     let p = f.root.path().join("flow.json");
     let mut b: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
@@ -126,7 +126,7 @@ fn fixture(include: bool, selection: &str) -> Fixture {
     producer["tools"] = json!(["artifact.read", "artifact.write", "test.capture"]);
     b["entries"]["test.other"] = producer.clone();
     let mut analyze = b["entries"]["test.work"].clone();
-    analyze["requires"] = json!([{"state":"work","slot":"result","selection":selection,"include_attachments":include}]);
+    analyze["requires"] = json!([{"state":"work","slot":"result","selection":selection,"include_attachments":include,"optional":optional}]);
     b["entries"]["test.analyze"] = analyze;
     producer["outcomes"] = json!(["ready", "more"]);
     b["entries"]["test.work"] = producer;
@@ -143,8 +143,14 @@ fn fixture(include: bool, selection: &str) -> Fixture {
 }
 #[tokio::test]
 async fn attachments_require_explicit_grant_and_stay_with_selected_producer_visit_and_instance() {
-    for (include, selection) in [(false, "latest"), (true, "latest"), (true, "all")] {
-        let f = fixture(include, selection);
+    for (include, selection, optional) in [
+        (false, "latest", false),
+        (true, "latest", false),
+        (true, "all", false),
+        (true, "latest", true),
+        (true, "all", true),
+    ] {
+        let f = fixture(include, selection, optional);
         let observed = Arc::new(AtomicUsize::new(0));
         let mut bindings = f.bindings("pass");
         bindings.executors.insert(
@@ -245,7 +251,7 @@ async fn gate_evidence_obeys_the_same_visit_slot_and_attachment_grants() {
         (true, "all", "work", 1, "result", true),
         (true, "latest", "work", 2, "capture.snapshot", true),
     ] {
-        let mut f = fixture(include, selection);
+        let mut f = fixture(include, selection, false);
         let path = f.root.path().join("flow.json");
         let mut b: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         b["entries"]["test.work"]["outputs"]["extra"] =
