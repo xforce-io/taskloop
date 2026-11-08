@@ -156,7 +156,7 @@ flowchart TD
 | Run | 不透明run_id、GoalId、node_id或系统角色、member_id、attempt=1、epoch、输入/能力摘要、预算、started/stop事实 | Planner修正是不同受控Run；业务成员不自动复跑 |
 | Artifact | 现有ArtifactRef加公开归属元数据：goal_id、node_id、member_id可选、plan_digest、schema_digest | 内容SHA-256按实际字节计算；候选和公共接纳输出分离 |
 | EvaluationReceipt | evaluation_id、checker_id、rules_digest、subject、producer_run_id可选、verdict、evidence_refs、violations、accepted_revision | subject必须与当前检查请求完全一致，不接纳模型自编对象身份 |
-| GoalSnapshot | GoalId、revision、spec/plan摘要、status、stage、outcome、terminal_intent、admitted_at_utc_ms、wall_deadline_utc_ms、nodes、waiting、artifacts、evaluations、stop、budget摘要、error | 生命周期、业务结果与停止事实独立，不靠一个completed字符串掩盖缺口 |
+| GoalSnapshot | GoalId、revision、spec/plan摘要、status、stage、outcome、terminal_intent、blockers、admitted_at_utc_ms、wall_deadline_utc_ms、nodes、waiting、artifacts、evaluations、stop、budget摘要、error | 生命周期、业务结果与停止事实独立，不靠一个completed字符串掩盖缺口 |
 
 Profile包含固定验收要求，Planner只能选择已注册实现和连接输出，不能删除/修改要求。`admitted_at_utc_ms`为首次受理时间，`wall_deadline_utc_ms=admitted_at_utc_ms+effective.max_wall_ms`采用溢出检查并一次写入；受理时所有期限加法或单调时钟映射不可表示均input_invalid/category=budget_acceptance，拒绝整个submit且不写Goal/不启动Run，不截断或饱和期限。规划期限先取生效规划时长与wall时长最小值再checked_add，重开/补充/恢复不重置。宿主内以单调时钟映射剩余期限，避免本进程内系统钟调整延长预算；last_observed_utc_ms是Store.meta里的时钟高水位，不属于Goal业务revision；刷新时钟观测不能使resume/signal的业务版本持续失效。重开从固定UTC期限恢复，若系统钟早于该持久高水位，blocked/clock_untrusted且不派发，不能将未可信的时差当作新增额度。新目标可带 `parent_goal_id` 与显式 `imports` 列表；导入在submit事务前逐项校验：Artifact必须已接纳、对当前Caller可见，首版严格仅同一owner，不支持跨owner例外，即使其他Grant允许读也拒绝跨owner导入；引用的sha256及schema_digest必须与保存元数据和实际字节一致，当前GoalGrant须允许读取。失败则整个submit拒绝、零Run。parent_goal_id若提供也须是可见的同owner目标；它仅作来源关联，不授予整目标读取权。imports可来自明确选择的多个同owner目标，不强制必须等于parent；没有parent仍须逐项授权。冻结后工具只获得列入imports的确切版本，不获得父目标其他产物。此操作必须是显式新提交，不由失败自动触发。
 
@@ -380,7 +380,7 @@ CLI前台宿主只主动推进run/resume明确选择的Goal，不自动恢复同
 
 5. 最后开放Socket与业务命令。此时同键submit只返回原回执/当前快照，不隐式resume；若恢复得到blocked必须返回8并给pending原因，不能按普通非终态重放退出9。新Goal和显式resume只有通过各自准入后才派发。
 
-clock_untrusted是可解除的独立blocker：保存发生前的阶段/暂停事实和last_observed_utc_ms，不重置deadline。用户修正系统时间后重新打开宿主，或宿主周期复核发现now_utc_ms≥该持久值且时钟映射可表示，移除仅这一blocker；若无其他blocker/terminal_intent/未知Run，转stopped/clock_restored并等待显式resume；若已到固定期限，直接走到期失败收束。存在interrupted/stop_unknown时只移除时钟阻塞，不恢复业务；仍不可信则维持blocked并提示修正时间。不会因解阻重跑已启动Run或延长预算。
+GoalRecord和GoalSnapshot的blockers以{reason,subject}集合保存独立阻塞原因；error仅为摘要，不能用清掉一个error掩盖其他阻塞。clock_untrusted是其中可解除的一项：保存发生前的阶段/暂停事实和last_observed_utc_ms，不重置deadline。用户修正系统时间后重新打开宿主，或宿主周期复核发现now_utc_ms≥该持久值且时钟映射可表示，移除仅这一blocker；若无其他blocker/terminal_intent/未知Run，转stopped/clock_restored并等待显式resume；若已到固定期限，直接走到期失败收束。存在interrupted/stop_unknown时只移除时钟阻塞，不恢复业务；仍不可信则维持blocked并提示修正时间。不会因解阻重跑已启动Run或延长预算。时钟仍不可信时拒绝新submit，保留只读查询及可信停止/消耗收尾；时钟恢复不自动重新受理曾拒绝的创建请求。
 
 ### 6.10 预算与并发一致性
 
