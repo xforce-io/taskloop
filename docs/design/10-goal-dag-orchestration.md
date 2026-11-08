@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.13；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.14；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 产品基线：[L1概要及归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)，以及提交`16a68d48abb829dc14f13d0e0f4d3ed8c754558c`的v0.2用户路径与验收。复用§4行为和§11原18项Sx.Ax，不改变产品范围。本文件按用户指定十三节格式保存唯一L2事实源，L1留在Issue评论。
 
@@ -773,7 +773,7 @@ taskloop goal trace     GOAL_ID --store DIR --after CURSOR --limit N [--json]
 
 run/resume是前台宿主，持有Store独占锁；第二个宿主得到already_running且不重启工作。get/plan/artifact/budget/trace为只读Client；signal/cancel/stop为在线命令Client，不获得宿主锁、无模型或Worker生命周期。CLI可在等待时显示另一终端的具体补充命令；不要求用户打开SQLite或编辑内部状态。
 
-HOST.json指定store_dir、已编译的Profile/能力工厂ID、现有Skill/Schema资源根、显式Milkie配置、GoalGrant、宿主容量/TracePolicy。解析不执行安装脚本，不自动发现用户凭据，不允许Agent输入任意本地模块路径。通用CLI使用[HOST配置示例](../../examples/goal/host.example.json)，只选择已编译document-review@1工厂；goal_grants.profile_refs来自可信配置，在注册后转换为GoalGrant的冻结摘要，Caller固定为当前UID且grants来自caller_grants，不接受请求自报身份。CLI Trace配置为元数据模式；应用SDK仍可提供内容过滤器。通用CLI提供随包的最小文档审阅Profile；应用自定义Rust能力由应用打包注册，可复用同一CliDriver或SDK（Inquiry Web仍是应用入口），不会声称一个JSON配置能加载任意未编译Rust工具。
+HOST.json指定store_dir、已编译的Profile/能力工厂ID、现有Skill/Schema资源根、显式Milkie配置、GoalGrant、宿主容量/TracePolicy。解析不执行安装脚本，不自动发现用户凭据，不允许Agent输入任意本地模块路径。通用CLI使用[HOST配置示例](../../examples/goal/host.example.json)，只选择已编译document-review@1工厂；goal_grants.profile_refs来自可信配置，在注册后转换为GoalGrant的冻结摘要，Caller固定为当前UID且grants来自caller_grants，不接受请求自报身份。CLI Trace配置为元数据模式；应用SDK仍可提供内容过滤器。通用CLI提供随包的最小文档审阅Profile，注册text作为规划补充Schema；Planner明确需要澄清时可经同一前台等待/另一客户端signal路径接纳补充事实，不修改冻结目标或权限；应用自定义Rust能力由应用打包注册，可复用同一CliDriver或SDK（Inquiry Web仍是应用入口），不会声称一个JSON配置能加载任意未编译Rust工具。
 
 客户端仅在同一OS用户的0700Store目录工作；GoalClient按本地UID映射可信身份，不能从请求JSON指定principal。嵌入应用继续由宿主提供Caller与授权；首版不承诺跨OS用户/远程客户端。持锁前台宿主创建`owner.sock`并处理在线命令；这是该进程内的本地控制入口，不是独立后台服务。客户端不打开可写数据库、不写收件表。宿主使用OS peer UID与Store所有者核对身份，并以宿主配置映射Caller/Grant，不接纳请求自报的授权。
 

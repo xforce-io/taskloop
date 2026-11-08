@@ -88,6 +88,49 @@ impl Fixture {
             goal_id: admitted["goal_id"].as_str().unwrap().into(),
         }
     }
+    fn start_resume(&self, id: &str, revision: u64) -> OwnedChild {
+        let mut child = self
+            .command()
+            .args(["goal", "resume", id, "--config"])
+            .arg(&self.host)
+            .args([
+                "--request-key",
+                "resume-wait",
+                "--revision",
+                &revision.to_string(),
+                "--json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let event: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(event["type"], "command.receipt");
+        assert_eq!(event["goal_id"], id);
+        OwnedChild {
+            child: Some(child),
+            reader: Some(reader),
+            prefix: line.into_bytes(),
+            goal_id: id.into(),
+        }
+    }
+    fn wait_status(&self, id: &str, status: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let snapshot = self.query("get", id);
+            if snapshot["status"] == status {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected {status}, actual {snapshot}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     fn query(&self, command: &str, id: &str) -> Value {
         let out = self
             .command()
@@ -425,4 +468,69 @@ fn killed_hosts_reconcile_started_runs_without_replaying_any_business_stage() {
         assert_eq!(resumed.status.code(), Some(2));
         assert_eq!(f.started(), count);
     }
+}
+
+#[test]
+fn cli_waits_for_signal_and_preserves_wait_identity_across_foreground_restart() {
+    let f = Fixture::new("goal_need_input", Some("work"));
+    let child = f.start();
+    let id = child.goal_id.clone();
+    let waiting = f.wait_status(&id, "waiting");
+    assert_eq!(f.started(), 1);
+    assert_eq!(waiting["progress"]["goal_occupied_slots"], 0);
+    let wait = waiting["waiting"][0].clone();
+    let paused = f
+        .command()
+        .args(["goal", "stop", &id, "--store"])
+        .arg(f.root.path().join("store"))
+        .args([
+            "--request-key",
+            "pause-wait",
+            "--revision",
+            &waiting["revision"].as_u64().unwrap().to_string(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(paused.status.code(), Some(0));
+    let stopped = snapshot(&child.finish(), 9);
+    assert_eq!(stopped["status"], "stopped");
+    assert_eq!(stopped["waiting"][0], wait);
+    assert!(!f.root.path().join("store/owner.sock").exists());
+    let stopped = f.query("get", &id);
+    let resumed = f.start_resume(&id, stopped["revision"].as_u64().unwrap());
+    let waiting = f.wait_status(&id, "waiting");
+    assert_eq!(waiting["waiting"][0], wait);
+    let input = f.root.path().join("signal.json");
+    fs::write(&input, serde_json::to_vec(&json!({"protocol_version":1,"wait_id":wait["wait_id"],"nonce":wait["nonce"],"payload":"侧重风险与恢复边界","request_key":"answer-once","expected_revision":waiting["revision"]})).unwrap()).unwrap();
+    let signal = || {
+        f.command()
+            .args(["goal", "signal", &id, "--store"])
+            .arg(f.root.path().join("store"))
+            .arg("--request")
+            .arg(&input)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let first = signal();
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+    let second = signal();
+    assert_eq!(second.status.code(), Some(0));
+    let a: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let b: Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(a["data"]["receipt"], b["data"]["receipt"]);
+    let result = snapshot(&resumed.finish(), 0);
+    assert_eq!(result["outcome"], "achieved");
+    assert!(result["waiting"].as_array().unwrap().is_empty());
+    assert_eq!(
+        f.started(),
+        4,
+        "two planners, one worker, one final check; no duplicate signal run"
+    );
 }

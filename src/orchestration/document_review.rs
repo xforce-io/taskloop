@@ -174,7 +174,7 @@ pub fn document_review_registry(
         artifact_selectors: BTreeMap::new(),
         planner_entry_ref: "planner@1".into(),
         capabilities: vec!["review@1".into()],
-        planning_input_schemas: vec![],
+        planning_input_schemas: vec!["text".into()],
         templates: vec![],
         outputs: BTreeMap::from([(
             "report".into(),

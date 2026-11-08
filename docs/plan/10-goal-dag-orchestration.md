@@ -116,3 +116,12 @@
 - 原反例`recovery-window-core-tests.log`复现两处重复recover无新事实仍升revision：首轮已将Run/节点归类interrupted，次轮走无在途Run分支时错误补pause时间。修复仅在无blocker且安全stopped时记录恢复暂停；blocked保持原事实。三个用例重跑通过（`recovery-window-core-retest.log`），严格Clippy通过（`recovery-window-clippy.log`）。
 - 原固定Codex下载进程确认后，因实测代理线路更快而停止旧进程并切换路线；新下载完成，107610108字节、官方asset SHA256 c48824462fc57681eafb0925d97b11b589010475613904f570b42fea53e240d5匹配，隔离二进制自报codex-cli 0.166.0。`verified-download.json`保存官方来源及二进制摘要；未替换系统默认Codex。
 - 准备在该固定环境继续真实S6。此前失败不改判；完整常规回归、真实正/负例/第二业务、最终verify与独立review/release继续待完成。
+
+
+## 实现检查点十一（2026-11-08）
+
+- 恢复修复后完整常规回归200通过、5项环境用例ignored（`recovery-fix-full-regression.log`）。随后补随包document-review Profile的text规划补充Schema及CLI真实进程等待→stop退出→resume→signal同键重放用例，nonce/期限保留且最终原生调用数为4；原Schema未注册时通用CLI无法进入合法等待路径，此次落实原S1路径，无新增状态机或包加载器。
+- 该Profile与离线示例同步，L2 v0.10.14只具体化已有等待能力。更新后完整常规回归201通过、5项环境用例ignored（`cli-wait-profile-full-regression.log`），严格Clippy通过（`cli-wait-profile-clippy.log`），离线契约及原18项验收一致性通过。
+- 正例positive-4-codex166已真实执行模型，但Codex发行包缺同版本code-mode-host，模型明确报告无法调用工具；Runtime未将最终聊天当产物。官方辅助包SHA256 7abd50fe5f033495a7b693c45fb82dc57093a18f1c4ba3e8043577de46c5c7c5已核对，加入隔离PATH；消费者增加创建Goal前的组件存在检查与摘要记录。
+- positive-5-codex166真正完成Planner/来源选择/两份官方网页获取；分析Run真实读取24次来源后在240秒期限内未提交，Runtime failed/limit_reached且report dependency_failed。原始捕获、候选、预算和Trace保留，未自动返工、未改判成功。此例证明执行/期限边界，不算S6.A1正例通过。
+- 下一次显式验证改进应用入口的方法：先60秒内聚焦阅读、挑选8–12条关键证据后提交，避免把时间耗在穷举引文；问题、RuleSet及全部预算不变。可显式选当前机器默认的gpt-6.1-sol模型，Harness/模型仍由可信配置冻结，不自动回退。真实正/负例/第二业务与最终verify/review/release仍待完成。

@@ -191,6 +191,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     if native == "codex" && native_version != "codex-cli 0.166.0" {
         return Err("this fixed Milkie candidate requires codex-cli 0.166.0; select it explicitly in PATH before creating a Goal".into());
     }
+    let native_companion = if native == "codex" {
+        let search = std::env::var_os("PATH").unwrap_or_default();
+        let file = std::env::split_paths(&search)
+            .map(|p| p.join("codex-code-mode-host"))
+            .find(|p| p.is_file())
+            .ok_or("codex-code-mode-host companion is missing from the isolated PATH")?;
+        Some(format!("{:x}", Sha256::digest(std::fs::read(file)?)))
+    } else {
+        None
+    };
     save(
         &root,
         "connection.json",
@@ -254,7 +264,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     save(
         &root,
         "environment.json",
-        &json!({"inquiry_sha":INQUIRY_SHA,"taskloop_sha":taskloop_sha,"milkie_sha":milkie_sha,"milkie_cli_sha256":milkie_cli_sha,"profile_digests":options.grants["integration"].profile_digests,"native":native,"native_version":native_version,"model":model,"mode":args[1],"limits":bounds,"rules":"compiled and frozen before any model call"}),
+        &json!({"inquiry_sha":INQUIRY_SHA,"taskloop_sha":taskloop_sha,"milkie_sha":milkie_sha,"milkie_cli_sha256":milkie_cli_sha,"profile_digests":options.grants["integration"].profile_digests,"native":native,"native_version":native_version,"native_companion_sha256":native_companion,"model":model,"mode":args[1],"limits":bounds,"rules":"compiled and frozen before any model call"}),
     )?;
     if args[1] == "check" {
         registry::document(&bindings)?;

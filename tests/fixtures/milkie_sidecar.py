@@ -57,6 +57,8 @@ for line in sys.stdin:
     phase='planner'
     proposal={'protocol_version':1,'goal_spec_digest':stage['goal_spec_digest'],'profile_digest':stage['profile_digest'],'planning_mode':stage['planning_mode'],'nodes':{'review':{'capability_ref':'review@1','depends_on':['review'] if mode=='goal_bad_plan'else [],'inputs':{'question':{'kind':'goal','pointer':'/goal'},'document':{'kind':'goal','pointer':'/inputs/document_text'}}}},'outputs':{'report':{'node_id':'review','port':'report'}},'checks':{'quality':{'phase':'goal_final','checker_ref':'quality@1','targets':['report']}}}
     r['goal_output']={'slot':'proposal','value':{'protocol_version':1,'kind':'proposal','proposal':proposal}}
+    if mode=='goal_need_input' and payload['visit']==1:r['goal_output']={'slot':'proposal','value':{'protocol_version':1,'kind':'needs_input','input_schema_ref':'text','reason':'请确认审阅关注点'}}
+    elif mode=='goal_need_input':assert len(payload['signal_facts'])==1
    elif payload['state_id'].startswith('_tl.check.'):
     phase='final'
     verdict='fail'if mode=='goal_not_met'else'error'if mode=='goal_check_error'else'pass'

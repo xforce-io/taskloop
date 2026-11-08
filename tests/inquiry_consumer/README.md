@@ -16,7 +16,7 @@ export INTEGRATION_RUNTIME=grok-cli
 export INTEGRATION_MODEL=grok-4.6
 ```
 
-INTEGRATION_RUNTIME也可显式选择codex，模型名、配置和会话目录须对应该已登录环境；不自动在Harness间回退。固定Milkie候选的Codex适配器要求`codex-cli 0.166.0`，通过本任务PATH显式选择，消费者在创建Goal之前检查版本，勿改系统默认二进制或绕过版本校验。协议和领域规则保持不变。
+INTEGRATION_RUNTIME也可显式选择codex，模型名、配置和会话目录须对应该已登录环境；不自动在Harness间回退。固定Milkie候选的Codex适配器要求`codex-cli 0.166.0`，通过本任务PATH显式选择，消费者在创建Goal之前检查版本，还需同一官方release的`codex-code-mode-host`辅助二进制，校验asset SHA后与codex一起放入隔离PATH；单独的主二进制能启动模型但无法执行动态工具。消费者在创建Goal前检查其存在并记录摘要。勿改系统默认二进制或绕过版本校验。协议和领域规则保持不变。
 
 不复制或输出凭据。配置和会话目录由宿主指定，Milkie负责原生会话；只对本消费者创建的Run操作。按环境需要给子进程设置代理。不能在未登录或使用协议夹具时宣称真实模型通过。
 

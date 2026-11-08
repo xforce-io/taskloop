@@ -73,7 +73,9 @@
     "capabilities": [
       "review@1"
     ],
-    "planning_input_schemas": [],
+    "planning_input_schemas": [
+      "text"
+    ],
     "templates": [],
     "outputs": {
       "report": {
