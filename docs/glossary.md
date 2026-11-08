@@ -90,8 +90,9 @@
 | GoalGrant | 宿主授予调用方使用指定Profile、能力与目标预算的授权契约。 | — |
 | CheckRequirement | 冻结在Profile中的必需检查身份、阶段、规则及目标输出声明。 | — |
 | CheckRequest | Runtime为一次检查生成、绑定确切对象与授权证据范围的不可复用请求。 | — |
-| GoalClient | 不取得执行所有权、仅查询公开事实或递交本地命令的客户端。 | — |
+| GoalClient | 不取得执行所有权、仅查询公开事实或向在线宿主提交命令的客户端。 | — |
 | GoalSignalRequest | 绑定等待身份、版本和幂等键的目标补充输入请求。 | — |
 | OrchestrationRegistry | 宿主显式注册并锁定Profile、能力、模板、检查和汇合实现的目录。 | — |
 | OrchestrationOptions | 宿主显式启用编排并规定容量及协议限制的配置。 | — |
 | 状态转移器 | 根据当前快照、已验证事件与转移规则计算状态变更和待执行动作，并由事务接纳后生效的Runtime组件。 | — |
+| PlannerResult | Planner一次调用返回的计划提案或结构化补充输入请求，不授予状态提交权。 | — |
