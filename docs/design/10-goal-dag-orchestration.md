@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.9.1；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.9.2；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -319,11 +319,13 @@ CheckInput是CheckRequest的只读执行封装，phase为plan/node_checkpoint/go
 
 **显式评价节点的输入例外：**NodeContract仍为kind=work，附evaluation={purpose,checker_ref,target_ports}，purpose仅checkpoint或data。首版恰有一个成员，input_mode=check_request且entry_ref精确等于checker登记入口，不能有input_bindings；整个stage_input由Runtime构造，绝不把nonce/epoch/rules等身份字段当公共输入让Planner绑定。普通node_ports入口不能引用Core CheckInput来伪造这个模式。评价节点公共inputs恰好覆盖target_ports所列端口，全部required、source_policy=artifact，alias→port一一对应；每个alias必须存在于本Profile.outputs，实际Plan绑定须等于该别名解析到的确切公共产物。outputs恰为evaluation，Schema为Core Evaluation候选；join只允许从这个成员的result_slot作member投影。
 
-checkpoint节点须由Plan.checks中的唯一node_checkpoint项绑定，checker_ref及target别名集合与NodeContract.evaluation和冻结CheckRequirement完全相等，purpose必须checkpoint；检查依赖和before_outputs仍按§6.8验证。N02首次ready事务在输入Artifact已接纳后创建并持久化CheckRequest（epoch/nonce/subject/rules/目标摘要），登记角色及唯一成员的RunRequest，成员输入摘要取完整只读CheckInput；容量不足保留请求。N03/R01/R02只能使用这份请求，重算/排队/兄弟节点更新不重建nonce；启动及接纳仍复核当前epoch/意图/期限。pause下N02禁止首次创建请求；已启动检查允许的干净结果沿既有N04/N05/N11接纳，R04仍只处理plan/final。节点公共evaluation、EvaluationReceipt及阻断意图在N05/N11同事务，不能在成员候选阶段提前给后继通行。冻结请求绑定subject，但issued_revision仅审计，不因兄弟推进误拒。
+checkpoint节点须由Plan.checks中的唯一node_checkpoint项绑定，checker_ref及target别名集合与NodeContract.evaluation和冻结CheckRequirement完全相等，purpose必须checkpoint；检查依赖和before_outputs仍按§6.8验证。N02首次ready事务在输入Artifact已接纳后创建并持久化CheckRequest（epoch/nonce/subject/rules/目标摘要），登记角色及唯一成员的RunRequest，成员输入摘要取完整只读CheckInput；容量不足保留请求。N03/R01/R02只能使用这份请求，重算/排队/兄弟节点更新不重建nonce；启动及接纳仍复核当前epoch/意图/期限。pause下N02禁止首次创建请求；但已在pause前取得CheckRequest且Run已started的评价成员，在原epoch/期限和15秒窗口内允许N04进入checking并完成固定单成员投影及N05/N11，不受普通成员“暂停不首次汇合”的延缓规则阻挡。这是同一已启动检查的收口，不是新检查Run；checkpoint fail/error立即按G09/G10，不能先stopped等resume。R04仍只处理plan/final。节点公共evaluation、EvaluationReceipt及阻断意图在N05/N11同事务，不能在成员候选阶段提前给后继通行。冻结请求绑定subject，但issued_revision仅审计，不因兄弟推进误拒。
 
-data用途用于既定前向“评价→修订”，不满足或替代任何必需checkpoint。Runtime同样在N02创建只读请求，phase=node_evaluation（仅CheckInput新增的非阻断执行角色，不扩展CheckRequirement.phase）；check_id为`eval.`加node_id的SHA-256前32位并与本Goal绑定，注册计划时碰撞拒绝，不与Profile必需检查混同。N05生成该角色的评价记录但fail只作为有效数据，不触发not_met；error仍为节点检查失败。请求角色、Plan节点和purpose由Runtime冻结验证，模型不能用phase回显改变阻断性质。两种节点材料见checkpoint-node.example.json及evaluation-node.example.json，示例不替代带真实产物身份的Plan校验。
+data用途用于既定前向“评价→修订”，不满足或替代任何必需checkpoint。Runtime同样在N02创建只读请求，phase=node_evaluation（仅CheckInput新增的非阻断执行角色，不扩展CheckRequirement.phase）；check_id为`eval.`加node_id的SHA-256前32位并与本Goal绑定，注册计划时碰撞拒绝，不与Profile必需检查混同。N05先按评价语义分流：data的pass/fail可接纳为公共evaluation及该角色的评价记录，fail仅作为有效数据，不触发not_met；任何purpose的verdict=error或无效Evaluation在N05转N07/G10，节点failed并记录check_unavailable，不形成公共成功输出、不放行后继。合法error可存错误Receipt，格式/身份非法只存错误事实与候选，不伪造合法Receipt。请求角色、Plan节点和purpose由Runtime冻结验证，模型不能用phase回显改变阻断性质。两种节点材料见checkpoint-node.example.json及evaluation-node.example.json，示例不替代带真实产物身份的Plan校验。
 
 **规划入口的绑定：**Profile.planner_entry_ref必须解析到恰有proposal必需输出槽、Schema为Core PlannerResult的入口；这个槽的内容仍是proposal/needs_input联合类型。Runtime给规划入口构造目标视图、goal_spec_digest/profile_digest、planning_mode、冻结Profile和本Profile能力目录；Profile包含输出别名和完整检查要求，不能让Planner在看不到checks时猜测Plan.checks。入口Schema必须接受该固定字段集合并通过实际值验证；workflow另携宿主冻结的template视图，由其入口Schema及既有模板校验约束，模板缺失即拒绝。示例planner-input.json只接受autonomous，与示例Profile.templates为空一致；它包含完整Profile而非只给能力名。入口Schema不匹配、缺结果槽或工具/隔离能力不支持时在Planner启动前拒绝。
+
+**checker执行上下文投影：**对于plan/final及两种节点评价，限制不只在stage_input。Invocation.inputs与ToolContext.inputs都只含本CheckRequest允许的goal_inputs字段；Invocation.artifacts及ToolContext.accepted只含本请求的确切target Artifact，signal_facts默认空，不自动带入规划补充、其他节点或兄弟Run事实。只有显式成为请求target的输入产物才能读取其内容。stage_input为完整CheckInput；Skill及工作目录仅含本入口锁定资源和上述材料，不写入完整Goal输入副本。工具桥按同一只读作用域解析引用，受信DomainTool不得从全局Store补查隐藏材料；普通Worker/旧Flow的上下文语义不变。具备完整Goal读取权限的宿主不能把该权限自动传递给checker Run。
 
 模型只返回Evaluation候选，不返回受信身份；Runtime按冻结request重新检查规则集合、verdict一致性、证据引用允许集合，再生成EvaluationReceipt。同名证据不跨Goal授权。CheckInput示例内的nonce/摘要占位不作为真实请求接纳；执行时只能由Runtime据持久事实构造。
 
@@ -418,7 +420,7 @@ Run阶段：`reserved → started → execution_returned → checking → settle
 | 意图/事件 | epoch与派发 | 在途业务输出 | 收尾与目标状态 |
 |---|---|---|---|
 | 用户cancel，尚无终结意图 | epoch递增一次，禁新派发，nonce作废 | 旧输出拒绝，候选可留作诊断 | status=stopping；全部自身Run结算后finished/cancelled；未知超窗口blocked |
-| pause/显式stop/SIGINT | 不递增epoch，禁新派发，等待身份保留但暂不受理signal | 在原预算/期限内已干净完成的输出允许接纳；有效失败/error/阻断fail按G09/G10转终结，不被pause掩盖；不能启动后继或新检查Run | 15秒内Run与已进入checking节点均接纳/结算才stopped；到窗口请求停止，若出现未接纳的已启动工作则blocked/interrupted；停止未知继续占槽 |
+| pause/显式stop/SIGINT | 不递增epoch，禁新派发，等待身份保留但暂不受理signal | 在原预算/期限内已干净完成的输出允许接纳；有效失败/error/阻断fail按G09/G10转终结，不被pause掩盖；不能启动后继或新检查Run | 15秒内Run、已进入checking节点及pause前已启动评价的投影/接纳均完成并结算才stopped；到窗口请求停止，若出现未接纳的已启动工作则blocked/interrupted；停止未知继续占槽 |
 | 必需checkpoint fail | 事务设置not_met意图，递增epoch、作废nonce，禁新派发 | 意图前已接受输出保留；意图后的兄弟业务输出拒绝，仅留候选 | status=stopping，停所有自身在途Run；结算后finished/not_met |
 | 工作/检查error、规划耗尽或预算耗尽 | 设置failed及具体原因，递增epoch、作废nonce，禁新派发 | 不再接受业务输出，不覆盖已接受证据 | status=stopping；确认/结算后finished/failed |
 | wall/规划期限到达 | 分别failed/wall_timeout或planning_timeout，按失败行处理；已有终结意图只追加期限事实 | 期限之后不接纳业务输出；停止和消耗照常结算 | 同上；即使没有工作可派发也必须触发 |
@@ -453,7 +455,7 @@ Run阶段：`reserved → started → execution_returned → checking → settle
 5. **资源及不变量检查**：计算业务转移消耗和预留；超额不提交部分业务结果，改为budget_exhausted终结Decision。可信停止/结算和必要cleanup不被业务额度拦截。不变量不满足则不提交原Decision；保留诊断并以明确contract_error失败收束，禁止部分成功。存储不可写时不能声称该失败已持久化或继续派发。
 6. **原子提交与动作**：按§6.1.1提交；CAS冲突重读并从步骤1重新计算。成功后动作仍经启动前CAS或原Run停止校验；重复通知不能二次spawn。结果事件触发下一次接纳。
 
-**暂停下的全局不变量：**除合法G15显式resume之外，任何结果主规则都不得清pause，也不得把stopping/stopped写成可执行running/waiting。有效在途结果可持久化，但G05锁计划、G07启动最终阶段及其他首次派发均须无pause/terminal/blocker；暂停中只允许已有Run的干净接纳与已开始checking的有限收口。每次主规则/结算接纳后，只要pause仍有效且无terminal，必须在同Decision归并G14；不得依赖另一个可能永远不来的事件才能stopped。terminal已存在时仅G13收尾，不走G14。上述限制同时约束表格的writes和otherwise；O3仅延缓后续推进，不能跳过首次有效事实保存。
+**暂停下的全局不变量：**除合法G15显式resume之外，任何结果主规则都不得清pause，也不得把stopping/stopped写成可执行running/waiting。有效在途结果可持久化，但G05锁计划、G07启动最终阶段及其他首次派发均须无pause/terminal/blocker；暂停中只允许已有Run的干净接纳、已开始checking的有限收口，以及pause前已启动评价Run的固定单成员投影与评价接纳；后者允许N04首次进入checking以兑现已有检查，不得创建新请求/Run或执行自定义I/O。每次主规则/结算接纳后，只要pause仍有效且无terminal，必须在同Decision归并G14；不得依赖另一个可能永远不来的事件才能stopped。terminal已存在时仅G13收尾，不走G14。上述限制同时约束表格的writes和otherwise；O3仅延缓后续推进，不能跳过首次有效事实保存。
 
 **竞争的确定性口径：**不同事件以成功提交顺序生效，不按模型返回时间回写历史；期限在每次业务事务中复核。取消先提交，则后到成功只可诊断/结算；成功先提交，则后到取消保留已接受产物并按当前Goal状态办理。两个兄弟成员结果均可按最新revision分别接纳，最后一员只使节点进入checking一次。checkpoint receipt及其not_met/failed意图在同事务，后继不能钻接纳间隙。一个评价候选内error优先于fail；不同检查事件的首个决定性意图按§6.5.1保留，后续只追加证据。pause不等于terminal_intent，期限/取消可使暂停进入终结收束。pause窗口内，符合原epoch/期限的在途有效业务失败、检查error或阻断checkpoint/final fail仍按G09/G10确立终结意图，优先于可恢复暂停并转G13；只接纳干净结果不意味着把真实失败当成功或忽略。暂停后未获准的新工作、旧epoch、过期候选不具此权利。
 
@@ -520,21 +522,21 @@ G06/G08/G13/G14是当前接纳事务末尾的状态归并规则，不依赖一�
 
 ### 6.5.4 节点规则
 
-所有查询以当前Goal、计划、node_id精确限定。成员完成指成员结果已被Runtime接纳，不是Executor刚返回。终结意图之后不得靠下表业务规则形成新公共输出；pause仅保留§6.5.1允许的在途干净接纳/已开始checking。
+所有查询以当前Goal、计划、node_id精确限定。成员完成指成员结果已被Runtime接纳，不是Executor刚返回。终结意图之后不得靠下表业务规则形成新公共输出；pause仅保留§6.5.1允许的在途干净接纳/已开始checking，以及§6.3.3对已启动评价的有限收口例外。
 
 | ID / 事件 | kind / 前态与条件 | writes / 新状态 | actions与原子边界 | otherwise |
 |---|---|---|---|---|
 | N01 计划锁定 | work/input；节点不存在 | 创建pending；根节点亦先按同一规则检查依赖/输入 | 同事务初始化；成员尚无Run | O1；重复初始化不重置；计划不符O2 |
 | N02 上游公共输出接纳/初次就绪检查 | work/pending；Goal为running/waiting且无pause/terminal/blocker，全部必需依赖成功、端口合法 | ready；冻结此次公共输入及成员输入摘要 | 输入错误按N07；输入引用/摘要与ready共同提交；评价节点同事务创建§6.3.3的CheckRequest/成员RunRequest及CheckInput摘要；不因依赖候选返回而ready | O1/O2；pause/blocker或依赖未齐O3，不写ready/不派发，保留事实；terminal按cleanup；实际输入非法N07 |
 | N03 成员预留或首次启动 | work/ready或running；成员未启动、无终结/pause | 预留可仍ready；首次Run started时节点running；其他成员可逐个准入 | Run/账本及节点变化同事务；不等待同时拿齐全部槽位 | O1/O2；槽位不足O3；意图关闭O4 |
-| N04 成员结果接纳 | work/running；确切成员、当前epoch、Schema及内建Gate合法 | 保存成员成功与候选/接纳引用；未齐员保持running；齐员且允许首次汇合则checking；pause期间尚未进入checking的齐员节点保留成员成功事实，等待resume首次汇合 | 最后一员接纳与checking资格同事务；内建汇合在提交后执行一次，产生绑定成员集合摘要的结果事实 | O1/O2；未齐或pause禁止首次汇合O3；无效输出N07 |
-| N05 汇合/节点Gate结果接纳 | work/checking；输入成员集合、规则摘要匹配，输出合法 | succeeded及唯一公共Artifact引用；重算后继 | 公共输出、节点状态、相关receipt/意图同事务；已接纳重复结果不再汇合/写第二版本 | O1/O2；无效Schema/Gate N07；终结关闭O4 |
+| N04 成员结果接纳 | work/running；确切成员、当前epoch、Schema及内建Gate合法 | 保存成员成功与引用；齐员可checking。普通node_ports在pause下若未checking则等resume；check_request评价若pause前已started且窗口/期限有效，则立即checking，不能延缓阻断fail/error | 成员接纳与checking资格同事务；提交后仅固定投影/内建校验，结果回N05；不新建检查请求/Run | O1/O2；普通成员未齐或pause首次汇合O3；已启动评价不得因pause跳过收口；无效输出N07 |
+| N05 汇合/节点Gate结果接纳 | work/checking；成员集合与规则摘要匹配；评价节点先分类verdict而非只看Schema通过 | 普通合法输出或评价pass/data-fail为succeeded及公共Artifact；checkpoint-fail附N11。任何评价error/无效结果转N07/G10，failed/check_unavailable，无公共成功输出 | 成功输出/节点/合法receipt/意图原子提交；评价错误事实与失败意图同事务；重复不重算/不写第二版本 | O1/O2；Schema/Gate非法N07；评价error/非法Receipt N07/G10，不放行后继；终结关闭O4 |
 | N06 input依赖满足/补充 | input/pending→waiting_input；有效signal时waiting_input→succeeded | 建wait_id/nonce/期限；补充时消费nonce并接纳SignalFact/公共输出 | 无Run不占槽；信号接纳、输出及后继就绪同事务；暂停/终结/过期拒绝；规划等待由G04管理，不伪造DAG节点 | O1；失效nonce/暂停/过期O2；超时G10/N07 |
 | N07 成员/输入/汇合契约失败 | work非终态，或input有效超时 | 根节点failed；设置Goal失败意图；不能形成公共成功输出 | 根失败与关闭派发同事务；取消其余成员并结算；保留已接受事实 | O1/O2；既有根失败不覆盖；终结后只诊断 |
 | N08 上游失败传播 | pending/ready或未开始的waiting_input；有失败祖先 | dependency_failed，nonce失效；若已reserved则cleanup该Run | 可稳定批次传播，但Goal已关闭派发；已在途兄弟节点按N09收束，不冒充从未执行 | O1；已在途改N09；无失败祖先不适用 |
 | N09 取消/终结清理 | 尚未完成节点；按其是否已执行及是否有原生未知区分 | 未执行且非失败依赖为cancelled；已启动未接纳工作在terminal_intent收尾中确认停后cancelled；pause无terminal/崩溃丢失接纳确认后interrupted；未知仍为stop_unknown | 不覆盖已有succeeded/failed/dependency_failed；保留诊断、已接纳成员及原Run引用 | O1；已有终态保留；未确认O3；确认后更新暂时未知 |
-| N10 pause/resume | pause时未启动节点保持pending/ready/waiting_input；已齐员但未checking可等resume | 不清成功成员；Run可suspended但不把节点写成suspended；合法resume后重算首次汇合/就绪 | 已进入checking须在暂停窗口接纳，否则interrupted；无自动重跑 | O1/O2；未提交checking转interrupted，不重算 |
-| N11 阻断评价接纳 | checkpoint评价节点，按N05成功接纳有效评价内容 | verdict=fail也可使评价节点succeeded，但同事务G09关闭派发；error走G10 | receipt、节点输出、Goal意图原子绑定；普通非阻断评价fail仍是供后续既定节点消费的数据 | 随N05；仅checkpoint角色适用；非法receipt G10 |
+| N10 pause/resume | 未启动节点保持pending/ready/waiting_input；普通成员齐员未checking可等resume；已启动评价按N04例外收口 | 不清成功成员；Run可suspended但节点不写suspended；合法resume重算普通首次汇合/就绪 | 已checking或已启动评价须在窗口完成接纳，否则interrupted；不借暂停重跑检查 | O1/O2；未提交checking转interrupted，不重算；不得将已启动checkpoint fail推迟到resume |
+| N11 阻断评价接纳 | purpose=checkpoint且精确绑定唯一Plan.checks项；按N05评价分流 | 合法pass/fail可节点succeeded；fail同事务G09关闭派发；error/非法评价由N05转N07/G10且无公共成功输出 | 成功receipt/输出/意图原子绑定；error保存错误事实及失败意图；data-fail不适用本规则 | 随N05；未绑定checkpoint在计划校验即拒绝；任何评价error均不放行后继 |
 
 N07输入错误包括依赖满足后发现实际值违反冻结Schema；只是缺少未完成依赖仍pending。N04内部Gate结果与成功接纳分开；无效成员输出是工作/契约失败，不能靠全部成员都execution_returned进入汇合。恢复遇checking但公共结果未提交，按§6.9保留interrupted，不重新运行汇合冒充旧成功。上述规则覆盖同类节点的全部转移，不为每个具体业务能力增加状态代码。
 
@@ -601,13 +603,13 @@ node_checkpoint必须由**同一DAG里的显式评价节点**实现，不生成�
 
 1. Profile.outputs冻结所有公开输出别名、Schema摘要及允许的生产能力；final_outputs给出最终交付别名，checkpoint_target别名可指中间产物。Plan.outputs必须覆盖这些声明，映射到存在的node_id/port并符合Schema/生产能力约束。检查targets统一是这些别名，不是任意字符串或隐式节点路径。
 2. Plan.checks的键集合必须恰好等于Profile中phase为node_checkpoint或goal_final的CheckRequirement.id集合；每个可执行Profile必须至少有一个required goal_final检查，否则注册即拒绝（不能只检查计划便宣称Goal达标），故该集合非空；plan阶段检查仅由Profile执行，不由Planner再次声明。每项phase、checker_ref与targets集合必须与该requirement的冻结phase/checker_ref/target_outputs完全相同，漏项/多项/替换均budget_acceptance拒绝。
-3. node_checkpoint必须有evaluation_node_id，引用匹配checker能力的评价节点；该节点输入绑定每个target解析到的确切公共端口，depends_on必须显式包含所有生产节点。一个评价节点仅绑定一个CheckRequirement，避免重复接纳不同规则身份。
+3. node_checkpoint必须有evaluation_node_id，引用匹配checker能力的评价节点；该节点输入绑定每个target解析到的确切公共端口，depends_on必须显式包含所有生产节点。一个评价节点仅绑定一个CheckRequirement，避免重复接纳不同规则身份。评价成员使用§6.3.3 check_request模式，不由端口提供受信身份。必须反向检查：Plan中purpose=checkpoint的全部node_id集合，恰等于所有node_checkpoint项的evaluation_node_id集合，且一一对应；多余/未绑定checkpoint节点、重复映射、purpose=data出现在映射均reference/plan_invalid，业务启动数为0。不能只验证从CheckRequirement到节点的单向引用。
 4. node_checkpoint的Profile必须给出非空before_outputs：这些是**要求在检查通过后才允许生产的公开输出别名**。Runtime将其解析为受保护节点，要求每个节点depends_on显式包含该评价节点；缺边即input_connection/plan_invalid，绝不自动加边。目标生产节点/评价节点本身不能同时充当受保护节点，否则会形成环并拒绝。未被before_outputs声明保护的中间计算可在检查前发生，不错误地把所有target消费者都强迫依赖检查。
 5. 对上述已经显式存在的依赖和数据边做同一张图无环检查。比如A→B后统一检查A/B、保护最终report(D)，图为A→B、A/B→C(评价)、C→D。A/B中间消费者B不被反插C，D若漏C依赖则拒绝。
 
 before_outputs只来自宿主冻结Profile，Planner无权缩小；模板亦须满足同一规则。自主与模板模式采用同一解析/覆盖算法。
 
-评价节点的有效EvaluationReceipt与节点成功在同事务接纳；checkpoint verdict=fail时该事务同时设置terminal_intent=not_met并关闭新派发，因此后继即便依赖succeeded也不能起跑。error意图为failed/check_unavailable。其他已在途分支都进入停止收束，未知停止仍占容量，全部确认/结算后才提交最终outcome。普通“评价→修订”节点不绑定阻断checkpoint，verdict=fail作为有效数据继续既定前向修订；两种角色由冻结Profile和check映射明确区分，不在运行时切换。
+评价节点合法pass/data-fail的Receipt与公共输出、节点成功同事务接纳；checkpoint verdict=fail也可节点成功，但同事务设置terminal_intent=not_met并关闭新派发，因此后继即便依赖succeeded也不能起跑。任何评价节点（含data）verdict=error或评价无效时，保存错误事实并将节点failed、设置failed/check_unavailable意图，不形成公共成功输出；合法error可保存错误Receipt，不能因候选Schema合法就走普通N05成功分支。其他已在途分支都进入停止收束，未知停止仍占容量，全部确认/结算后才提交最终outcome。普通“评价→修订”节点不绑定阻断checkpoint，verdict=fail作为有效数据继续既定前向修订；两种角色由冻结Profile和check映射明确区分，不在运行时切换。
 
 Plan检查与goal_final是固定阶段检查：分别在锁定前、所有DAG节点成功且无在途业务Run后运行，不产生中途隐藏的图依赖。plan检查不在Plan.checks出现，其subject直接为本次proposal；goal_final映射禁止evaluation_node_id，node_checkpoint映射必须有该字段。required/before_outputs不能由Planner提供；phase与planning_mode是必需的上下文回显，必须与冻结Profile/Goal Spec相等，不能借回显更改阶段或模式。形状不合法先以format拒绝；通过形状但模式不匹配以budget_acceptance、检查phase不匹配/缺evaluation_node_id/goal_final多带该字段以reference拒绝，均为plan_invalid且在业务启动前返回。
 
@@ -641,7 +643,7 @@ state.sqlite v2在同一库新增Goal相关存储，旧executions/commands/artif
 
 首次以cancel建立终结意图时使Goal epoch递增一次、持久化intent、阻止新派发，再取消在途Token并请求native stop。每个Run确认后分别释放容量/结算，不能等一个全局bool覆盖全部。收尾窗口沿用现有15秒上限，并对剩余工作明确pending；超过窗口返回停止未确认，原始槽位保留。取消后的旧Run停止回报按其原始执行身份结算，不因Goal新epoch或期限而丢弃。之后仅允许对同一未知Run进行有界stop_or_confirm探测，不是再执行；不清零预算或主动重放。
 
-前台stop/SIGINT的intent为pause，按§6.5.1允许原期限内的干净完成、禁止新派发。等待节点的wait_id/nonce/expires_at及补充事实原样持久化；暂停不延长期限、不重建nonce，暂停期间拒绝signal。pause事务仅处理所选Goal G所属（owner_kind=goal且owner_id=G.goal_id）的started=false Run，释放这些Run的槽位及未消费时间/字节预留并标suspended；其他Goal和Flow的reserved不在此事务修改。每个start CAS只检查该Run所属Goal的pause意图，命中时必须拒绝；一个Goal的pause不阻止其他owner通过共享账本正常准入。计量过的准备成本及已计入max_runs的次数不退款。resume为同一RunId重新取得预留/槽位，不再增加max_runs，随后仍只允许首次启动。pause必须在15秒窗口内完成已进入checking的节点内建汇合/节点Gate并接纳公共输出；任何checking节点尚未接纳则blocked/interrupted，保留成员结果，resume不得重算该未提交汇合冒充成功。已齐员但尚未进入checking的节点可在显式resume后首次汇合。全部已启动Run结算且无未决checking节点，或原本只有等待/未启动工作，才stopped；未接纳的已启动工作不能恢复成ready，确认停止后仍blocked/interrupted，需显式新Goal关联已接受产物。SIGKILL后同类处理；旧绑定缺失不能用新适配器清除未知。
+前台stop/SIGINT的intent为pause，按§6.5.1允许原期限内的干净完成、禁止新派发。等待节点的wait_id/nonce/expires_at及补充事实原样持久化；暂停不延长期限、不重建nonce，暂停期间拒绝signal。pause事务仅处理所选Goal G所属（owner_kind=goal且owner_id=G.goal_id）的started=false Run，释放这些Run的槽位及未消费时间/字节预留并标suspended；其他Goal和Flow的reserved不在此事务修改。每个start CAS只检查该Run所属Goal的pause意图，命中时必须拒绝；一个Goal的pause不阻止其他owner通过共享账本正常准入。计量过的准备成本及已计入max_runs的次数不退款。resume为同一RunId重新取得预留/槽位，不再增加max_runs，随后仍只允许首次启动。pause必须在15秒窗口内完成已进入checking的节点内建汇合/节点Gate，以及pause前已启动评价的固定单成员投影和N05/N11分流；成功才接纳公共输出，评价error则同事务失败；任何checking节点尚未接纳则blocked/interrupted，保留成员结果，resume不得重算该未提交汇合冒充成功。仅普通node_ports成员齐员但未checking的节点可在显式resume后首次汇合；已启动评价不能用此条延迟已返回的fail/error。全部已启动Run结算且无未决checking节点，或原本只有等待/未启动工作，才stopped；未接纳的已启动工作不能恢复成ready，确认停止后仍blocked/interrupted，需显式新Goal关联已接受产物。SIGKILL后同类处理；旧绑定缺失不能用新适配器清除未知。
 
 resume的合法前置为stopped、无未结算的started Run、绑定一致且wall/规划/等待期限仍有效；恢复从未启动的成员、尚未进入checking的首次汇合及未过期waiting_input，保留既有成员成功结果及同一等待身份。finished、stopping、blocked/interrupted不能以resume变成running，明确返回not_resumable或stop_unknown；blocked只做可信停止对账，不能重放。suspended的Run不占物理槽位，started/stop_unknown仍占，取消/终结中从未启动的Run直接cleanup/settled。崩溃时没有started工作、只有reserved/等待的目标，重开恢复步骤将其标stopped/host_interrupted，先处理期限，再等显式resume；不隐式重启模型。
 
@@ -725,7 +727,7 @@ GoalId由Runtime生成`goal-<UUIDv4>`，旧Flow ExecutionId保持`execution-<UUI
 
 OrchestrationRegistry在构造时注入能力、Profile、模板、规则与汇合器；现有HostBindings仍注入Executor、DomainTool、DomainGate、Grant。新 `GoalGrant` 显式允许Profile摘要、能力集合及GoalLimits，引用原有受限工具授权，不靠旧Grant.definitions为空推断“允许任意Profile”。Caller的grants同时匹配；第三方HTTP输入不能反序列化为可信Caller。
 
-原EntryContract.input_schema用于Worker入口；公共节点端口与Worker入口的输入封装在能力注册时锁定，不能把不兼容数据硬塞给旧入口。DAG Worker沿用EntryContract中的工具/Skill/输入输出/附件形状，但gate字段仅可引用Runtime内建检查ID（如_tl.schema@1），不能解析到HostBindings.gates里的任意DomainGate。OrchestrationRegistry在注册时拒绝自定义成员/节点Gate及对内建ID的覆盖；Goal路径绝不调用任意DomainGate.check。领域检查必须是受控checker Run/显式评价节点。HostBindings.gates只供旧Flow使用，旧Flow语义保持不变。DAG入口的旧Flow.requires必须为空；跨节点依赖只由Plan连接与Artifact作用域提供，不能混入旧state/visit历史选择。新的stage_input封装由注册Schema明确验证，ToolContext.inputs保留冻结Goal输入，accepted仅含本次绑定允许的上游/导入产物和自身允许事实。内部ManagedRun管线通过归属适配器读写Goal或Flow记录，不直接复用写死单active/current_state的Bridge实现。Invocation仍有唯一execution_id/run_id、stage_input、skills、schemas、work_dir、budget；新工作归属通过新增可选context字段或内部上下文传递，保留旧序列化字段含义，不要求Milkie理解DAG。领域ToolContext增加只读节点归属和确切授权Artifact视图，工具不能由归属字段获得新权限。
+原EntryContract.input_schema用于Worker入口；公共节点端口与Worker入口的输入封装在能力注册时锁定，不能把不兼容数据硬塞给旧入口。DAG Worker沿用EntryContract中的工具/Skill/输入输出/附件形状，但gate字段仅可引用Runtime内建检查ID（如_tl.schema@1），不能解析到HostBindings.gates里的任意DomainGate。OrchestrationRegistry在注册时拒绝自定义成员/节点Gate及对内建ID的覆盖；Goal路径绝不调用任意DomainGate.check。领域检查必须是受控checker Run/显式评价节点。HostBindings.gates只供旧Flow使用，旧Flow语义保持不变。DAG入口的旧Flow.requires必须为空；跨节点依赖只由Plan连接与Artifact作用域提供，不能混入旧state/visit历史选择。新的stage_input封装由注册Schema明确验证，普通Worker的ToolContext.inputs保留冻结Goal输入，accepted仅含本次绑定允许的上游/导入产物和自身允许事实；所有checker例外按§6.3.3同时投影Invocation.inputs/ToolContext.inputs、artifacts/accepted及signal_facts，不把完整Goal副本旁路给模型或工具。内部ManagedRun管线通过归属适配器读写Goal或Flow记录，不直接复用写死单active/current_state的Bridge实现。Invocation仍有唯一execution_id/run_id、stage_input、skills、schemas、work_dir、budget；新工作归属通过新增可选context字段或内部上下文传递，保留旧序列化字段含义，不要求Milkie理解DAG。领域ToolContext增加只读节点归属和确切授权Artifact视图，工具不能由归属字段获得新权限。
 
 ### 8.2 CLI命令、配置与输出
 
@@ -871,7 +873,7 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 | S1.A1/A2 | 同一Goal人工/JSON输出比对；空配置/非法输入零Run；读取错误与无产物分离 | E2E：CLI原始stdout/stderr、退出码、公开快照 |
 | S1.A3、S5.A2 | 前台等待，另一客户端补充/取消；pause释放锁/槽位、nonce保留但暂停时拒绝signal、未决checking阻断恢复；clock_untrusted解除与恢复幂等；离线命令拒绝；SIGINT/SIGKILL与期限先处理 | E2E/Integration：实际进程PID/适配器停止事实、所有Run列表 |
 | S2.A1 | 真实Planner自主/模板；模板拒绝增删骨架和扩权；固定输入包摘要 | E2E：真实Agent日志、提案原文及锁定计划；夹具结果单列 |
-| S2.A2 | 注册包Schema/资源摘要/路径逃逸/符号链接/重复注册、缺执行器/预算、selector与成员/公共投影不匹配、checkpoint请求身份从端口注入、data节点冒充必需检查、伪自定义Gate、checker读未授权原文均拒绝；重复JSON键、未知字段、超容量、环/自环、未知端口、孤立节点、非法selector、Schema不匹配、权限及验收缺失 | Unit/Integration：分类/path/expected/actual及业务派发计数0 |
+| S2.A2 | 注册包Schema/资源摘要/路径逃逸/符号链接/重复注册、缺执行器/预算、selector与成员/公共投影不匹配、checkpoint请求身份从端口注入、data节点冒充必需检查、未绑定checkpoint/重复评价映射、伪自定义Gate、checker读未授权原文均拒绝；重复JSON键、未知字段、超容量、环/自环、未知端口、孤立节点、非法selector、Schema不匹配、权限及验收缺失 | Unit/Integration：分类/path/expected/actual及业务派发计数0 |
 | S2.A3 | 初次错→修正合法；needs_input联合结果/补充后耗尽；3次均错；时间/工具/Run先耗尽；plan check fail与error不同 | Integration：每次提案/检查及全预算，不通过换Run重置上限 |
 | S3.A1 | 三图形；不同延迟完成序列；实际最大并发不超过配置 | Integration/E2E：带身份的开始/结束与持久化槽位，不能仅看输出顺序 |
 | S3.A2 | 多成员乱序返回仍确定性汇合；同Executor绑定的成员具备不同Run/工作目录及精确输入、Skill/工具约束；一员失败不公共接纳；汇合非法Schema/panic/停止未知 | Integration：成员产物/候选、汇合摘要和节点结果 |
@@ -879,7 +881,7 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 | S4.A1/A2 | pass/fail/error组合、缺必需receipt、跨Goal证据、旧规则/旧摘要/错producer_run拒绝 | Integration：CheckRequest/EvaluationReceipt和最终状态 |
 | S4.A2/A3 | checkpoint keys/targets/checker精确覆盖；before_outputs保护D漏依赖拒绝、A→B后联合检查A/B无反插环；checkpoint fail停并行分支后收束；评价Worker成功但verdict fail；初稿pass不能接纳最终稿；取消与结果同刻竞争 | Integration/E2E：worker outcome、quality verdict、revision各自证据 |
 | S5.A1 | G01–G16/N01–N11/R01–R10逐规则命中、部分检查pass/pause中pass接纳、pause中合法/非法/needs_input三种Planner结果逐分支保存并G14、最后节点在pause下不建最终检查、resume补建缺失检查/修正请求且不重跑、pending请求跨崩溃/跨Goal释放容量再准入、signal原子保存后续请求、StopUnknown及晚到确认清理、非法前态、重复/失效事件；多命中拒绝及归并顺序；同键同参、同键异参；崩溃后的同键run必须先恢复对账；响应丢失后重试；完成事件重复/迟到/乱序 | Integration：命令回执唯一性、Run/接纳计数不增加 |
-| S5.A2 | 业务候选与可信结算同消息分项验证、期限到达但定时事件未出队、最后成员与pause/cancel/checkpoint竞争；内建检查不启动Harness，停止请求定位原Run且不新增Run；在§6.9每个崩溃窗口注入；取消递增epoch后旧Run停止/消耗仍可结算；wall/transition耗尽仍可收尾；stop确认/未知/旧绑定缺失；数据库写失败 | Integration：停止/epoch/持久化对照，不仅内存断言 |
+| S5.A2 | 已启动checkpoint在pause下首次进入checking并fail/error立即收束、data-error无公共输出且后继不派发、checker经Invocation/工具均不能读取未授权Goal字段或兄弟产物；业务候选与可信结算同消息分项验证、期限到达但定时事件未出队、最后成员与pause/cancel/checkpoint竞争；内建检查不启动Harness，停止请求定位原Run且不新增Run；在§6.9每个崩溃窗口注入；取消递增epoch后旧Run停止/消耗仍可结算；wall/transition耗尽仍可收尾；stop确认/未知/旧绑定缺失；数据库写失败 | Integration：停止/epoch/持久化对照，不仅内存断言 |
 | S5.A3 | Flow与Goal同时争唯一宿主槽位及v1 active原子迁移，旧构造函数不得绕账本；两Run同时争最后工具调用/时间/候选额度；业务状态边/失败传播cleanup的transition精确计数；准备与规则check也消耗；未知停止不归还reserved | Integration：used/reserved/available不变量及拒绝原因 |
 | S5.A3 | 两Goal同能力不同输入；owner越权；一个Goal未知停止占槽时另一排队Goal仍按自身墙钟到期收束，不伪成功 | Integration：隔离产物和授权；全局容量确实受占用 |
 | S6.A1/A2 | Inquiry真实Agent规划执行、产物/引用和未达标；公开接口读取，不读内部表 | E2E：应用侧运行、最终产物/评价、来源定位；最终文章质量另属Inquiry #7 |
