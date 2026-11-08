@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -20,6 +20,10 @@ struct Stats {
     bad_member: Option<&'static str>,
     forbidden_join: bool,
     rules_version: Option<&'static str>,
+    input_wait_ms: Option<u64>,
+    goal_wall_ms: Option<u64>,
+    budget_case: Option<BudgetScenario>,
+    native_runs: Mutex<BTreeSet<String>>,
     replay_evaluation: bool,
     previous_evaluation: Mutex<Option<serde_json::Value>>,
     flow_started: tokio::sync::Notify,
@@ -72,6 +76,26 @@ struct NodeScenario {
     verdict: &'static str,
     hold: bool,
 }
+#[derive(Clone, Copy)]
+struct BudgetScenario {
+    phase: &'static str,
+    dimension: &'static str,
+}
+struct NativeCall(Arc<Stats>, String);
+impl Drop for NativeCall {
+    fn drop(&mut self) {
+        self.0.native_runs.lock().unwrap().remove(&self.1);
+    }
+}
+fn budget_phase(role: &GoalRunRole, phase: &str) -> bool {
+    match (phase, role) {
+        ("planner", GoalRunRole::Planner { .. })
+        | ("review", GoalRunRole::PlanCheck { .. })
+        | ("final", GoalRunRole::FinalCheck { .. }) => true,
+        ("worker", GoalRunRole::NodeMember { member_id, .. }) => member_id == "a",
+        _ => false,
+    }
+}
 struct ExecutorFixture(Arc<Stats>, bool, Option<NodeScenario>, bool);
 #[async_trait]
 impl Executor for ExecutorFixture {
@@ -81,6 +105,14 @@ impl Executor for ExecutorFixture {
     fn enforces_json_candidate_limit(&self) -> bool {
         true
     }
+    async fn stop_or_confirm(&self, run_id: &str) -> StopState {
+        // This opt-in fixture owns only its Rust invocation future, with no child processes/tasks.
+        if self.0.budget_case.is_some() && !self.0.native_runs.lock().unwrap().contains(run_id) {
+            StopState::Confirmed
+        } else {
+            StopState::Unknown
+        }
+    }
     async fn execute(
         &self,
         invocation: Invocation,
@@ -89,6 +121,16 @@ impl Executor for ExecutorFixture {
     ) -> ExecutionOutcome {
         let context = tools.goal_context().expect("trusted Goal scope");
         let is_final = matches!(&context.role, GoalRunRole::FinalCheck { .. });
+        let target = self
+            .0
+            .budget_case
+            .is_some_and(|c| budget_phase(&context.role, c.phase));
+        self.0
+            .native_runs
+            .lock()
+            .unwrap()
+            .insert(invocation.run_id.clone());
+        let _native = NativeCall(self.0.clone(), invocation.run_id.clone());
         self.0.calls.fetch_add(1, Ordering::SeqCst);
         if self.1
             && matches!(context.role, GoalRunRole::Planner { .. })
@@ -104,6 +146,9 @@ impl Executor for ExecutorFixture {
             context.goal_id.clone(),
             matches!(context.role, GoalRunRole::NodeMember { .. }),
         );
+        if target && self.0.budget_case.is_some_and(|c| c.dimension == "time") {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let (slot, mut value) = match context.role {
             GoalRunRole::Planner { .. } => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -252,13 +297,35 @@ impl Executor for ExecutorFixture {
                 *previous = Some(value.clone());
             }
         }
+        if target && self.0.budget_case.is_some_and(|c| c.dimension == "tools") {
+            for _ in 0..2 {
+                tools
+                    .call("artifact.write", json!({"slot":slot,"value":value}))
+                    .await
+                    .unwrap();
+            }
+            let error = tools
+                .call("artifact.write", json!({"slot":slot,"value":value}))
+                .await
+                .unwrap_err();
+            return ExecutionOutcome::Failed {
+                code: error.code,
+                message: error.message,
+            };
+        }
         let written = tools
             .call("artifact.write", json!({"slot":slot,"value":value}))
             .await;
         if self.0.bad_member.is_some() && value.is_object() && value.get("invalid").is_some() {
             assert_eq!(written.unwrap_err().code, "input_invalid");
-        } else {
-            written.unwrap();
+        } else if let Err(error) = written {
+            if self.0.budget_case.is_some() {
+                return ExecutionOutcome::Failed {
+                    code: error.code,
+                    message: error.message,
+                };
+            }
+            panic!("unexpected fixture write failure: {error:?}");
         }
         ExecutionOutcome::Completed {
             usage: json!({"fixture":true}),
@@ -384,9 +451,22 @@ async fn host_composed(
             ),
         ),
     ] {
-        registry
-            .register_entry(id, contract, policy.clone())
-            .unwrap();
+        let mut entry_policy = policy.clone();
+        if let Some(case) = stats.budget_case {
+            let target_entry = match case.phase {
+                "planner" => "planner@1",
+                "worker" => "worker@1",
+                _ => "joined@1",
+            };
+            if id == target_entry {
+                match case.dimension {
+                    "bytes" => entry_policy.max_candidate_bytes = 1,
+                    "time" => entry_policy.max_run_ms = Some(1),
+                    _ => (),
+                }
+            }
+        }
+        registry.register_entry(id, contract, entry_policy).unwrap();
     }
     let rules=registry.register_rules("joined",&serde_json::to_vec(&json!({"protocol_version":1,"id":"joined","version":stats.rules_version.unwrap_or("1"),"rules":[{"id":"joined","instruction":"Check Goal input ownership","pass_condition":"Both members belong to this input","evidence_required":true}]})).unwrap()).unwrap();
     registry
@@ -404,7 +484,7 @@ async fn host_composed(
     let mut pair = json!({"protocol_version":1,"id":"pair","version":"1","kind":"work","inputs":{"source":{"schema_ref":"text","required":true,"source_policy":{"kind":"goal","pointer":"/inputs/text"}}},"outputs":{"result":{"schema_ref":"pair"}},"gate":"_tl.schema@1","max_rule_check_ms":1000,"members":{"a":{"input_mode":"node_ports","entry_ref":"worker@1","input_bindings":{"source":{"port":"source","pointer":""}}},"b":{"input_mode":"node_ports","entry_ref":"worker@1","input_bindings":{"source":{"port":"source","pointer":""}}}},"join":{"kind":"object-by-worker","outputs":{"result":{"kind":"members","slots":{"a":"result","b":"result"}}}}});
     if input {
         pair["inputs"]["source"]["source_policy"] = json!({"kind":"artifact"});
-        registry.register_capability(serde_json::from_value(json!({"protocol_version":1,"id":"user-input","version":"1","kind":"input","inputs":{},"outputs":{"value":{"schema_ref":"text"}},"gate":"_tl.schema@1","max_rule_check_ms":1000,"signal_schema_ref":"text","max_wait_ms":5000})).unwrap()).unwrap();
+        registry.register_capability(serde_json::from_value(json!({"protocol_version":1,"id":"user-input","version":"1","kind":"input","inputs":{},"outputs":{"value":{"schema_ref":"text"}},"gate":"_tl.schema@1","max_rule_check_ms":1000,"signal_schema_ref":"text","max_wait_ms":stats.input_wait_ms.unwrap_or(5000)})).unwrap()).unwrap();
     }
     registry
         .register_capability(serde_json::from_value(pair).unwrap())
@@ -440,6 +520,7 @@ async fn host_composed(
         .unwrap();
     let mut limit = limits();
     limit.max_concurrent_runs = capacity;
+    limit.max_wall_ms = stats.goal_wall_ms.unwrap_or(limit.max_wall_ms);
     let mut bindings = HostBindings::default()
         .executor(
             "fixture",
@@ -1319,10 +1400,16 @@ async fn a_previous_goals_passing_evaluation_cannot_approve_new_public_artifacts
 async fn changed_rules_cannot_resume_an_old_goal_or_reinterpret_its_locked_contract() {
     let directory = tempfile::tempdir().unwrap();
     let store = directory.path().join("store");
-    let first_stats = Arc::new(Stats::default());
+    // This is a contract-version test, not an expiry test. Both hosts declare the same valid window.
+    let first_stats = Arc::new(Stats {
+        input_wait_ms: Some(60_000),
+        goal_wall_ms: Some(60_000),
+        ..Default::default()
+    });
     let (runtime, caller) = host_variant(&store, first_stats, 2, false, None, true).await;
     let goals = runtime.goals().unwrap();
-    let req = request("versioned-goal", "unchanged-input");
+    let mut req = request("versioned-goal", "unchanged-input");
+    req.spec.limits.max_wall_ms = 60_000;
     let id = goals.submit(req.clone(), &caller).await.unwrap().goal_id;
     let waiting = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -1346,12 +1433,14 @@ async fn changed_rules_cannot_resume_an_old_goal_or_reinterpret_its_locked_contr
     drop(runtime);
     let stats = Arc::new(Stats {
         rules_version: Some("2"),
+        input_wait_ms: Some(60_000),
+        goal_wall_ms: Some(60_000),
         ..Default::default()
     });
     let (runtime, caller) = host_variant(&store, stats.clone(), 2, false, None, true).await;
     let goals = runtime.goals().unwrap();
     let reopened = goals.get(&id, &caller).await.unwrap();
-    assert_eq!(reopened.status, GoalStatus::Stopped);
+    assert_eq!(reopened.status, GoalStatus::Stopped, "{reopened:?}");
     assert!(!reopened.deadline_expired);
     assert!(reopened.blockers.is_empty());
     assert!(
@@ -1392,4 +1481,152 @@ async fn changed_rules_cannot_resume_an_old_goal_or_reinterpret_its_locked_contr
         .await
         .unwrap();
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn input_deadlines_expire_online_or_after_reopen_without_accepting_a_late_signal() {
+    for reopen in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("store");
+        let mut stats = Arc::new(Stats {
+            input_wait_ms: Some(200),
+            ..Default::default()
+        });
+        let (mut runtime, caller) = host_variant(&store, stats.clone(), 2, false, None, true).await;
+        let mut goals = runtime.goals().unwrap();
+        let id = goals
+            .submit(request("expiring-input", "owned"), &caller)
+            .await
+            .unwrap()
+            .goal_id;
+        let waiting = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let s = goals.get(&id, &caller).await.unwrap();
+                if s.status == GoalStatus::Waiting && !s.waiting.is_empty() {
+                    break s;
+                }
+                assert_ne!(s.status, GoalStatus::Finished);
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let wait = waiting.waiting[0].clone();
+        assert_eq!(waiting.progress.goal_occupied_slots, 0);
+        if reopen {
+            goals
+                .stop(&id, "pause-expiring-input", waiting.revision, &caller)
+                .await
+                .unwrap();
+            runtime.shutdown().await.unwrap();
+            drop(goals);
+            drop(runtime);
+            tokio::time::sleep(Duration::from_millis(240)).await;
+            stats = Arc::new(Stats {
+                input_wait_ms: Some(200),
+                ..Default::default()
+            });
+            let fresh = host_variant(&store, stats.clone(), 2, false, None, true).await;
+            runtime = fresh.0;
+            goals = runtime.goals().unwrap();
+        }
+        let ended = finished(&goals, &id, &caller).await;
+        assert_eq!(ended.outcome, Some(GoalOutcome::Failed));
+        assert_eq!(
+            ended.terminal_intent.as_ref().unwrap().reason,
+            "input_timeout"
+        );
+        assert_eq!(ended.nodes["prompt"].status, GoalNodeStatus::Failed);
+        assert_eq!(
+            ended.nodes["combine"].status,
+            GoalNodeStatus::DependencyFailed
+        );
+        assert_eq!(ended.budget.runs_used, 1);
+        assert_eq!(ended.progress.goal_occupied_slots, 0);
+        assert!(ended.budget.reserved.is_empty());
+        assert!(ended.waiting.is_empty());
+        assert!(!ended.artifacts.iter().any(|a| a.accepted));
+        assert!(stats.members.lock().unwrap().is_empty());
+        assert_eq!(
+            stats.calls.load(Ordering::SeqCst),
+            if reopen { 0 } else { 1 }
+        );
+        let late = GoalSignalRequest {
+            protocol_version: 1,
+            wait_id: wait.wait_id,
+            nonce: wait.nonce,
+            payload: json!("too late"),
+            request_key: "late-input".into(),
+            expected_revision: ended.revision,
+        };
+        assert_eq!(
+            goals.signal(&id, late, &caller).await.unwrap_err().code,
+            "signal_invalid"
+        );
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().outcome,
+            Some(GoalOutcome::Failed)
+        );
+        assert_eq!(goals.get(&id, &caller).await.unwrap().budget.runs_used, 1);
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn planner_review_workers_and_final_checks_obey_declared_tool_byte_and_time_budgets() {
+    for phase in ["planner", "review", "worker", "final"] {
+        for dimension in ["tools", "bytes", "time"] {
+            let root = tempfile::tempdir().unwrap();
+            let stats = Arc::new(Stats {
+                budget_case: Some(BudgetScenario { phase, dimension }),
+                plan_verdict: (phase != "final").then_some("pass"),
+                ..Default::default()
+            });
+            let (runtime, caller) = host(&root.path().join("store"), stats.clone()).await;
+            let goals = runtime.goals().unwrap();
+            let req = request("bounded-role", "owned");
+            let original = serde_json::to_value(&req.spec).unwrap();
+            let id = goals.submit(req, &caller).await.unwrap().goal_id;
+            let ended = finished(&goals, &id, &caller).await;
+            assert_eq!(
+                ended.outcome,
+                Some(GoalOutcome::Failed),
+                "{phase}/{dimension}: {ended:?}"
+            );
+            assert_eq!(serde_json::to_value(&ended.spec).unwrap(), original);
+            assert_eq!(ended.progress.goal_occupied_slots, 0);
+            assert!(ended.budget.reserved.is_empty());
+            assert!(stats.native_runs.lock().unwrap().is_empty());
+            let expected = match dimension {
+                "tools" => "tool_calls",
+                "bytes" => "candidate_bytes",
+                _ => "run_time",
+            };
+            assert!(
+                ended
+                    .runs
+                    .values()
+                    .filter_map(|r| r.budget.as_ref())
+                    .any(|b| serde_json::to_value(&b.limits_hit)
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(expected))),
+                "{phase}/{dimension}: {ended:?}"
+            );
+            let target_entry = match phase {
+                "planner" => "planner@1",
+                "worker" => "worker@1",
+                _ => "joined@1",
+            };
+            assert!(ended.runs.values().any(|r| r.entry_ref == target_entry));
+            assert!(
+                !ended
+                    .artifacts
+                    .iter()
+                    .any(|a| a.producer_kind == "check_candidate" && a.accepted)
+            );
+            runtime.shutdown().await.unwrap();
+        }
+    }
 }

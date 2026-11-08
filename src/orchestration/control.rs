@@ -172,6 +172,20 @@ mod tests {
         }
     }
     #[test]
+    fn a_wait_deadline_is_checked_at_admission_without_a_timer_transition() {
+        let mut f = facts();
+        let signal = SignalAuthority {
+            wait_identity_valid: true,
+            schema_and_caller_valid: true,
+            revision_valid: true,
+            expires_at_ms: 1000,
+        };
+        assert!(f.advance_allowed());
+        assert!(!f.signal_allowed(&signal));
+        f.now_ms = 999;
+        assert!(f.signal_allowed(&signal));
+    }
+    #[test]
     fn pause_keeps_only_in_flight_results_for_the_fixed_window() {
         let mut f = facts();
         assert!(f.advance_allowed());

@@ -42,3 +42,13 @@ cargo clippy --locked --offline --all-targets -- -D warnings
 - `concurrent_run_reservations_cannot_spend_the_same_last_goal_budget`：同一Store的两份旧快照争最后工具/时间/候选预留，只有一个CAS提交；公开预算/占槽不重复，输家重读后pending。此例证明预留事务原子性，不冒称两个原生Worker执行。
 - `recovery_before_first_reservation_requires_resume_and_does_not_invent_a_run`：预留前恢复保持0Run、0占槽及原期限，重复恢复幂等；显式resume后仅首次建立1个Run。
 - `orphaned_blob_bytes_do_not_become_public_goal_artifacts_after_store_reopen`：只写blob未提交接纳，重开后仍无公共Artifact/成功结论，不能拿SHA经公开Artifact入口读取。
+
+期限、停止及额度补充路径：
+
+- `input_deadlines_expire_online_or_after_reopen_without_accepting_a_late_signal`：在线及离线跨等待期限分别失败为input_timeout，依赖明确失败、零公共产物且预留/占槽归零；旧nonce即使用当前revision补充也拒绝，无新Run。
+- `a_wait_deadline_is_checked_at_admission_without_a_timer_transition`：在等待期限到达瞬间直接验证signal准入拒绝；不依赖定时事件先出队。
+- `planner_review_workers_and_final_checks_obey_declared_tool_byte_and_time_budgets`：Planner、计划检查、业务成员、最终检查分别耗尽工具次数、候选字节、执行时间，共12组合；从公开RunBudget确认对应limits_hit，原Spec不变、预留/占槽清零。使用仅拥有Rust Future的受控Executor，不能当真实Harness停止证据。
+- `cli_online_cancel_returns_an_intent_then_closes_without_erasing_the_accepted_report`：Planner、业务、最终检查三阶段分别在线取消；实际CLI退出7、Run数不再增加、槽位清零、Socket关闭，最终检查阶段保留已接纳文章；离线控制退出6。
+- `failed_output_insertion_rolls_back_goal_budget_and_revision`：先写有效blob，测试库触发器在goal_artifacts的真实INSERT上注入故障；必须观察到注入错误，Goal状态/revision/账本/公共产物均回滚。保留的孤立blob不成为已接纳Artifact。
+
+版本重开路径使用明确的60秒未到期前置，并断言deadline_expired=false；等待过期由独立200毫秒用例验证。两条路径分别证明版本冻结与期限，不互相替代。

@@ -1,12 +1,12 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.16；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.17；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 产品基线：[L1概要及归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)，以及提交`16a68d48abb829dc14f13d0e0f4d3ed8c754558c`的v0.2用户路径与验收。复用§4行为和§11原18项Sx.Ax，不改变产品范围。本文件按用户指定十三节格式保存唯一L2事实源，L1留在Issue评论。
 
-首版包含CLI、固定汇合与有界规划修正；后台服务、条件语言和自动返工不在范围内。[Inquiry #7](https://github.com/xforce-io/inquiry/issues/7)另行负责深度文章质量。用户“go L2”授权编写本规格，不代替实现候选的独立审查或人工批准。
+首版包含CLI、固定汇合与有界规划修正；后台服务、条件语言和自动返工不在范围内。[Inquiry #7](https://github.com/xforce-io/inquiry/issues/7)另行负责深度文章质量。
 
-阅读顺序：§4看用户如何完成任务；§6.1看职责与执行链路；§6.3看输入输出和Gate在哪里定义；§6.5查状态转移；§6.7/6.9查事务与恢复。Goal受理或显式resume后由Runtime持续推进，无需用户调用step。G/N/R规则编号用于评审和测试定位，不要求实现规则引擎；事件闭环也不要求新增消息总线。
+阅读顺序：§4看用户路径；§6.1看运行闭环；§6.3查节点输入输出与Gate；§6.5查状态转移；§6.7/6.9查事务与恢复。**Goal受理或显式resume后由Runtime持续推进，用户无需调用step。**
 
 ## 1 背景
 
@@ -103,6 +103,8 @@ R1 固定目标、能力、规则与接纳计划。R2 Agent提案，Runtime调�
 | 有限规划修正、业务Run不自动重试 | 重复副作用和质量刷分边界清晰；失败可能需要用户显式新建后续Goal | until-success、锁定后重规划 |
 | 在线CLI经宿主本地Unix Socket提交命令 | Socket属于当前前台宿主，无后台服务；宿主离线直接报错，幂等回执仍由同一状态事务保存 | 离线命令收件箱、第二CLI改业务表、隐式后台守护 |
 
+**首版结构约束：**在现有宿主Runtime内完成事件处理、状态计算和事务提交，共用一个受控Run执行通道。协调器、状态转移器和调度职责不要求拆成独立服务；TransitionRule/TransitionDecision用于描述契约，不要求规则引擎、规则注册表或第二份状态存储。外部命令及执行结果直接进入宿主处理，不新增消息总线。应用注册材料沿用现有资源机制，不新增能力包加载器。
+
 采用JSON Schema 2020-12、JSON Pointer字符串语法（RFC6901），明确子集见§6；不宣称CWL兼容。图检查选择 petgraph 0.8.3 的拓扑排序检测环，自环同拒绝，运行时按稳定ID排序派发而非依赖库返回的任意拓扑序。其算法契约见[官方文档](https://docs.rs/petgraph/0.8.3/petgraph/algo/fn.toposort.html)。新增依赖只用于图算法，不承担持久化或执行状态。
 
 ## 6 架构
@@ -152,76 +154,45 @@ flowchart TD
 
 #### 6.1.2 动作分派与执行通道
 
-已提交动作按性质分开，不能把启动、内建检查、停止画成同一条模型执行链：
+协调器提交后只有三类动作；仅启动受控Run进入执行通道：
+
+| 动作 | 执行者与边界 |
+|---|---|
+| 启动受控Run | SharedDispatcher完成资源准入和唯一启动；Managed Run约束输入、工具、预算及身份，再调用绑定的Executor |
+| 内建检查或汇合 | Runtime执行有界的计划结构、Schema、一致性检查及object-by-worker固定投影；不创建Run、不调用Harness。纯校验可在事件接纳中完成，无需另存一份检查命令 |
+| 停止已有Run | 按原run_id及Executor绑定调用取消Token/stop_or_confirm；不建新Run、不申请新槽位。停止未知保留原槽位；未启动预留按§6.5.1处理 |
 
 ```mermaid
-flowchart TD
- A[已提交且仍有效的动作] --> K{动作类型}
- K -->|启动受控Run| R[Planner / 业务成员 / 检查Worker]
- R --> D[SharedDispatcher：唯一启动入口]
- D --> M[Managed Run：输入 / 工具 / 预算 / 身份]
- M --> E[绑定的Executor]
- E --> ME[MilkieExecutor]
- ME --> MI[Milkie sidecar]
- MI --> H[该Run的Agent Harness会话]
- E --> OE[其他已注册且满足契约的Executor]
- H --> C[执行结束与候选输出]
- OE --> C
- C --> V[内建结果Schema / 身份校验]
- K -->|内建检查或汇合| B[Runtime有界确定性检查 / object-by-worker]
- K -->|停止已有Run| S[按run_id定位原Executor绑定]
- S --> ST[取消Token / stop_or_confirm]
- ST --> SF[停止确认或停止未知事实]
- V --> EV[结果事件进入§6.1.1协调器]
- B --> EV
- SF --> EV
- M -.运行观测.-> T[(现有Trace与治理)]
- MI -.Harness观测.-> T
+flowchart LR
+ P[Planner Run] --> D[SharedDispatcher / Managed Run]
+ W[业务成员 Run] --> D
+ C[检查Worker Run] --> D
+ D --> E[该Run绑定的Executor]
+ E --> M[MilkieExecutor → Milkie Sidecar]
+ M --> H[该Run独立的Agent Harness会话]
+ E --> O[其他已注册Executor]
+ H --> R[候选输出 / 执行与停止事实]
+ O --> R
+ R --> Q[回到§6.1.1校验并提交]
 ```
 
-- **启动**：Planner、业务成员和需要模型/自定义逻辑的检查Worker分别拥有独立Run；复用管线不等于复用同一agent会话。Planner按Profile入口，成员按NodeContract中的EntryContract，检查Worker按已注册checker入口构造Invocation。它们均受同一SharedDispatcher、预算和停止约束。
-- **内建检查/汇合**：包括计划结构、Schema、身份、一致性及内建object-by-worker；是有界确定性代码，不经过Harness。图示表达计算与结果回传的责任，纯校验可作为事件接纳的一部分，不要求每次额外创建Run或持久化检查命令。需要自定义逻辑时转为显式受控能力/检查Run，不能挂任意Rust回调，见§6.6。
-- **停止**：针对原Run身份和原执行器绑定发出，不新建Planner/Worker Run、不申请新Worker槽位。停止未知保留原槽位；未启动预留的释放/挂起按意图矩阵办理。实际停止可经Milkie的原会话协议实现，不经过候选Schema/质量Gate来决定是否停止。
+Planner入口由Profile指定；业务成员入口由NodeContract中的EntryContract指定；检查Worker入口由checker登记。三者分别创建独立Run，复用通道不复用agent会话。Planner只能提案，不能直接派发业务Worker。“声明检查”是Profile/计划中的要求，执行时选择内建检查或检查Worker；结构合法不代表质量达标。其他Executor沿用现有扩展契约，首版不额外实现Harness适配器。
 
-“声明检查”是Profile/计划中的要求，不是执行组件。执行时按冻结要求选择内建检查或检查Worker；结构校验通过不代表质量达标。图中的其他Executor保留现有扩展契约，不表示首版额外实现新的Harness适配器。
+执行观测按Run关联到现有Trace，Milkie提供Harness观测；Trace失败只降级观测。执行返回、停止已确认、业务结果已接纳分别记录，均不能互相替代。
 
-#### 6.1.3 节点、Worker与执行循环
+#### 6.1.3 节点如何执行及衔接后继
 
-一个业务节点通过NodeContract展开为一个或多个具名成员；每个成员引用某个L4 Worker的EntryContract，最多创建一次Run。**Worker是执行组件，成员是调用规格，Run是这次执行事实，不能互换。**
+NodeContract定义一种节点能力的公共端口、成员入口及汇合规则；DAG中的节点引用该契约。Runtime每次只推进依赖和状态条件均满足的节点，不是同时执行整张图。work节点按以下顺序处理，input节点按§6.6等待补充，不创建Worker：
 
-```mermaid
-flowchart TD
- P[锁定的DAG计划] --> N[依赖满足、获准推进的work节点]
- N --> I[按冻结绑定准备各成员输入]
- I --> A[成员A：EntryContract → 独立Run A]
- I --> B[成员B：EntryContract → 独立Run B]
- A --> R[共享准入与受控执行通道：§6.1.2]
- B --> R
- R --> C[按run_id归属返回各成员候选]
- C --> V[各成员Schema / 内建Entry Gate]
- V --> J{全部必需成员已成功接纳}
- J -->|尚未齐员| W[保留已接纳成员结果，等待其他成员]
- J -->|全部成功| G[内建确定性汇合 → 节点Schema / Gate]
- G --> O[事务接纳公共输出并将节点标为succeeded]
- O --> D[检查后继：输入齐备则ready，等待容量派发]
- V -->|成员失败| F[不形成公共成功输出，停止其余成员并收束]
- G -->|契约错误| F
-```
+1. **准备并执行成员**：按冻结绑定准备每个具名成员的输入，各自创建独立Run，经§6.1.2准入执行。每个成员最多执行一次，分别取得可用槽位，无需同时取得全部槽位。
+2. **接纳节点公共输出**：按run_id归属校验成员候选。全部必需成员成功后，按固定投影汇合并检查节点Schema/Gate；事务同时接纳公共Artifact并将节点标为succeeded。成员失败或汇合非法不形成公共成功输出，按§6.5–6.7收束。单成员节点采用相同规则。
+3. **检查后继是否可运行**：公共输出提交后，检查依赖它的后继；全部必需输入齐备才标ready，取得容量后再派发。尚未齐备的节点继续等待，其他无依赖分支可并行。候选和仅已接纳的成员结果都不能提前作为下游输入。
 
-单成员节点省去多成员收集，但仍走相同接纳规则。各成员按可用槽位分别准入，图中分叉不表示必须同时取得全部槽位。候选、成员接纳与公共接纳是不同事实；候选不能提前成为下游输入，停止/失败竞争按§6.5–6.7处理。
+例如A→B，另有独立节点C：A与C可并行；B必须等A的公共输出提交。若A有两个成员，需两者均成功并完成节点汇合，B才具备这个依赖；最终能否启动还取决于B的其他输入、意图、期限与容量。
 
-图中每次只处理当前可推进的work节点；无依赖的分支可并行，有依赖的后继等公共输出接纳后才ready。input节点走§6.6等待/补充，不创建Worker。NodeContract由应用注册，确定该节点的公共端口、成员及汇合规则；具体映射见§6.3.1–6.3.3。
+**Worker内部的执行循环由该Run绑定的Agent Harness负责**，经Executor/Milkie适配；方法来自EntryContract.instruction及锁定Skill，工具调用由TaskLoop ToolBridge约束。TaskLoop负责节点之间的依赖、派发、汇合和恢复，不另设Routine对象或Worker内部持久化状态机。Worker是执行组件，成员是调用规格，Run是本次执行事实。内部阶段如需独立产物验收、等待或恢复边界，须在计划锁定前建模为显式DAG节点；Skill不能修改锁定图或扩大权限。
 
-Worker的执行流程（routine）分成两个边界，本版不另设Routine对象或第二套状态机：
-
-| 流程范围 | 由谁执行 | 方法及状态来源 |
-|---|---|---|
-| 多个节点/成员的顺序、并行、等待、汇合 | TaskLoop Runtime | 锁定DAG、NodeContract和已提交状态；不是Planner在自己的会话里递归派发Worker |
-| 单个Run内的agent执行循环 | 该Run绑定的Agent Harness，经Executor/Milkie适配 | EntryContract.instruction、锁定Skill及输入约束指导方法；Harness执行模型/工具交互，TaskLoop ToolBridge执行授权和预算检查 |
-
-Skill是提供方法与资源的包，不是TaskLoop可逐步恢复的状态机；不承诺Harness内部每个思考步骤都有TaskLoop业务revision。Harness观测经现有Trace关联到Run，业务推进仍只依据接纳事实。如某个内部阶段必须有独立依赖、产物验收、等待或恢复边界，应在锁定前建模为显式DAG节点，不能隐藏在Skill里后宣称具备这些保障。首版不新增Worker内部的持久化子流程引擎，也不允许Worker借routine修改已锁定图或扩大权限。
-
-主路径：受理并固化Spec/Profile→独立Planner Run→结构与计划评价事件→协调器锁定→节点成员分别准入执行→成员接纳及节点汇合→必需Goal评价→协调器提交终态。失败路径仍回到同一协调器：非法提案仅在上限内修正；输入/成员/Gate失败传播；质量fail为not_met；检查error为failed/check_unavailable；取消和资源边界先停止再收束；未知停止单列并占容量。Trace失败只降级观测，不更改业务结论。
+主路径：固化Spec/Profile→Planner提案→计划检查与锁定→节点执行与公共接纳→必需最终评价→提交终态。所有失败仍回到同一协调器：非法提案有界修正；输入/成员/Gate失败按依赖收束；质量fail为not_met，检查error为failed/check_unavailable；取消或资源耗尽先停止再收束，停止未知保留容量。
 
 ### 6.2 固定对象与归属
 

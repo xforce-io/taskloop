@@ -348,53 +348,58 @@ fn cli_preserves_reports_and_distinguishes_not_met_checker_error_and_planning_ex
 }
 #[test]
 fn cli_online_cancel_returns_an_intent_then_closes_without_erasing_the_accepted_report() {
-    let f = Fixture::new("goal_success", Some("final"));
-    let child = f.start();
-    f.wait_started(3);
-    let id = child.goal_id.clone();
-    let state = f.query("get", &id);
-    let cancelled = f
-        .command()
-        .args(["goal", "cancel", &id, "--store"])
-        .arg(f.root.path().join("store"))
-        .args([
-            "--request-key",
-            "cancel-foreground",
-            "--revision",
-            &state["revision"].as_u64().unwrap().to_string(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(cancelled.status.code(), Some(0));
-    let response: Value = serde_json::from_slice(&cancelled.stdout).unwrap();
-    assert!(response["data"]["receipt"]["accepted"].as_bool().unwrap());
-    let result = snapshot(&child.finish(), 7);
-    assert_eq!(result["outcome"], "cancelled");
-    assert_eq!(
-        result["artifacts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|a| a["accepted"] == true)
-            .count(),
-        1
-    );
-    assert!(!f.root.path().join("store/owner.sock").exists());
-    let offline = f
-        .command()
-        .args(["goal", "stop", &id, "--store"])
-        .arg(f.root.path().join("store"))
-        .args([
-            "--request-key",
-            "offline",
-            "--revision",
-            &result["revision"].as_u64().unwrap().to_string(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(offline.status.code(), Some(6));
+    for (stage, started, accepted) in [("planner", 1, 0), ("work", 2, 0), ("final", 3, 1)] {
+        let f = Fixture::new("goal_success", Some(stage));
+        let child = f.start();
+        f.wait_started(started);
+        let id = child.goal_id.clone();
+        let state = f.query("get", &id);
+        let cancelled = f
+            .command()
+            .args(["goal", "cancel", &id, "--store"])
+            .arg(f.root.path().join("store"))
+            .args([
+                "--request-key",
+                "cancel-foreground",
+                "--revision",
+                &state["revision"].as_u64().unwrap().to_string(),
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(cancelled.status.code(), Some(0));
+        let response: Value = serde_json::from_slice(&cancelled.stdout).unwrap();
+        assert!(response["data"]["receipt"]["accepted"].as_bool().unwrap());
+        let result = snapshot(&child.finish(), 7);
+        assert_eq!(result["outcome"], "cancelled");
+        assert_eq!(
+            result["artifacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|a| a["accepted"] == true)
+                .count(),
+            accepted
+        );
+        assert_eq!(f.started(), started);
+        assert_eq!(result["budget"]["runs_used"], started);
+        assert_eq!(result["progress"]["goal_occupied_slots"], 0);
+        assert!(!f.root.path().join("store/owner.sock").exists());
+        let offline = f
+            .command()
+            .args(["goal", "stop", &id, "--store"])
+            .arg(f.root.path().join("store"))
+            .args([
+                "--request-key",
+                "offline",
+                "--revision",
+                &result["revision"].as_u64().unwrap().to_string(),
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(offline.status.code(), Some(6));
+    }
 }
 #[test]
 fn clean_os_signals_pause_then_resume_without_reexecuting_the_worker() {

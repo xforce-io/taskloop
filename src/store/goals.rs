@@ -1471,18 +1471,20 @@ mod tests {
         let (row, _) = store
             .goal_create("goal-one", "alice", &record, 1, &clock)
             .unwrap();
+        let blob = store.write_blob(br#"{"summary":"not committed"}"#).unwrap();
+        store.connection().unwrap().execute_batch("CREATE TRIGGER reject_goal_artifact BEFORE INSERT ON goal_artifacts BEGIN SELECT RAISE(ABORT, 'injected goal artifact write failure'); END;").unwrap();
         let mut changed = row.record.clone();
         changed.status = GoalStatus::Waiting;
         let artifact = GoalArtifact {
             protocol_version: 1,
             artifact: ArtifactRef {
                 id: "artifact-one".into(),
-                sha256: "0".repeat(64),
+                sha256: blob.clone(),
                 slot: "report".into(),
                 state_id: "_tl.node.review".into(),
                 visit: 1,
             },
-            goal_id: "other-goal".into(),
+            goal_id: row.id.clone(),
             node_id: Some("review".into()),
             member_id: None,
             plan_digest: None,
@@ -1493,26 +1495,41 @@ mod tests {
             attachment_policy_digest: None,
             producer_kind: "public".into(),
         };
+        changed
+            .artifacts
+            .insert(artifact.artifact.id.clone(), artifact.clone());
         let effects = GoalCommitEffects {
             artifacts: vec![artifact],
             ..Default::default()
         };
+        let error = store
+            .goal_commit(
+                &row,
+                &changed,
+                GoalWriteGuard::Advance,
+                None,
+                &effects,
+                &clock,
+            )
+            .err()
+            .unwrap();
         assert!(
-            store
-                .goal_commit(
-                    &row,
-                    &changed,
-                    GoalWriteGuard::Advance,
-                    None,
-                    &effects,
-                    &clock
-                )
-                .is_err()
+            error
+                .message
+                .contains("injected goal artifact write failure"),
+            "{error:?}"
         );
         let loaded = store.goal_load(&row.id).unwrap();
         assert_eq!(loaded.revision, 0);
         assert_eq!(loaded.record.status, GoalStatus::Running);
         assert_eq!(loaded.record.budget.transitions_used, 1);
+        assert_eq!(loaded.record.budget.logical_accepted_bytes, 0);
+        assert!(loaded.record.artifacts.is_empty());
+        assert!(store.goal_artifact("artifact-one", "alice").is_err());
+        assert_eq!(
+            store.read_blob(&blob).unwrap(),
+            br#"{"summary":"not committed"}"#
+        );
     }
     #[test]
     fn concurrent_tool_admission_charges_run_and_goal_together_without_state_edges() {
