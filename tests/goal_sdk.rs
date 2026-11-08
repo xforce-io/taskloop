@@ -18,6 +18,10 @@ use tokio_util::sync::CancellationToken;
 struct Stats {
     plan_verdict: Option<&'static str>,
     bad_member: Option<&'static str>,
+    forbidden_join: bool,
+    rules_version: Option<&'static str>,
+    replay_evaluation: bool,
+    previous_evaluation: Mutex<Option<serde_json::Value>>,
     flow_started: tokio::sync::Notify,
     calls: AtomicUsize,
     check_started: tokio::sync::Notify,
@@ -84,6 +88,7 @@ impl Executor for ExecutorFixture {
         _: CancellationToken,
     ) -> ExecutionOutcome {
         let context = tools.goal_context().expect("trusted Goal scope");
+        let is_final = matches!(&context.role, GoalRunRole::FinalCheck { .. });
         self.0.calls.fetch_add(1, Ordering::SeqCst);
         if self.1
             && matches!(context.role, GoalRunRole::Planner { .. })
@@ -99,7 +104,7 @@ impl Executor for ExecutorFixture {
             context.goal_id.clone(),
             matches!(context.role, GoalRunRole::NodeMember { .. }),
         );
-        let (slot, value) = match context.role {
+        let (slot, mut value) = match context.role {
             GoalRunRole::Planner { .. } => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 let mut value = json!({"protocol_version":1,"kind":"proposal","proposal":{"protocol_version":1,"goal_spec_digest":invocation.stage_input["goal_spec_digest"],"profile_digest":invocation.stage_input["profile_digest"],"planning_mode":"autonomous","nodes":{"combine":{"capability_ref":"pair@1","depends_on":[],"inputs":{"source":{"kind":"goal","pointer":"/inputs/text"}}}},"outputs":{"result":{"node_id":"combine","port":"result"}},"checks":{"joined":{"phase":"goal_final","checker_ref":"joined@1","targets":["result"]}}}});
@@ -239,6 +244,14 @@ impl Executor for ExecutorFixture {
                 )
             }
         };
+        if is_final && self.0.replay_evaluation {
+            let mut previous = self.0.previous_evaluation.lock().unwrap();
+            if let Some(old) = previous.as_ref() {
+                value = old.clone();
+            } else {
+                *previous = Some(value.clone());
+            }
+        }
         let written = tools
             .call("artifact.write", json!({"slot":slot,"value":value}))
             .await;
@@ -323,7 +336,7 @@ async fn host_composed(
     flow: Option<&common::Fixture>,
 ) -> (Runtime, Caller) {
     let mut registry = OrchestrationRegistry::new();
-    for (name, schema) in [
+    for (name, mut schema) in [
         ("text", json!({"type":"string"})),
         ("planner-input", json!({"type":"object"})),
         (
@@ -339,6 +352,9 @@ async fn host_composed(
             json!({"type":"object","properties":{"a":{"$ref":"text"},"b":{"$ref":"text"}},"required":["a","b"],"additionalProperties":false}),
         ),
     ] {
+        if name == "pair" && stats.forbidden_join {
+            schema["not"] = json!({"properties":{"a":{"const":"owned:a"},"b":{"const":"owned:b"}},"required":["a","b"]});
+        }
         registry
             .register_schema(name, &serde_json::to_vec(&schema).unwrap())
             .unwrap();
@@ -372,7 +388,7 @@ async fn host_composed(
             .register_entry(id, contract, policy.clone())
             .unwrap();
     }
-    let rules=registry.register_rules("joined",&serde_json::to_vec(&json!({"protocol_version":1,"id":"joined","version":"1","rules":[{"id":"joined","instruction":"Check Goal input ownership","pass_condition":"Both members belong to this input","evidence_required":true}]})).unwrap()).unwrap();
+    let rules=registry.register_rules("joined",&serde_json::to_vec(&json!({"protocol_version":1,"id":"joined","version":stats.rules_version.unwrap_or("1"),"rules":[{"id":"joined","instruction":"Check Goal input ownership","pass_condition":"Both members belong to this input","evidence_required":true}]})).unwrap()).unwrap();
     registry
         .register_checker(
             "joined@1",
@@ -1186,5 +1202,194 @@ async fn legacy_flow_and_goal_share_one_physical_slot_until_the_flow_confirms_st
             .status,
         Status::Cancelled
     );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn individually_valid_member_outputs_cannot_accept_a_schema_invalid_join() {
+    let directory = tempfile::tempdir().unwrap();
+    let stats = Arc::new(Stats {
+        forbidden_join: true,
+        ..Default::default()
+    });
+    let (runtime, caller) = host(&directory.path().join("store"), stats).await;
+    let goals = runtime.goals().unwrap();
+    let id = goals
+        .submit(request("forbidden-pair", "owned"), &caller)
+        .await
+        .unwrap()
+        .goal_id;
+    let snapshot = finished(&goals, &id, &caller).await;
+    assert_eq!(snapshot.outcome, Some(GoalOutcome::Failed));
+    let node = &snapshot.nodes["combine"];
+    assert_eq!(node.status, GoalNodeStatus::Failed);
+    assert!(
+        node.members
+            .values()
+            .all(|m| m.status == GoalMemberStatus::Succeeded)
+    );
+    assert!(node.outputs.is_empty());
+    assert_eq!(snapshot.budget.runs_used, 3);
+    for (id, member) in &node.members {
+        let artifact = &member.outputs["result"];
+        let bytes = goals.read_artifact(&artifact.id, &caller).await.unwrap();
+        assert_eq!(parse_unique(&bytes.bytes).unwrap(), format!("owned:{id}"));
+    }
+    assert!(!snapshot.artifacts.iter().any(|a| a.accepted));
+    assert!(
+        !snapshot
+            .runs
+            .values()
+            .any(|r| matches!(r.role, GoalRunRole::FinalCheck { .. }))
+    );
+    assert!(goals.evaluations(&id, &caller).await.unwrap().is_empty());
+    assert_eq!(snapshot.progress.goal_occupied_slots, 0);
+    assert!(snapshot.budget.reserved.is_empty());
+    assert_eq!(node.error.as_ref().unwrap().code, "input_invalid");
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_previous_goals_passing_evaluation_cannot_approve_new_public_artifacts() {
+    let directory = tempfile::tempdir().unwrap();
+    let stats = Arc::new(Stats {
+        replay_evaluation: true,
+        ..Default::default()
+    });
+    let (runtime, caller) = host(&directory.path().join("store"), stats).await;
+    let goals = runtime.goals().unwrap();
+    let a = goals
+        .submit(request("original-evaluation", "A"), &caller)
+        .await
+        .unwrap()
+        .goal_id;
+    let first = finished(&goals, &a, &caller).await;
+    assert_eq!(first.outcome, Some(GoalOutcome::Achieved));
+    let receipts = goals.evaluations(&a, &caller).await.unwrap();
+    assert_eq!(receipts.len(), 1);
+    let original_digest = &receipts[0].candidate_digest;
+    let b = goals
+        .submit(request("replayed-evaluation", "B"), &caller)
+        .await
+        .unwrap()
+        .goal_id;
+    let second = finished(&goals, &b, &caller).await;
+    assert_eq!(second.outcome, Some(GoalOutcome::Failed));
+    assert_eq!(second.nodes["combine"].status, GoalNodeStatus::Succeeded);
+    let output = &second.nodes["combine"].outputs["result"];
+    assert_eq!(
+        parse_unique(
+            &goals
+                .read_artifact(&output.id, &caller)
+                .await
+                .unwrap()
+                .bytes
+        )
+        .unwrap(),
+        json!({"a":"B:a","b":"B:b"})
+    );
+    assert!(goals.evaluations(&b, &caller).await.unwrap().is_empty());
+    let replay = second
+        .artifacts
+        .iter()
+        .find(|a| a.producer_kind == "check_candidate")
+        .unwrap();
+    assert_eq!(&replay.artifact.sha256, original_digest);
+    assert!(!replay.accepted);
+    let run = second
+        .runs
+        .values()
+        .find(|r| matches!(r.role, GoalRunRole::FinalCheck { .. }))
+        .unwrap();
+    assert!(run.native_stop_confirmed);
+    assert_eq!(
+        run.budget.as_ref().unwrap().execution_outcome.as_deref(),
+        Some("completed")
+    );
+    let error = run.error.as_ref().unwrap();
+    assert_eq!(error.code, "check_unavailable");
+    assert_eq!(error.path, "/evidence_refs");
+    assert_eq!(second.budget.runs_used, 4);
+    assert_eq!(second.progress.goal_occupied_slots, 0);
+    assert!(second.budget.reserved.is_empty());
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn changed_rules_cannot_resume_an_old_goal_or_reinterpret_its_locked_contract() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    let first_stats = Arc::new(Stats::default());
+    let (runtime, caller) = host_variant(&store, first_stats, 2, false, None, true).await;
+    let goals = runtime.goals().unwrap();
+    let req = request("versioned-goal", "unchanged-input");
+    let id = goals.submit(req.clone(), &caller).await.unwrap().goal_id;
+    let waiting = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let s = goals.get(&id, &caller).await.unwrap();
+            if s.status == GoalStatus::Waiting && s.progress.goal_occupied_slots == 0 {
+                break s;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    goals
+        .stop(&id, "pause-versioned-goal", waiting.revision, &caller)
+        .await
+        .unwrap();
+    let stopped = goals.get(&id, &caller).await.unwrap();
+    assert_eq!(stopped.status, GoalStatus::Stopped);
+    runtime.shutdown().await.unwrap();
+    drop(goals);
+    drop(runtime);
+    let stats = Arc::new(Stats {
+        rules_version: Some("2"),
+        ..Default::default()
+    });
+    let (runtime, caller) = host_variant(&store, stats.clone(), 2, false, None, true).await;
+    let goals = runtime.goals().unwrap();
+    let reopened = goals.get(&id, &caller).await.unwrap();
+    assert_eq!(reopened.status, GoalStatus::Stopped);
+    assert!(!reopened.deadline_expired);
+    assert!(reopened.blockers.is_empty());
+    assert!(
+        reopened
+            .runs
+            .values()
+            .all(|r| r.phase == GoalRunPhase::Settled)
+    );
+    assert_eq!(reopened.spec_digest, stopped.spec_digest);
+    assert_eq!(reopened.profile_digest, stopped.profile_digest);
+    assert_eq!(reopened.plan_digest, stopped.plan_digest);
+    assert_eq!(reopened.waiting[0].nonce, stopped.waiting[0].nonce);
+    assert_eq!(
+        reopened.waiting[0].expires_at_utc_ms,
+        stopped.waiting[0].expires_at_utc_ms
+    );
+    let error = goals
+        .resume(&id, "resume-under-new-rules", reopened.revision, &caller)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "not_resumable");
+    let replay = goals.submit(req.clone(), &caller).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.goal_id, id);
+    let mut changed = req;
+    changed.spec.inputs["text"] = json!("changed-input");
+    assert_eq!(
+        goals.submit(changed, &caller).await.unwrap_err().code,
+        "request_conflict"
+    );
+    assert_eq!(stats.calls.load(Ordering::SeqCst), 0);
+    let final_view = goals.get(&id, &caller).await.unwrap();
+    assert_eq!(final_view.budget.runs_used, 1);
+    assert_eq!(final_view.profile_digest, stopped.profile_digest);
+    assert_eq!(final_view.plan_digest, stopped.plan_digest);
+    goals
+        .cancel(&id, "close-versioned-goal", final_view.revision, &caller)
+        .await
+        .unwrap();
     runtime.shutdown().await.unwrap();
 }

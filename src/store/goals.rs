@@ -1441,6 +1441,31 @@ mod tests {
         );
     }
     #[test]
+    fn orphaned_blob_bytes_do_not_become_public_goal_artifacts_after_store_reopen() {
+        let (dir, store, clock, record) = setup(2);
+        store
+            .goal_create("goal-before-blob", "alice", &record, 1, &clock)
+            .unwrap();
+        let bytes = br#"{"summary":"durable but unaccepted"}"#;
+        let sha = store.write_blob(bytes).unwrap();
+        drop(store);
+        let store = Store::open_mode(&dir.path().join("store"), true, 2).unwrap();
+        assert_eq!(store.read_blob(&sha).unwrap(), bytes);
+        let client = crate::GoalClient::open(
+            dir.path().join("store"),
+            Caller {
+                principal: "alice".into(),
+                grants: vec![],
+            },
+        )
+        .unwrap();
+        let snapshot = client.get("goal-before-blob").unwrap();
+        assert!(snapshot.artifacts.is_empty());
+        assert!(snapshot.outcome.is_none());
+        assert_eq!(snapshot.budget.runs_used, 0);
+        assert_eq!(client.read_artifact(&sha).unwrap_err().code, "not_found");
+    }
+    #[test]
     fn failed_output_insertion_rolls_back_goal_budget_and_revision() {
         let (_dir, store, clock, record) = setup(2);
         let (row, _) = store
@@ -1534,6 +1559,113 @@ mod tests {
         );
         assert_eq!(current.record.budget.rejected_calls, 17);
         assert_eq!(current.record.budget.transitions_used, transitions);
+    }
+    #[test]
+    fn concurrent_run_reservations_cannot_spend_the_same_last_goal_budget() {
+        for dimension in ["active_ms", "tool_calls", "candidate_bytes"] {
+            let (_dir, store, clock, mut record) = setup(2);
+            let amount = GoalBudgetAmount {
+                active_ms: 100,
+                tool_calls: 3,
+                candidate_bytes: 30,
+            };
+            match dimension {
+                "active_ms" => {
+                    record.prepared.effective_limits.max_active_ms = 100;
+                    record.prepared.limit_sources.host.max_active_ms = 100;
+                }
+                "tool_calls" => {
+                    record.prepared.effective_limits.max_tool_calls = 3;
+                    record.prepared.limit_sources.host.max_tool_calls = 3;
+                }
+                "candidate_bytes" => {
+                    record.prepared.effective_limits.max_total_candidate_bytes = 30;
+                    record.prepared.limit_sources.host.max_total_candidate_bytes = 30;
+                }
+                _ => unreachable!(),
+            }
+            store
+                .goal_create("goal-budget-race", "alice", &record, 1, &clock)
+                .unwrap();
+            let store = Arc::new(store);
+            let clock = Arc::new(clock);
+            let ready = Arc::new(std::sync::Barrier::new(2));
+            let jobs = ["run-race-a", "run-race-b"]
+                .into_iter()
+                .map(|id| {
+                    let store = store.clone();
+                    let clock = clock.clone();
+                    let ready = ready.clone();
+                    std::thread::spawn(move || {
+                        let row = store.goal_load("goal-budget-race").unwrap();
+                        let mut next = row.record.clone();
+                        materialize(&mut next, id);
+                        ready.wait();
+                        store
+                            .goal_commit(
+                                &row,
+                                &next,
+                                GoalWriteGuard::Advance,
+                                None,
+                                &Default::default(),
+                                &clock,
+                            )
+                            .map(|_| ())
+                            .map_err(|e| e.code)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let outcomes = jobs
+                .into_iter()
+                .map(|j| j.join().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                outcomes.iter().filter(|r| r.is_ok()).count(),
+                1,
+                "{dimension}: {outcomes:?}"
+            );
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|r| r.as_ref().err().is_some_and(|e| e == "revision_conflict"))
+                    .count(),
+                1
+            );
+            let client = crate::GoalClient::open(
+                _dir.path().join("store"),
+                Caller {
+                    principal: "alice".into(),
+                    grants: vec![],
+                },
+            )
+            .unwrap();
+            let public = client.get("goal-budget-race").unwrap();
+            assert_eq!(public.runs.len(), 1);
+            assert_eq!(public.budget.runs_used, 1);
+            assert_eq!(public.budget.reserved.len(), 1);
+            assert_eq!(public.progress.host_occupied_slots, 1);
+            assert_eq!(public.progress.goal_occupied_slots, 1);
+            let mut current = store.goal_load("goal-budget-race").unwrap().record;
+            let used = current.budget.used;
+            assert_eq!(
+                current
+                    .budget
+                    .reserve(
+                        "run-race-retry",
+                        amount,
+                        None,
+                        true,
+                        &current.prepared.effective_limits
+                    )
+                    .unwrap(),
+                crate::orchestration::goal_budget::BudgetAdmission::Pending
+            );
+            assert_eq!(current.budget.runs_used, 1);
+            assert_eq!(current.budget.reserved.len(), 1);
+            assert_eq!(current.budget.used.active_ms, used.active_ms);
+            assert_eq!(current.budget.used.tool_calls, used.tool_calls);
+            assert_eq!(current.budget.used.candidate_bytes, used.candidate_bytes);
+        }
     }
     #[test]
     fn cancellation_changes_business_epoch_but_original_run_can_still_settle() {

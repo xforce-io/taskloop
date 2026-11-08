@@ -33,3 +33,12 @@ cargo clippy --locked --offline --all-targets -- -D warnings
 时钟恢复执行`clock_blocking_is_idempotent_and_requires_explicit_resume_after_trust_returns`：注入未来高水位，拒绝业务准入和resume；被拒命令回执同键重放不增revision；重复recover无新事实不变；恢复可信后保持stopped、原期限和0Run，显式resume后才恢复运行资格。该用例注入Core时钟，不伪称真实系统时钟调整或宿主SIGKILL。
 
 暂停中的Planner结果执行`paused_planner_results_preserve_valid_invalid_and_input_branches_until_explicit_resume`：在原生已返回、业务尚未接纳处暂停，分别保存合法计划、结构化非法原因或等待身份；重复消费不重算，stopped期间零后续请求/派发，resume后才锁定/补建修正请求/接受补充，Spec与已计Run不变。
+
+进一步定位：
+
+- `a_previous_goals_passing_evaluation_cannot_approve_new_public_artifacts`：复用原通过候选的相同字节，因目标Artifact不同而拒绝；新Goal工作仍成功、公共产物保留，但无通过回执。
+- `changed_rules_cannot_resume_an_old_goal_or_reinterpret_its_locked_contract`：干净暂停并重开后改变规则版本，旧Spec/Profile/Plan/等待身份保持不变，拒绝resume且0新调用；同键同参回旧Goal、异参拒绝。
+- `required_checks_keep_partial_pass_pause_and_late_fail_fast_results_distinct`：两必需检查先部分pass不成功；pause中第二pass可接纳但只stopped，resume才achieved；若先fail，迟到pass仅诊断、无第二Receipt，重复消费不增revision。
+- `concurrent_run_reservations_cannot_spend_the_same_last_goal_budget`：同一Store的两份旧快照争最后工具/时间/候选预留，只有一个CAS提交；公开预算/占槽不重复，输家重读后pending。此例证明预留事务原子性，不冒称两个原生Worker执行。
+- `recovery_before_first_reservation_requires_resume_and_does_not_invent_a_run`：预留前恢复保持0Run、0占槽及原期限，重复恢复幂等；显式resume后仅首次建立1个Run。
+- `orphaned_blob_bytes_do_not_become_public_goal_artifacts_after_store_reopen`：只写blob未提交接纳，重开后仍无公共Artifact/成功结论，不能拿SHA经公开Artifact入口读取。

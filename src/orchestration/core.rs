@@ -1399,13 +1399,18 @@ mod tests {
                 }
                 GoalRunRole::FinalCheck { .. } | GoalRunRole::PlanCheck { .. } => {
                     let input: CheckInput = serde_json::from_value(invocation.stage_input).unwrap();
+                    let verdict = if input.check_id == "quality-late-pass" {
+                        EvaluationVerdict::Pass
+                    } else {
+                        self.0.clone()
+                    };
                     assert!(invocation.signal_facts.is_empty());
                     assert_eq!(
                         invocation.inputs,
                         serde_json::to_value(&input.goal_inputs).unwrap()
                     );
-                    let results = input.rules.rules.iter().map(|rule| json!({"id":rule.id,"verdict":self.0,"message":"Controlled test result","evidence_refs":input.evidence_refs})).collect::<Vec<_>>();
-                    tools.call("artifact.write", json!({"slot":"evaluation","value":{"protocol_version":1,"verdict":self.0,"results":results,"evidence_refs":input.evidence_refs,"violations":[]}})).await.unwrap();
+                    let results = input.rules.rules.iter().map(|rule| json!({"id":rule.id,"verdict":verdict,"message":"Controlled test result","evidence_refs":input.evidence_refs})).collect::<Vec<_>>();
+                    tools.call("artifact.write", json!({"slot":"evaluation","value":{"protocol_version":1,"verdict":verdict,"results":results,"evidence_refs":input.evidence_refs,"violations":[]}})).await.unwrap();
                     ExecutionOutcome::Completed { usage: json!({}) }
                 }
             }
@@ -1480,6 +1485,15 @@ mod tests {
             let mut proposal: Value = serde_json::from_str(include_str!("../../docs/design/10-goal-dag-orchestration/contract/document-review-package/plan.example.json")).unwrap();
             proposal["goal_spec_digest"] = invocation.stage_input["goal_spec_digest"].clone();
             proposal["profile_digest"] = invocation.stage_input["profile_digest"].clone();
+            for requirement in invocation.stage_input["profile"]["checks"]
+                .as_array()
+                .unwrap()
+            {
+                if requirement["phase"] == "goal_final" {
+                    let id = requirement["id"].as_str().unwrap();
+                    proposal["checks"][id] = json!({"phase":"goal_final","checker_ref":requirement["checker_ref"],"targets":requirement["target_outputs"]});
+                }
+            }
             tools.call("artifact.write", json!({"slot":"proposal","value":{"protocol_version":1,"kind":"proposal","proposal":proposal}})).await.unwrap();
             ExecutionOutcome::Completed { usage: json!({}) }
         }
@@ -1624,6 +1638,132 @@ mod tests {
                 .cancel(&id, "close-planner-branch", final_view.revision, &caller)
                 .await
                 .unwrap();
+            runtime.shutdown().await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn required_checks_keep_partial_pass_pause_and_late_fail_fast_results_distinct() {
+        for first_verdict in [EvaluationVerdict::Pass, EvaluationVerdict::Fail] {
+            let (_directory, runtime, goals, caller, request) = setup_custom(
+                Some(Arc::new(CompleteGoal(first_verdict.clone()))),
+                false,
+                |registry| {
+                    let profile = registry.profiles.get_mut("document-review@1").unwrap();
+                    let mut late = profile.checks[0].clone();
+                    late.id = "quality-late-pass".into();
+                    profile.checks.push(late);
+                },
+            )
+            .await;
+            let id = goals.submit(request, &caller).await.unwrap().goal_id;
+            for _ in 0..2 {
+                goals.core.advance(&id).unwrap();
+                let run = goals.core.materialize(&id).unwrap().unwrap();
+                goals
+                    .core
+                    .prepare_execution(&id, &run)
+                    .unwrap()
+                    .unwrap()
+                    .execute()
+                    .await
+                    .unwrap();
+                goals.core.consume_return(&id, &run).unwrap();
+            }
+            goals.core.finish_node_check(&id, "review").unwrap();
+            goals.core.advance(&id).unwrap();
+            let mut returned = Vec::new();
+            for _ in 0..2 {
+                let run = goals.core.materialize(&id).unwrap().unwrap();
+                goals
+                    .core
+                    .prepare_execution(&id, &run)
+                    .unwrap()
+                    .unwrap()
+                    .execute()
+                    .await
+                    .unwrap();
+                returned.push(run);
+            }
+            let [first_run, late]: [String; 2] = returned.try_into().unwrap();
+            assert!(goals.core.consume_return(&id, &first_run).unwrap());
+            let first = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(goals.evaluations(&id, &caller).await.unwrap().len(), 1);
+            if first_verdict == EvaluationVerdict::Fail {
+                assert_eq!(
+                    first.terminal_intent.as_ref().unwrap().outcome,
+                    GoalOutcome::NotMet
+                );
+                assert!(goals.core.consume_return(&id, &late).unwrap());
+                let final_view = goals.get(&id, &caller).await.unwrap();
+                assert_eq!(final_view.outcome, Some(GoalOutcome::NotMet));
+                let receipts = goals.evaluations(&id, &caller).await.unwrap();
+                assert_eq!(receipts.len(), 1);
+                assert_eq!(receipts[0].verdict, EvaluationVerdict::Fail);
+                let check = final_view
+                    .evaluations
+                    .iter()
+                    .find(|c| c.check_id == "quality-late-pass")
+                    .unwrap();
+                assert_eq!(check.status, "stale_due_to_terminal");
+                assert!(check.receipt_id.is_none());
+                let candidate = final_view
+                    .artifacts
+                    .iter()
+                    .find(|a| a.producer_run_id.as_deref() == Some(late.as_str()))
+                    .unwrap();
+                assert!(!candidate.accepted);
+                assert_eq!(
+                    parse_unique(
+                        &goals
+                            .read_artifact(&candidate.artifact.id, &caller)
+                            .await
+                            .unwrap()
+                            .bytes
+                    )
+                    .unwrap()["verdict"],
+                    "pass"
+                );
+            } else {
+                assert!(first.outcome.is_none());
+                assert!(first.terminal_intent.is_none());
+                assert_eq!(first.stage, GoalStage::GoalChecking);
+                goals
+                    .stop(&id, "pause-partial-checks", first.revision, &caller)
+                    .await
+                    .unwrap();
+                assert!(goals.core.consume_return(&id, &late).unwrap());
+                let paused = goals.get(&id, &caller).await.unwrap();
+                assert_eq!(paused.status, GoalStatus::Stopped);
+                assert!(paused.outcome.is_none());
+                assert_eq!(paused.budget.runs_used, 4);
+                let receipts = goals.evaluations(&id, &caller).await.unwrap();
+                assert_eq!(receipts.len(), 2);
+                assert!(
+                    receipts
+                        .iter()
+                        .all(|r| r.verdict == EvaluationVerdict::Pass)
+                );
+                assert!(!goals.core.advance(&id).unwrap());
+                goals
+                    .resume(&id, "finish-partial-checks", paused.revision, &caller)
+                    .await
+                    .unwrap();
+                goals.core.advance(&id).unwrap();
+                assert_eq!(
+                    goals.get(&id, &caller).await.unwrap().outcome,
+                    Some(GoalOutcome::Achieved)
+                );
+            }
+            let final_view = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(final_view.nodes["review"].status, GoalNodeStatus::Succeeded);
+            assert_eq!(final_view.budget.runs_used, 4);
+            assert_eq!(final_view.progress.goal_occupied_slots, 0);
+            assert!(final_view.budget.reserved.is_empty());
+            assert!(!goals.core.consume_return(&id, &late).unwrap());
+            assert_eq!(
+                goals.get(&id, &caller).await.unwrap().revision,
+                final_view.revision
+            );
             runtime.shutdown().await.unwrap();
         }
     }
@@ -2221,6 +2361,49 @@ mod tests {
         assert_eq!(resumed.progress.pending_requests, 1);
         goals
             .cancel(&id, "finish-clock-test", resumed.revision, &caller)
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn recovery_before_first_reservation_requires_resume_and_does_not_invent_a_run() {
+        let (_directory, runtime, goals, caller, request) = setup(None).await;
+        let receipt = goals.submit(request.clone(), &caller).await.unwrap();
+        let id = receipt.goal_id;
+        let before = goals.get(&id, &caller).await.unwrap();
+        assert!(before.runs.is_empty());
+        goals.core.recover().unwrap();
+        let paused = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(paused.status, GoalStatus::Stopped);
+        assert!(paused.runs.is_empty());
+        assert_eq!(paused.budget.runs_used, 0);
+        assert_eq!(paused.progress.pending_requests, 1);
+        assert_eq!(paused.progress.host_occupied_slots, 0);
+        assert_eq!(paused.spec_digest, before.spec_digest);
+        assert_eq!(paused.wall_deadline_utc_ms, before.wall_deadline_utc_ms);
+        assert_eq!(
+            paused.planning_deadline_utc_ms,
+            before.planning_deadline_utc_ms
+        );
+        goals.core.recover().unwrap();
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            paused.revision
+        );
+        assert!(goals.core.materialize(&id).unwrap().is_none());
+        goals
+            .resume(&id, "resume-before-first-run", paused.revision, &caller)
+            .await
+            .unwrap();
+        let run = goals.core.materialize(&id).unwrap().unwrap();
+        let first = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(first.runs.len(), 1);
+        assert_eq!(first.budget.runs_used, 1);
+        assert!(!first.runs[&run].started);
+        assert!(goals.submit(request, &caller).await.unwrap().replayed);
+        assert_eq!(goals.get(&id, &caller).await.unwrap().runs.len(), 1);
+        goals
+            .cancel(&id, "close-first-reservation", first.revision, &caller)
             .await
             .unwrap();
         runtime.shutdown().await.unwrap();
