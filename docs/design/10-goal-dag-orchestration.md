@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.15；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.16；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 产品基线：[L1概要及归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)，以及提交`16a68d48abb829dc14f13d0e0f4d3ed8c754558c`的v0.2用户路径与验收。复用§4行为和§11原18项Sx.Ax，不改变产品范围。本文件按用户指定十三节格式保存唯一L2事实源，L1留在Issue评论。
 
@@ -824,6 +824,8 @@ Schema中的正整数上限为2^63−1以匹配SQLite安全计数，实际时长
 新增六份定义/检查输入契约见§6.3.1；注册对象的Schema与清单只作形状及离线示例依据，不增加运行时包协议。旧六份请求/计划/评价契约保持不变；DAG EntryContract Schema只收紧新路径，不修改旧Flow序列化。
 
 ### 8.4 错误与版本
+
+GoalSnapshot.runs中的Planner Run以`plan_validation_failure`公开该次提案的结构化校验原因（category/path/message等），通过或尚未校验时为空；它从既有候选记录投影，不改变Run执行结果或新增状态。只读GoalClient与在线查询使用同一投影，失败后仍可定位各次提案，而非只能看到最终planning_exhausted。
 
 错误结构复用`code/subject/message`，新增`category,path,expected_revision,actual_revision,retryable`可选字段；path是本请求JSON Pointer，不是文件系统敏感路径。稳定类别：input_invalid、capability_denied、plan_invalid、planning_exhausted、schema_mismatch、dependency_failed、check_unavailable、goal_not_met、budget_exhausted、revision_conflict、request_conflict、signal_expired、stale_result、stop_unknown、host_not_running、storage_incompatible、host_binding_changed、unsupported_store_mode、clock_untrusted、not_resumable；终结reason另含wall_timeout、planning_timeout、input_timeout。
 

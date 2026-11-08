@@ -144,3 +144,13 @@
 - 隔离消费者新增固定Workflow模式，真实Planner必须按Runtime模板及摘要提交提案，复用原document-review Worker与质量检查。三注册目录预检、消费者与核心严格Clippy通过；真实Workflow尚待执行。
 - 上一冻结候选110b35c的S6开发结果：positive-7-v020 achieved（12条引用全部回溯）；negative-2-v020 not_met（保留文章、3项缺口，无自动返工）；document-2-v020 achieved。研究Trace对Rust内置执行保留complete=false，第二业务Trace完整。原证据位于`target/verify-taskloop/10-real-inquiry/`且不换绑新SHA。
 - 最终候选验收表、keel-verify、独立代码review与release仍待完成；开发测试通过不代表端到端完成。
+
+
+## 实现检查点十四（2026-11-09）
+
+- 真实Workflow在d332075完成Planner与审阅Worker，二者原生停止均确认，固定模板摘要和锁定计划有效；最终检查已写入评价候选，但Milkie返回process_failed/stopped=false，Runtime正确blocked、保留1槽且无EvaluationReceipt。原Goal和预算不改判。`workflow-1-d332075/failure-audit.json`绑定原始证据摘要；只读导出未启动工作。
+- 诊断区分事实与推断：最终原生活动距unknown记录382ms，未耗尽8250ms停止等待；结合固定Milkie ProcessTracker代码，快路径false指向此前库存读取异常被锁存。具体异常未记录，不能断言是主机负载或750ms超时。后续10秒空闲库存探针stopped=true，但不能替代原Run停止确认。
+- 新增计划检查pass/fail/error三路径的公开SDK测试，复现要求举证时计划检查收到获准输入却无对应evidence_refs。现由共用issue_check入口按实际授权投影生成goal-input引用，移除节点检查中的重复生成，未新增状态或规则。三路径分别成功、有限修正后planning_exhausted、check_unavailable，业务启动边界与原Spec/配额不变。
+- 补齐规划时限、Run与工具预算耗尽测试；修正不能重置原期限或上限。非法成员值在artifact.write被Schema拒绝，调用计费但候选字节0，节点失败且不产生公共汇合或最终检查。Flow和Goal在同一Runtime争唯一物理槽位，Flow在执行时Goal零Run/公开排队，确认停止后Goal才执行，实测峰值1。
+- 公开查询原先只返回最终planning_exhausted，单次结构化失败仅在内部候选记录。GoalRunSnapshot现以plan_validation_failure只读投影对应提案的原始错误，无新增存储表或状态；在线/只读SDK一致，CLI人工及JSON均展示原错误位置。L2 v0.10.16细化此既有诊断承诺，原18项验收逐字保留。
+- 聚焦计划检查/预算/非法成员/共享槽位/CLI诊断测试均通过；旧d332075完整套件205通过、5项环境用例ignored。新候选完整回归及严格Clippy继续核对，真实Workflow整条验收仍为blocked，最终keel-verify、独立review、CI与release尚未完成。

@@ -307,6 +307,32 @@ fn cli_preserves_reports_and_distinguishes_not_met_checker_error_and_planning_ex
         assert_eq!(result["outcome"], outcome);
         assert_eq!(result["budget"]["runs_used"], runs);
         assert_eq!(f.started(), runs as usize);
+        if mode == "goal_bad_plan" {
+            let runs = result["runs"].as_object().unwrap();
+            let failures: Vec<_> = runs
+                .values()
+                .filter_map(|run| run["plan_validation_failure"].as_object())
+                .collect();
+            assert_eq!(failures.len(), 3);
+            let path = failures[0]["issues"][0]["path"].as_str().unwrap();
+            assert!(path.starts_with('/'));
+            let human = f
+                .command()
+                .args([
+                    "goal",
+                    "get",
+                    result["goal_id"].as_str().unwrap(),
+                    "--store",
+                ])
+                .arg(f.root.path().join("store"))
+                .output()
+                .unwrap();
+            assert_eq!(human.status.code(), Some(0));
+            let human = String::from_utf8_lossy(&human.stderr);
+            assert!(human.contains("计划拒绝"));
+            assert!(human.contains(path));
+            assert_eq!(f.started(), runs.len());
+        }
         if mode != "goal_bad_plan" {
             assert_eq!(
                 result["artifacts"]

@@ -875,6 +875,7 @@ impl GoalCore {
                         stop_unknown: false,
                         interrupted: false,
                         budget: None,
+                        plan_validation_failure: None,
                         error: None,
                     },
                     request_id: request.request_id.clone(),
@@ -1545,6 +1546,49 @@ mod tests {
         );
         assert!(goals.core.materialize(&id).unwrap().is_none());
         assert!(snapshot.artifacts.iter().all(|a| !a.accepted));
+        runtime.shutdown().await.unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn expired_planning_deadline_stops_pending_retry_without_resetting_the_original_window() {
+        let (_directory, runtime, goals, caller, mut request) =
+            setup(Some(Arc::new(SubmitCandidate))).await;
+        request.spec.planning.max_planning_ms = 50;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        let first = goals.get(&id, &caller).await.unwrap();
+        let run_id = goals.core.materialize(&id).unwrap().unwrap();
+        goals
+            .core
+            .prepare_execution(&id, &run_id)
+            .unwrap()
+            .unwrap()
+            .execute()
+            .await
+            .unwrap();
+        goals.core.consume_return(&id, &run_id).unwrap();
+        let retry = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(retry.stage, GoalStage::Planning);
+        assert_eq!(retry.progress.pending_requests, 1);
+        assert_eq!(
+            retry.planning_deadline_utc_ms,
+            first.planning_deadline_utc_ms
+        );
+        tokio::time::advance(std::time::Duration::from_millis(51)).await;
+        assert!(goals.core.materialize(&id).unwrap().is_none());
+        goals.core.maintain(&id).unwrap();
+        let ended = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(ended.outcome, Some(GoalOutcome::Failed));
+        assert_eq!(
+            ended.terminal_intent.as_ref().unwrap().reason,
+            "planning_timeout"
+        );
+        assert_eq!(ended.budget.runs_used, 1);
+        assert_eq!(ended.runs.len(), 1);
+        assert!(ended.nodes.is_empty());
+        assert!(ended.budget.reserved.is_empty());
+        assert_eq!(
+            ended.planning_deadline_utc_ms,
+            first.planning_deadline_utc_ms
+        );
         runtime.shutdown().await.unwrap();
     }
     #[tokio::test]

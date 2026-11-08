@@ -28,3 +28,5 @@ cargo test --locked --offline orchestration::tests
 `goal_cli`运行真实CLI进程配合受控Milkie协议对端；`goal_sdk`为外部crate使用公开SDK及受控Executor。两者不启动真实模型，不能替代08的应用/Agent证据。上述命令没有覆盖到的表内路径须另取证，不能按整套命令成功自动汇总S行pass。
 
 S2.A1真实模板入口：按`tests/inquiry_consumer/README.md`配置固定Milkie及真实Harness，执行消费者workflow模式；核对模板摘要由Runtime提供、提案严格匹配骨架及连接、独立质量检查通过。该路径与受控SDK模板测试分别记录，不以夹具替代真实Planner。
+
+规划拒绝诊断须同时核对在线SDK与只读GoalClient的`runs[*].plan_validation_failure`，保留每次提案的分类及JSON Pointer；CLI人工输出应显示相同原因。定位：`an_invalid_plan_is_corrected_once_with_exact_feedback_before_business_dispatch`与`cli_preserves_reports_and_distinguishes_not_met_checker_error_and_planning_exhaustion`。

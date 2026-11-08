@@ -156,11 +156,13 @@ impl FrozenRegistry {
             .get(checker_ref)
             .ok_or_else(|| invalid("/checker_ref", "unknown checker"))?;
         let rules = &self.rules[&checker.rules_ref];
-        let projected = checker
+        let projected: BTreeMap<String, Value> = checker
             .goal_input_fields
             .iter()
             .filter_map(|k| goal_inputs.get(k).map(|value| (k.clone(), value.clone())))
             .collect();
+        let mut evidence = evidence;
+        evidence.extend(projected.keys().map(|field| format!("goal-input:{field}")));
         let input = CheckInput {
             protocol_version: 1,
             goal_id: goal_id.into(),

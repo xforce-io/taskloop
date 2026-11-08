@@ -1300,6 +1300,7 @@ mod tests {
                     stop_unknown: false,
                     interrupted: false,
                     budget: None,
+                    plan_validation_failure: None,
                     error: None,
                 },
                 request_id,

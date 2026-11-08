@@ -738,15 +738,10 @@ impl GoalCore {
         checker: &str,
         targets: BTreeMap<String, CheckTarget>,
     ) -> Result<IssuedCheck> {
-        let mut evidence = targets
+        let evidence = targets
             .values()
             .map(|t| t.artifact_id.clone())
             .collect::<BTreeSet<_>>();
-        for field in &self.registry.checkers[checker].goal_input_fields {
-            if next.prepared.request.spec.inputs.get(field).is_some() {
-                evidence.insert(format!("goal-input:{field}"));
-            }
-        }
         self.registry.issue_check(
             &row.id,
             &next.prepared.request.spec.goal,

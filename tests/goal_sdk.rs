@@ -1,4 +1,5 @@
 //! External-crate SDK consumers with measured concurrent work and a semantic isolation check.
+mod common;
 use async_trait::async_trait;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -15,6 +16,9 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
 struct Stats {
+    plan_verdict: Option<&'static str>,
+    bad_member: Option<&'static str>,
+    flow_started: tokio::sync::Notify,
     calls: AtomicUsize,
     check_started: tokio::sync::Notify,
     check_release: tokio::sync::Notify,
@@ -175,13 +179,42 @@ impl Executor for ExecutorFixture {
                 .await;
                 (
                     "result",
-                    json!(format!(
-                        "{}:{member_id}",
-                        invocation.stage_input["source"].as_str().unwrap()
-                    )),
+                    if self.0.bad_member == Some(member_id.as_str()) {
+                        json!({"invalid":"the registered member result must be a string"})
+                    } else {
+                        json!(format!(
+                            "{}:{member_id}",
+                            invocation.stage_input["source"].as_str().unwrap()
+                        ))
+                    },
                 )
             }
-            GoalRunRole::FinalCheck { .. } | GoalRunRole::PlanCheck { .. } => {
+            GoalRunRole::PlanCheck { .. } => {
+                let input: CheckInput = serde_json::from_value(invocation.stage_input).unwrap();
+                assert_eq!(input.phase, CheckInputPhase::Plan);
+                let CheckSubject::Proposal {
+                    proposal_digest,
+                    proposal,
+                } = &input.subject
+                else {
+                    panic!("plan checker must receive the exact proposal, not artifact targets")
+                };
+                assert_eq!(proposal.goal_spec_digest, input.goal_spec_digest);
+                assert_eq!(proposal_digest.len(), 64);
+                assert_eq!(invocation.artifacts.len(), 0);
+                assert_eq!(input.evidence_refs, vec!["goal-input:text"]);
+                assert_eq!(input.goal_inputs.keys().collect::<Vec<_>>(), vec!["text"]);
+                assert!(
+                    self.0.members.lock().unwrap().is_empty(),
+                    "plan review precedes all business dispatch"
+                );
+                let verdict = self.0.plan_verdict.expect("explicit plan-review scenario");
+                (
+                    "evaluation",
+                    json!({"protocol_version":1,"verdict":verdict,"results":[{"id":"joined","verdict":verdict,"message":"Controlled proposal review","evidence_refs":input.evidence_refs}],"evidence_refs":input.evidence_refs,"violations":[]}),
+                )
+            }
+            GoalRunRole::FinalCheck { .. } => {
                 let input: CheckInput = serde_json::from_value(invocation.stage_input).unwrap();
                 assert_eq!(
                     invocation.inputs,
@@ -206,10 +239,14 @@ impl Executor for ExecutorFixture {
                 )
             }
         };
-        tools
+        let written = tools
             .call("artifact.write", json!({"slot":slot,"value":value}))
-            .await
-            .unwrap();
+            .await;
+        if self.0.bad_member.is_some() && value.is_object() && value.get("invalid").is_some() {
+            assert_eq!(written.unwrap_err().code, "input_invalid");
+        } else {
+            written.unwrap();
+        }
         ExecutionOutcome::Completed {
             usage: json!({"fixture":true}),
         }
@@ -273,6 +310,17 @@ async fn host_variant(
     unknown: bool,
     scenario: Option<NodeScenario>,
     input: bool,
+) -> (Runtime, Caller) {
+    host_composed(root, stats, capacity, unknown, scenario, input, None).await
+}
+async fn host_composed(
+    root: &std::path::Path,
+    stats: Arc<Stats>,
+    capacity: u64,
+    unknown: bool,
+    scenario: Option<NodeScenario>,
+    input: bool,
+    flow: Option<&common::Fixture>,
 ) -> (Runtime, Caller) {
     let mut registry = OrchestrationRegistry::new();
     for (name, schema) in [
@@ -346,6 +394,9 @@ async fn host_variant(
         .register_capability(serde_json::from_value(pair).unwrap())
         .unwrap();
     let mut profile = json!({"id":"pair","version":"1","goal_input_schema":"goal-input","goal_selectors":{"/inputs/text":"text"},"planner_entry_ref":"planner@1","capabilities":["pair@1"],"planning_input_schemas":[],"templates":[],"outputs":{"result":{"schema_ref":"pair","allowed_capabilities":["pair@1"]}},"final_outputs":["result"],"checks":[{"id":"joined","phase":"goal_final","checker_ref":"joined@1","rules_digest":rules,"target_outputs":["result"],"required":true}],"allowed_tools":["artifact.write"]});
+    if stats.plan_verdict.is_some() {
+        profile["checks"].as_array_mut().unwrap().push(json!({"id":"proposal-review","phase":"plan","checker_ref":"joined@1","rules_digest":rules,"target_outputs":[],"required":true}));
+    }
     if let Some(scenario) = scenario {
         registry.register_capability(serde_json::from_value(json!({"protocol_version":1,"id":"evaluation","version":"1","kind":"work","inputs":{"draft":{"schema_ref":"pair","required":true,"source_policy":{"kind":"artifact"}}},"outputs":{"evaluation":{"schema_ref":"_tl.evaluation-candidate@1"}},"gate":"_tl.schema@1","max_rule_check_ms":1000,"members":{"checker":{"entry_ref":"joined@1","input_mode":"check_request"}},"join":{"kind":"object-by-worker","outputs":{"evaluation":{"kind":"member","member_id":"checker","slot":"evaluation"}}},"evaluation":{"purpose":if scenario.checkpoint {"checkpoint"} else {"data"},"checker_ref":"joined@1","target_ports":{"draft":"draft"}}})).unwrap()).unwrap();
         profile["capabilities"]
@@ -373,10 +424,10 @@ async fn host_variant(
         .unwrap();
     let mut limit = limits();
     limit.max_concurrent_runs = capacity;
-    let bindings = HostBindings::default()
+    let mut bindings = HostBindings::default()
         .executor(
             "fixture",
-            Arc::new(ExecutorFixture(stats, unknown, scenario, input)),
+            Arc::new(ExecutorFixture(stats.clone(), unknown, scenario, input)),
         )
         .grant(
             "local",
@@ -391,6 +442,14 @@ async fn host_variant(
                 },
             },
         );
+    if let Some(flow) = flow {
+        let legacy = flow.bindings("pass");
+        bindings.gates.extend(legacy.gates);
+        bindings.grants.extend(legacy.grants);
+        bindings
+            .executors
+            .insert("test.executor".into(), Arc::new(HoldingFlow(stats)));
+    }
     let registration = registry.validate_and_freeze(&bindings).unwrap();
     let options = OrchestrationOptions {
         grants: BTreeMap::from([(
@@ -419,7 +478,7 @@ async fn host_variant(
     };
     let runtime = Runtime::open_orchestrated(
         RuntimeOptions::new(root),
-        vec![],
+        flow.map(|f| vec![f.definition.clone()]).unwrap_or_default(),
         bindings,
         registry,
         options,
@@ -889,5 +948,243 @@ async fn workflow_planning_executes_the_frozen_template_through_the_same_runtime
     );
     assert_eq!(snapshot.progress.host_occupied_slots, 0);
     assert!(snapshot.progress.queue_reason.is_none());
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn plan_reviews_distinguish_pass_revisable_fail_and_unavailable_error_before_business() {
+    for (verdict, expected, run_count, reason) in [
+        ("pass", GoalOutcome::Achieved, 5, None),
+        ("fail", GoalOutcome::Failed, 4, Some("planning_exhausted")),
+        ("error", GoalOutcome::Failed, 2, Some("check_unavailable")),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let stats = Arc::new(Stats {
+            plan_verdict: Some(verdict),
+            ..Default::default()
+        });
+        let (runtime, caller) = host(&directory.path().join("store"), stats.clone()).await;
+        let goals = runtime.goals().unwrap();
+        let mut req = request("plan-review", "reviewed");
+        req.spec.planning.max_revisions = 1;
+        let original = req.spec.clone();
+        let id = goals.submit(req, &caller).await.unwrap().goal_id;
+        let snapshot = finished(&goals, &id, &caller).await;
+        assert_eq!(snapshot.outcome, Some(expected), "{verdict}: {snapshot:?}");
+        assert_eq!(snapshot.budget.runs_used, run_count, "{verdict}");
+        assert_eq!(
+            serde_json::to_value(&snapshot.spec).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+        assert_eq!(snapshot.progress.goal_occupied_slots, 0);
+        assert!(snapshot.budget.reserved.is_empty());
+        let checks = goals.evaluations(&id, &caller).await.unwrap();
+        let plans: Vec<_> = checks
+            .iter()
+            .filter(|c| c.phase == CheckInputPhase::Plan)
+            .collect();
+        assert_eq!(plans.len(), if verdict == "fail" { 2 } else { 1 });
+        assert!(
+            plans
+                .iter()
+                .all(|c| serde_json::to_value(&c.verdict).unwrap() == verdict)
+        );
+        if let Some(reason) = reason {
+            assert_eq!(snapshot.terminal_intent.as_ref().unwrap().reason, reason);
+            assert!(stats.members.lock().unwrap().is_empty());
+            assert!(snapshot.nodes.is_empty());
+            assert!(!snapshot.artifacts.iter().any(|a| a.accepted));
+        } else {
+            assert_eq!(checks.len(), 2);
+            assert_eq!(snapshot.nodes["combine"].status, GoalNodeStatus::Succeeded);
+        }
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn planning_attempts_share_goal_run_and_tool_limits_instead_of_resetting_them() {
+    for dimension in ["runs", "tools"] {
+        let directory = tempfile::tempdir().unwrap();
+        let stats = Arc::new(Stats {
+            plan_verdict: Some("fail"),
+            ..Default::default()
+        });
+        let (runtime, caller) = host(&directory.path().join("store"), stats.clone()).await;
+        let goals = runtime.goals().unwrap();
+        let mut req = request("bounded-reviews", "reviewed");
+        req.spec.planning.max_revisions = 2;
+        if dimension == "runs" {
+            req.spec.limits.max_runs = 3;
+        } else {
+            req.spec.limits.max_tool_calls = 4;
+        }
+        let limits = req.spec.limits.clone();
+        let id = goals.submit(req, &caller).await.unwrap().goal_id;
+        let snapshot = finished(&goals, &id, &caller).await;
+        assert_eq!(
+            snapshot.outcome,
+            Some(GoalOutcome::Failed),
+            "{dimension}: {snapshot:?}"
+        );
+        assert_eq!(
+            snapshot.terminal_intent.as_ref().unwrap().reason,
+            "budget_exhausted"
+        );
+        assert_eq!(snapshot.budget.runs_used, 2);
+        assert_eq!(snapshot.budget.used.tool_calls, 2);
+        assert_eq!(stats.calls.load(Ordering::SeqCst), 2);
+        assert!(stats.members.lock().unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_value(&snapshot.limits).unwrap(),
+            serde_json::to_value(&limits).unwrap()
+        );
+        assert_eq!(snapshot.progress.goal_occupied_slots, 0);
+        assert!(snapshot.budget.reserved.is_empty());
+        assert!(snapshot.budget.protected_final.is_empty());
+        let receipts = goals.evaluations(&id, &caller).await.unwrap();
+        if dimension == "runs" {
+            // No proposal has enough remaining Runs for the business graph and required final check.
+            assert!(receipts.is_empty());
+            assert!(
+                snapshot
+                    .runs
+                    .values()
+                    .all(|run| matches!(run.role, GoalRunRole::Planner { .. }))
+            );
+        } else {
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].phase, CheckInputPhase::Plan);
+            assert_eq!(receipts[0].verdict, EvaluationVerdict::Fail);
+        }
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn schema_invalid_member_submission_is_rejected_before_public_join_or_final_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let stats = Arc::new(Stats {
+        bad_member: Some("a"),
+        ..Default::default()
+    });
+    let (runtime, caller) = host(&directory.path().join("store"), stats).await;
+    let goals = runtime.goals().unwrap();
+    let id = goals
+        .submit(request("invalid-member", "owned"), &caller)
+        .await
+        .unwrap()
+        .goal_id;
+    let snapshot = finished(&goals, &id, &caller).await;
+    assert_eq!(snapshot.outcome, Some(GoalOutcome::Failed));
+    assert_eq!(snapshot.nodes["combine"].status, GoalNodeStatus::Failed);
+    assert_eq!(snapshot.budget.runs_used, 3);
+    assert!(
+        !snapshot
+            .artifacts
+            .iter()
+            .any(|a| a.member_id.as_deref() == Some("a"))
+    );
+    let rejected = snapshot
+        .runs
+        .values()
+        .find(|r| matches!(&r.role, GoalRunRole::NodeMember { member_id, .. } if member_id == "a"))
+        .unwrap();
+    assert_eq!(rejected.budget.as_ref().unwrap().calls_used, 1);
+    assert_eq!(rejected.budget.as_ref().unwrap().candidate_bytes_used, 0);
+    assert!(
+        !snapshot
+            .artifacts
+            .iter()
+            .any(|a| a.accepted && a.member_id.is_none())
+    );
+    assert!(
+        !snapshot
+            .runs
+            .values()
+            .any(|r| matches!(r.role, GoalRunRole::FinalCheck { .. }))
+    );
+    assert!(goals.evaluations(&id, &caller).await.unwrap().is_empty());
+    assert_eq!(snapshot.progress.goal_occupied_slots, 0);
+    assert!(snapshot.budget.reserved.is_empty());
+    runtime.shutdown().await.unwrap();
+}
+
+struct HoldingFlow(Arc<Stats>);
+#[async_trait]
+impl Executor for HoldingFlow {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        _: Invocation,
+        tools: Arc<dyn ToolBridge>,
+        cancel: CancellationToken,
+    ) -> ExecutionOutcome {
+        assert!(tools.goal_context().is_none());
+        let _active = Active::new(self.0.clone(), "legacy-flow".into(), false);
+        self.0.flow_started.notify_one();
+        cancel.cancelled().await;
+        ExecutionOutcome::Cancelled
+    }
+    async fn stop_or_confirm(&self, _: &str) -> StopState {
+        StopState::Confirmed
+    }
+}
+
+#[tokio::test]
+async fn legacy_flow_and_goal_share_one_physical_slot_until_the_flow_confirms_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let flow = common::Fixture::new(false);
+    let stats = Arc::new(Stats::default());
+    let (runtime, caller) = host_composed(
+        &directory.path().join("store"),
+        stats.clone(),
+        1,
+        false,
+        None,
+        false,
+        Some(&flow),
+    )
+    .await;
+    let flow_id = runtime
+        .start(
+            flow.request("shared-flow", "legacy", true),
+            &Caller::local(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), stats.flow_started.notified())
+        .await
+        .unwrap();
+    let goals = runtime.goals().unwrap();
+    let mut req = request("shared-goal", "dag");
+    req.spec.limits.max_concurrent_runs = 1;
+    let id = goals.submit(req, &caller).await.unwrap().goal_id;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let queued = goals.get(&id, &caller).await.unwrap();
+    assert_eq!(queued.progress.host_occupied_slots, 1);
+    assert_eq!(queued.progress.goal_occupied_slots, 0);
+    assert_eq!(queued.progress.pending_requests, 1);
+    assert_eq!(queued.budget.runs_used, 0);
+    assert_eq!(stats.calls.load(Ordering::SeqCst), 0);
+    runtime
+        .cancel(&flow_id, "release-shared", &Caller::local())
+        .await
+        .unwrap();
+    let ended = finished(&goals, &id, &caller).await;
+    assert_eq!(ended.outcome, Some(GoalOutcome::Achieved));
+    assert_eq!(stats.peak.load(Ordering::SeqCst), 1);
+    assert_eq!(ended.progress.host_occupied_slots, 0);
+    assert_eq!(ended.budget.runs_used, 4);
+    assert_eq!(
+        runtime
+            .get(&flow_id, &Caller::local())
+            .await
+            .unwrap()
+            .status,
+        Status::Cancelled
+    );
     runtime.shutdown().await.unwrap();
 }

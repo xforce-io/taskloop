@@ -162,6 +162,22 @@ fn human(snapshot: &GoalSnapshot) {
             artifact.artifact.slot, artifact.artifact.id, artifact.artifact.sha256
         );
     }
+    for run in snapshot.runs.values() {
+        if let Some(failure) = &run.plan_validation_failure {
+            for issue in failure.issues.iter().take(10) {
+                eprintln!(
+                    "计划拒绝 {}：{:?} {}：{}",
+                    run.run_id, issue.category, issue.path, issue.message
+                );
+            }
+            if failure.issues.len() > 10 {
+                eprintln!(
+                    "其余 {} 项原因可用 goal get --json 查看。",
+                    failure.issues.len() - 10
+                );
+            }
+        }
+    }
     for waiting in &snapshot.waiting {
         if !waiting.consumed {
             eprintln!(

@@ -115,6 +115,9 @@ pub struct GoalRunSnapshot {
     pub stop_unknown: bool,
     pub interrupted: bool,
     pub budget: Option<RunBudgetSnapshot>,
+    /// Derived from the original proposal attempt; never changes its execution outcome.
+    #[serde(default)]
+    pub plan_validation_failure: Option<PlanValidationFailure>,
     pub error: Option<Error>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,7 +390,17 @@ impl GoalRecord {
             runs: self
                 .runs
                 .iter()
-                .map(|(id, r)| (id.clone(), r.view.clone()))
+                .map(|(id, r)| {
+                    let mut view = r.view.clone();
+                    if let GoalRunRole::Planner { attempt } = &view.role {
+                        view.plan_validation_failure = self
+                            .proposals
+                            .iter()
+                            .find(|p| p.attempt == *attempt)
+                            .and_then(|p| p.failure.clone());
+                    }
+                    (id.clone(), view)
+                })
                 .collect(),
             waiting: self
                 .waiting

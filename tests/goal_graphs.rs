@@ -587,6 +587,32 @@ async fn an_invalid_plan_is_corrected_once_with_exact_feedback_before_business_d
     let snapshot = finished(&goals, &id, &caller).await;
     assert_eq!(snapshot.outcome, Some(GoalOutcome::Achieved));
     assert_eq!(snapshot.budget.runs_used, 6);
+    let rejected = snapshot
+        .runs
+        .values()
+        .find(|r| matches!(r.role, GoalRunRole::Planner { attempt: 1 }))
+        .unwrap();
+    assert!(
+        rejected
+            .plan_validation_failure
+            .as_ref()
+            .unwrap()
+            .issues
+            .iter()
+            .any(|i| i.category == PlanIssueCategory::Cycle && i.path.starts_with('/'))
+    );
+    let repaired = snapshot
+        .runs
+        .values()
+        .find(|r| matches!(r.role, GoalRunRole::Planner { attempt: 2 }))
+        .unwrap();
+    assert!(repaired.plan_validation_failure.is_none());
+    let readonly = GoalClient::open(root.path().join("store"), caller.clone()).unwrap();
+    let persisted = readonly.get(&id).unwrap();
+    assert_eq!(
+        serde_json::to_value(&persisted.runs[&rejected.run_id].plan_validation_failure).unwrap(),
+        serde_json::to_value(&rejected.plan_validation_failure).unwrap()
+    );
     assert_eq!(
         snapshot
             .runs
