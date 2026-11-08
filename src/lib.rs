@@ -4,7 +4,8 @@ mod definition;
 mod error;
 mod json;
 pub use definition::{
-    Bundle, Definition, EntryContract, Flow, Requirement, SkillPackage, State, ValidationReport,
+    AttachmentPolicy, Bundle, Definition, EntryContract, Flow, OutputSlot, Requirement,
+    SkillPackage, State, ValidationReport,
 };
 pub use error::{Error, Result};
 pub use json::parse_unique;

@@ -11,6 +11,7 @@ use std::{
 pub(crate) mod goals;
 mod leases;
 mod migration;
+pub(crate) use migration::validate_readonly;
 
 pub(crate) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 

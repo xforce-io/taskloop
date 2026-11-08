@@ -95,7 +95,7 @@ impl GoalCore {
     }
     /// Recovery classifies all records before any business admission or stop probe.
     pub(crate) fn recover(&self) -> Result<()> {
-        for row in self.inner.store.goal_all()? {
+        for row in self.inner.store.goal_all_active()? {
             if row.record.status == GoalStatus::Finished {
                 continue;
             }
@@ -113,6 +113,11 @@ impl GoalCore {
                 .filter(|r| r.view.phase != GoalRunPhase::Settled)
             {
                 if run.view.started {
+                    if run.view.phase == GoalRunPhase::Checking {
+                        next.budget
+                            .incomplete_active_subjects
+                            .insert(run.view.run_id.clone());
+                    }
                     lost = true;
                     run.view.interrupted = true;
                     run.view.stop_unknown = !run.view.native_stop_confirmed;
@@ -176,21 +181,25 @@ impl GoalCore {
                     .get_or_insert(self.clock.observe()?.utc_ms);
             }
             self.cleanup_terminal(&mut next)?;
-            self.commit_goal(
-                &row,
-                &next,
-                GoalWriteGuard::Recovery,
-                None,
-                &Default::default(),
-                &self.clock,
-            )?;
+            if serde_json::to_value(&row.record)? != serde_json::to_value(&next)?
+                || serde_json::to_value(&row.record.budget)? != serde_json::to_value(&next.budget)?
+            {
+                self.commit_goal(
+                    &row,
+                    &next,
+                    GoalWriteGuard::Recovery,
+                    None,
+                    &Default::default(),
+                    &self.clock,
+                )?;
+            }
             self.maintain(&row.id)?;
         }
         Ok(())
     }
     pub(crate) fn pause_for_shutdown(&self) -> Result<()> {
         let _coordinator = self.coordinator.lock().map_err(Error::io)?;
-        for row in self.inner.store.goal_all()? {
+        for row in self.inner.store.goal_all_active()? {
             if row.record.status == GoalStatus::Finished {
                 continue;
             }
@@ -209,25 +218,49 @@ impl GoalCore {
                 }
             }
             self.close_stopping(&mut next, self.clock.observe()?.utc_ms)?;
-            self.commit_goal(
-                &row,
-                &next,
-                GoalWriteGuard::Cleanup,
-                None,
-                &Default::default(),
-                &self.clock,
-            )?;
+            if serde_json::to_value(&row.record)? != serde_json::to_value(&next)?
+                || serde_json::to_value(&row.record.budget)? != serde_json::to_value(&next.budget)?
+            {
+                self.commit_goal(
+                    &row,
+                    &next,
+                    GoalWriteGuard::Cleanup,
+                    None,
+                    &Default::default(),
+                    &self.clock,
+                )?;
+            }
         }
         Ok(())
     }
-    pub(crate) fn fail_preparation(&self, id: &str, run_id: &str, error: Error) -> Result<()> {
+    pub(crate) fn fail_preparation(
+        &self,
+        id: &str,
+        run_id: &str,
+        error: Error,
+        preparation_ms: u64,
+    ) -> Result<()> {
         let _coordinator = self.coordinator.lock().map_err(Error::io)?;
         let row = self.inner.store.goal_load(id)?;
         let run = &row.record.runs[run_id];
-        if run.view.started || run.view.phase != GoalRunPhase::Reserved {
+        if run.view.started {
             return Ok(());
         }
         let mut next = row.record.clone();
+        let run = next.runs.get_mut(run_id).expect("original reserved Run");
+        run.active_ms = run.active_ms.saturating_add(preparation_ms);
+        run.settlement_sequence += 1;
+        run.view.native_stop_confirmed = true;
+        run.view.phase = GoalRunPhase::Settled;
+        run.business_disposed = true;
+        next.budget.observe_active(
+            run_id,
+            run.settlement_sequence,
+            run.active_ms,
+            true,
+            true,
+            &next.prepared.effective_limits,
+        )?;
         set_terminal(
             &mut next,
             GoalOutcome::Failed,

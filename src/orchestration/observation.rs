@@ -215,11 +215,26 @@ impl GoalCore {
 impl Goals {
     pub fn trace(&self, id: &str, query: TraceQuery, caller: &Caller) -> Result<TracePage> {
         self.core.authorized(id, caller)?;
+        match &self.core.inner.trace {
+            Some(store) => store.read(id, &query),
+            None => crate::trace::disabled(&query),
+        }
+    }
+    pub fn export_trace(&self, id: &str, query: TraceQuery, caller: &Caller) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(&self.trace(id, query, caller)?)?)
+    }
+    pub fn read_trace_content(
+        &self,
+        id: &str,
+        content_id: &str,
+        caller: &Caller,
+    ) -> Result<TraceContent> {
+        self.core.authorized(id, caller)?;
         self.core
             .inner
             .trace
             .as_ref()
-            .ok_or_else(|| Error::new("trace_unavailable", "/trace", "Trace is disabled"))?
-            .read(id, &query)
+            .ok_or_else(|| Error::new("not_found", "/trace/content", "trace content not found"))?
+            .read_content(id, content_id)
     }
 }

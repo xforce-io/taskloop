@@ -29,6 +29,12 @@ impl GoalCore {
         }
         let observed = self.inner.store.observe_goal_clock(&self.clock)?;
         if !run.view.native_stop_confirmed {
+            if row.record.blockers.contains(&GoalBlocker {
+                reason: "stop_unknown".into(),
+                subject: run_id.into(),
+            }) {
+                return Ok(false);
+            }
             let mut next = row.record.clone();
             next.blockers.insert(GoalBlocker {
                 reason: "stop_unknown".into(),
@@ -152,7 +158,27 @@ impl GoalCore {
         if let GoalRunRole::NodeMember { node_id, .. } = &run.view.role
             && next.terminal_intent.is_none()
         {
-            self.begin_node_check(&mut next, node_id, observed.utc_ms)?;
+            if let Err(error) = self.begin_node_check(&mut next, node_id, observed.utc_ms) {
+                next.nodes
+                    .get_mut(node_id)
+                    .expect("original node")
+                    .view
+                    .status = GoalNodeStatus::Failed;
+                next.nodes
+                    .get_mut(node_id)
+                    .expect("original node")
+                    .view
+                    .error = Some(error.clone());
+                set_terminal(
+                    &mut next,
+                    GoalOutcome::Failed,
+                    &error.code,
+                    node_id,
+                    row.revision + 1,
+                    observed.utc_ms,
+                );
+                next.error = Some(error);
+            }
         }
         self.cleanup_terminal(&mut next)?;
         self.close_stopping(&mut next, observed.utc_ms)?;
@@ -719,14 +745,27 @@ impl GoalCore {
         }
         if let CheckSubject::Artifacts { targets, .. } = &issued.input.subject {
             for target in targets.values() {
-                let artifact = next.artifacts.get(&target.artifact_id).ok_or_else(|| {
-                    Error::new(
-                        "check_unavailable",
-                        "/evidence",
-                        "check target not accepted",
-                    )
-                })?;
-                if artifact.artifact.sha256 != target.sha256
+                let artifact = if let Some(artifact) = next.artifacts.get(&target.artifact_id) {
+                    artifact.clone()
+                } else {
+                    if !next.prepared.request.spec.imports.iter().any(|import| {
+                        import.artifact_id == target.artifact_id
+                            && import.sha256 == target.sha256
+                            && import.schema_digest == target.schema_digest
+                    }) {
+                        return Err(Error::new(
+                            "check_unavailable",
+                            "/evidence",
+                            "check target is neither a public output nor an admitted import",
+                        ));
+                    }
+                    let owner = self.inner.store.goal_load(&issued.input.goal_id)?.owner;
+                    self.inner
+                        .store
+                        .goal_artifact(&target.artifact_id, &owner)?
+                };
+                if !artifact.accepted
+                    || artifact.artifact.sha256 != target.sha256
                     || artifact.schema_digest.as_ref() != Some(&target.schema_digest)
                 {
                     return Err(Error::new(

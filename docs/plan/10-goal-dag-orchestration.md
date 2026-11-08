@@ -59,3 +59,21 @@
 - Milkie对Goal JSON候选采用RawValue借用片段预检；5MiB反例经原Run关联核验后仅拒绝，无候选Value或正常工具调用。注册要求Executor明确支持该边界，旧Flow默认不变。
 - Goal协调事件与原生Run共用Goal trace_id及既有Trace政策；协调观测流无业务Run/槽位/次数。受控SDK测试验证完整事件归属、节点/检查事件和关闭Span；模型观察不可用时complete=false，同时业务仍可achieved。Goal源清理先查持久Run状态，不能删除仍可启动/未停止的源。
 - L2 v0.10.7明确上述契约；原18项验收不变。普通回归、真实Agent、应用集成、CLI/只读客户端、并发与恢复负例、项目verify及独立review/release仍需按最终候选完成。
+
+
+## 实现检查点五（2026-11-08）
+
+- `bd4b872`保存候选解码限额/统一Trace归属检查点；完整常规套件181通过、5项环境用例ignored，日志`goal-observation-full-regression.log`。未推送，未作为最终候选送独立review。
+- GoalClient只读状态/计划/预算/产物/评价和Trace投影已接入：READ_ONLY、当前OS用户/0700检查、无owner.lock/迁移/协调。公开SDK正例同时验证宿主持锁时及退出后的查询、跨principal拒绝、预算/版本不变。
+- 补全未知停止返回后的独立探测，确认后仅结算/释放物理占用，保留interrupted且禁止resume重播；受控反例通过。恢复无事实变化不升revision，未提交checking消耗显式不完整；失败准备成本仍记实际时间。
+- 消耗业务转移额度时通过cleanup原子失败，不能在调度循环永久重试；未启动工作不调用Executor。该反例暴露过启动锁重入，已修复并重跑通过。
+- L2 v0.10.8补充只读客户端边界，原18项验收未变。当前客户端/停止等增量仍在开发验证；在线Socket/CLI、真实业务/Agent、并发/崩溃/检查点完整取证、功能地图、独立review与release尚未完成。
+
+
+## 实现检查点六（2026-11-08）
+
+- 本地Unix Socket已实现大端长度前缀/4MiB限制、peer UID核验、可信宿主Caller映射、32连接与读写期限；请求不能提供principal，也不开放resume/任意方法。在线结果含固定回执及当前status/pending，不把受理意图当停止成功。
+- 客户端暂停/补充输入/同键回执已通过真实本机Socket走通，端点关闭后host_not_running且版本不变，无离线队列。超限长度先拒绝、额外身份字段拒绝，37项编排聚焦测试通过。
+- CliDriver及只派发所选Goal的启动模式已接入，SDK默认仍可服务多个Goal/Flow；尚未完成最终CLI二进制与配置工厂用户路径验证。Tokio增加net/signal，仅新增锁定依赖socket2 0.6.5，无旧包升级。
+- 编译内置文档审阅工厂按Rust定义注册入口/节点/Profile，读取明确命名Schema/Skill/规则；不加载package.json。通用CLI与SDK消费者将复用这一工厂。
+- 后续仍需：完整CLI/信号/恢复与锁释放验证，实际并行/评价节点/崩溃窗口、两个真实业务/Agent、功能地图、最终候选独立review及release。所有18项验收未降低、未提前勾选。

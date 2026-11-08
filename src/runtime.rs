@@ -54,6 +54,11 @@ pub(crate) struct Inner {
     pub handles: Mutex<BTreeMap<String, CancellationToken>>,
     pub goal_run_handles: Mutex<BTreeMap<String, CancellationToken>>,
     pub live_budgets: Mutex<BTreeMap<String, Arc<crate::budget::BudgetState>>>,
+    pub dispatch_scope: Mutex<DispatchScope>,
+}
+pub(crate) enum DispatchScope {
+    All,
+    Goal(Option<String>),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ActiveRun {
@@ -202,7 +207,7 @@ impl Runtime {
         definitions: Vec<Definition>,
         bindings: HostBindings,
     ) -> Result<Self> {
-        Self::open_impl(options, definitions, bindings, None, None, None).await
+        Self::open_impl(options, definitions, bindings, None, None, None, false).await
     }
     pub async fn open_with_trace(
         options: RuntimeOptions,
@@ -210,7 +215,16 @@ impl Runtime {
         bindings: HostBindings,
         trace: crate::TraceOptions,
     ) -> Result<Self> {
-        Self::open_impl(options, definitions, bindings, Some(trace), None, None).await
+        Self::open_impl(
+            options,
+            definitions,
+            bindings,
+            Some(trace),
+            None,
+            None,
+            false,
+        )
+        .await
     }
     pub async fn open_with_trace_policy(
         options: RuntimeOptions,
@@ -226,6 +240,7 @@ impl Runtime {
             Some(trace),
             Some(policy),
             None,
+            false,
         )
         .await
     }
@@ -236,6 +251,26 @@ impl Runtime {
         registry: crate::OrchestrationRegistry,
         orchestration: crate::OrchestrationOptions,
         trace: Option<TraceSetup>,
+    ) -> Result<Self> {
+        Self::open_orchestrated_mode(
+            options,
+            definitions,
+            bindings,
+            registry,
+            orchestration,
+            trace,
+            false,
+        )
+        .await
+    }
+    pub(crate) async fn open_orchestrated_mode(
+        options: RuntimeOptions,
+        definitions: Vec<Definition>,
+        bindings: HostBindings,
+        registry: crate::OrchestrationRegistry,
+        orchestration: crate::OrchestrationOptions,
+        trace: Option<TraceSetup>,
+        selected_only: bool,
     ) -> Result<Self> {
         orchestration.validate()?;
         let frozen = registry.frozen()?;
@@ -257,6 +292,7 @@ impl Runtime {
             trace_options,
             trace_policy,
             Some((frozen, orchestration)),
+            selected_only,
         )
         .await
     }
@@ -282,6 +318,7 @@ impl Runtime {
             Arc<crate::orchestration::FrozenRegistry>,
             crate::OrchestrationOptions,
         )>,
+        selected_only: bool,
     ) -> Result<Self> {
         if options.max_admitted_instances == 0 || options.max_admitted_instances > 1024 {
             return Err(Error::new(
@@ -342,6 +379,11 @@ impl Runtime {
             handles: Mutex::new(BTreeMap::new()),
             goal_run_handles: Mutex::new(BTreeMap::new()),
             live_budgets: Mutex::new(BTreeMap::new()),
+            dispatch_scope: Mutex::new(if selected_only {
+                DispatchScope::Goal(None)
+            } else {
+                DispatchScope::All
+            }),
         });
         for row in inner.store.all()? {
             let mut r = decode(&row)?;
@@ -842,7 +884,7 @@ impl Runtime {
             }
         }
         if self.goals.is_some()
-            && self.inner.store.goal_all()?.iter().any(|row| {
+            && self.inner.store.goal_all_active()?.iter().any(|row| {
                 row.record
                     .runs
                     .values()
@@ -1280,7 +1322,7 @@ async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestra
             }
         }
         if let Some(core) = &goals {
-            if let Ok(rows) = inner.store.goal_all() {
+            if let Ok(rows) = inner.store.goal_all_active() {
                 for row in rows {
                     let _ = core.maintain(&row.id);
                     for (run_id, run) in &row.record.runs {
@@ -1289,7 +1331,8 @@ async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestra
                         }
                         if run.view.phase == crate::GoalRunPhase::ExecutionReturned {
                             let _ = core.consume_return(&row.id, run_id);
-                        } else if run.view.started && !run.view.native_stop_confirmed {
+                        }
+                        if run.view.started && !run.view.native_stop_confirmed {
                             let key = format!("goal-recovery:{run_id}");
                             if live.insert(key.clone()) {
                                 let core = core.clone();
@@ -1327,6 +1370,19 @@ async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestra
         owners.rotate_left(split);
         let mut dispatched = false;
         for (queue, id, goal) in owners {
+            let allowed = inner
+                .dispatch_scope
+                .lock()
+                .map(|scope| match &*scope {
+                    DispatchScope::All => true,
+                    DispatchScope::Goal(selected) => {
+                        goal && selected.as_deref() == Some(id.as_str())
+                    }
+                })
+                .unwrap_or(false);
+            if !allowed {
+                continue;
+            }
             if goal {
                 let Some(core) = &goals else {
                     continue;
@@ -1334,6 +1390,7 @@ async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestra
                 let Ok(Some(run_id)) = core.materialize(&id) else {
                     continue;
                 };
+                let preparation_at = tokio::time::Instant::now();
                 match core.prepare_execution(&id, &run_id) {
                     Ok(Some(execution)) => {
                         let key = format!("goal:{run_id}");
@@ -1350,7 +1407,12 @@ async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestra
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        let _ = core.fail_preparation(&id, &run_id, error);
+                        let _ = core.fail_preparation(
+                            &id,
+                            &run_id,
+                            error,
+                            preparation_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        );
                     }
                 }
             } else {
@@ -1393,7 +1455,7 @@ async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestra
     // shutdown keeps owning the dispatcher until all native futures return or report unknown.
     while work.join_next().await.is_some() {}
     if let Some(core) = goals {
-        if let Ok(rows) = inner.store.goal_all() {
+        if let Ok(rows) = inner.store.goal_all_active() {
             for row in rows {
                 for (run, state) in &row.record.runs {
                     if state.view.phase == crate::GoalRunPhase::ExecutionReturned {

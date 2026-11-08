@@ -455,13 +455,15 @@ impl GoalCore {
                     .map(|o| o.utc_ms.saturating_sub(at) >= 15_000)
                     .unwrap_or(true)
             });
-        if !due {
-            return;
-        }
         if let Ok(handles) = self.inner.goal_run_handles.lock() {
             for (id, run) in &record.runs {
                 if run.view.started
                     && !run.view.native_stop_confirmed
+                    && (due
+                        || record
+                            .requests
+                            .get(&run.request_id)
+                            .is_some_and(|request| request.cancelled))
                     && let Some(token) = handles.get(id)
                 {
                     token.cancel();
@@ -783,6 +785,81 @@ mod tests {
         }
     }
     struct SubmitPlan;
+    struct UnknownThenConfirmed(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl Executor for UnknownThenConfirmed {
+        fn capabilities(&self) -> ExecutorCapabilities {
+            ExecutorCapabilities::MANAGED
+        }
+        fn enforces_json_candidate_limit(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _: Invocation,
+            _: Arc<dyn ToolBridge>,
+            _: tokio_util::sync::CancellationToken,
+        ) -> ExecutionOutcome {
+            ExecutionOutcome::StopUnknown {
+                message: "controlled unknown native stop".into(),
+            }
+        }
+        async fn stop_or_confirm(&self, _: &str) -> StopState {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                StopState::Confirmed
+            } else {
+                StopState::Unknown
+            }
+        }
+    }
+    #[tokio::test]
+    async fn unknown_native_stop_is_reconciled_without_accepting_or_replaying_business_work() {
+        let executor = Arc::new(UnknownThenConfirmed(std::sync::atomic::AtomicUsize::new(0)));
+        let (_directory, runtime, goals, caller, request) =
+            setup_mode(Some(executor.clone()), true).await;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let s = goals.get(&id, &caller).await.unwrap();
+                if !s.runs.is_empty() && s.runs.values().all(|r| r.native_stop_confirmed) {
+                    break s;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("returned unknown Runs must remain eligible for stop probes");
+        assert_eq!(snapshot.status, GoalStatus::Blocked);
+        assert_eq!(snapshot.outcome, None);
+        assert_eq!(snapshot.budget.runs_used, 1);
+        assert!(
+            snapshot
+                .runs
+                .values()
+                .all(|r| r.interrupted && r.phase == GoalRunPhase::Settled)
+        );
+        assert!(snapshot.budget.reserved.is_empty());
+        assert!(snapshot.artifacts.is_empty());
+        assert_eq!(
+            goals
+                .resume(&id, "cannot-replay", snapshot.revision, &caller)
+                .await
+                .unwrap_err()
+                .code,
+            "not_resumable"
+        );
+        let current = goals.get(&id, &caller).await.unwrap();
+        goals
+            .cancel(&id, "close-blocked", current.revision, &caller)
+            .await
+            .unwrap();
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().outcome,
+            Some(GoalOutcome::Cancelled)
+        );
+        assert!(executor.0.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+        runtime.shutdown().await.unwrap();
+    }
     struct RequestPlanningInput;
     #[async_trait::async_trait]
     impl Executor for RequestPlanningInput {
@@ -825,6 +902,9 @@ mod tests {
                     .planning_input_schemas = vec!["text".into()];
             })
             .await;
+        let endpoint =
+            super::super::control_socket::ControlEndpoint::start(&runtime, caller.clone()).unwrap();
+        let client = GoalClient::open(_directory.path().join("store"), caller.clone()).unwrap();
         let original_spec = request.spec.clone();
         let id = goals.submit(request, &caller).await.unwrap().goal_id;
         let waiting = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -839,10 +919,13 @@ mod tests {
         .await
         .unwrap();
         let wait = &waiting.waiting[0];
-        let stopped = goals
-            .stop(&id, "pause-input", waiting.revision, &caller)
+        let stopped = client
+            .stop(&id, "pause-input", waiting.revision)
             .await
             .unwrap();
+        assert_eq!(stopped.status, GoalStatus::Stopped);
+        assert!(stopped.pending_runs.is_empty());
+        let stopped = stopped.receipt;
         let mut signal = GoalSignalRequest {
             protocol_version: 1,
             wait_id: wait.wait_id.clone(),
@@ -852,11 +935,7 @@ mod tests {
             expected_revision: stopped.applied_revision,
         };
         assert_eq!(
-            goals
-                .signal(&id, signal.clone(), &caller)
-                .await
-                .unwrap_err()
-                .code,
+            client.signal(&id, signal.clone()).await.unwrap_err().code,
             "signal_invalid"
         );
         let paused = goals.get(&id, &caller).await.unwrap();
@@ -868,12 +947,13 @@ mod tests {
             .unwrap();
         signal.expected_revision = resumed.applied_revision;
         signal.request_key = "accepted-signal".into();
-        let accepted = goals.signal(&id, signal.clone(), &caller).await.unwrap();
+        let accepted = client.signal(&id, signal.clone()).await.unwrap().receipt;
         assert_eq!(
-            goals
-                .signal(&id, signal, &caller)
+            client
+                .signal(&id, signal)
                 .await
                 .unwrap()
+                .receipt
                 .applied_revision,
             accepted.applied_revision
         );
@@ -894,6 +974,18 @@ mod tests {
             serde_json::to_value(snapshot.spec).unwrap(),
             serde_json::to_value(original_spec).unwrap()
         );
+        endpoint.close().await;
+        assert!(!_directory.path().join("store/owner.sock").exists());
+        let revision = client.get(&id).unwrap().revision;
+        assert_eq!(
+            client
+                .cancel(&id, "offline-not-queued", revision)
+                .await
+                .unwrap_err()
+                .code,
+            "host_not_running"
+        );
+        assert_eq!(client.get(&id).unwrap().revision, revision);
         runtime.shutdown().await.unwrap();
     }
     struct CompleteGoal(EvaluationVerdict);
@@ -1214,7 +1306,73 @@ mod tests {
                 .iter()
                 .any(|c| c.run_id == id && c.executor.is_none() && c.state == "not_applicable")
         );
+        let client = GoalClient::open(_directory.path().join("store"), caller.clone()).unwrap();
+        assert_eq!(client.get(&id).unwrap().revision, snapshot.revision);
+        assert_eq!(
+            client.plan(&id).unwrap().plan_digest,
+            goals.plan(&id, &caller).await.unwrap().plan_digest
+        );
+        assert_eq!(client.budgets(&id).unwrap().budget.runs_used, 3);
+        assert_eq!(client.evaluations(&id).unwrap().len(), 1);
+        let artifact = snapshot.artifacts.iter().find(|a| a.accepted).unwrap();
+        assert_eq!(
+            client
+                .read_artifact(&artifact.artifact.id)
+                .unwrap()
+                .reference
+                .sha256,
+            artifact.artifact.sha256
+        );
+        let readonly_trace = client
+            .trace(
+                &id,
+                TraceQuery {
+                    limit: 1000,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(readonly_trace.events.len(), trace.events.len());
+        assert!(
+            readonly_trace
+                .issues
+                .iter()
+                .any(|i| i == "collector_not_flushed")
+        );
+        let other = GoalClient::open(
+            _directory.path().join("store"),
+            Caller {
+                principal: "bob".into(),
+                grants: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(other.get(&id).unwrap_err().code, "not_found");
+        assert_eq!(
+            other.read_artifact(&artifact.artifact.id).unwrap_err().code,
+            "not_found"
+        );
         runtime.shutdown().await.unwrap();
+        drop(goals);
+        drop(runtime);
+        let offline = client.get(&id).unwrap();
+        assert_eq!(offline.revision, snapshot.revision);
+        assert_eq!(offline.budget.runs_used, 3);
+        assert_eq!(offline.outcome, Some(GoalOutcome::Achieved));
+        assert!(
+            !client
+                .trace(
+                    &id,
+                    TraceQuery {
+                        limit: 1000,
+                        ..Default::default()
+                    }
+                )
+                .unwrap()
+                .issues
+                .iter()
+                .any(|i| i == "collector_not_flushed")
+        );
     }
     async fn setup_mode(
         executor: Option<Arc<dyn Executor>>,

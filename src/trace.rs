@@ -17,6 +17,7 @@ use std::{
 
 mod cleanup;
 mod governance;
+pub(crate) mod readonly;
 pub use cleanup::SourceCleanup;
 pub(crate) use cleanup::cleanup_loop;
 

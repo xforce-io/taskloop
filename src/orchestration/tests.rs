@@ -162,6 +162,37 @@ pub(crate) fn fixture() -> (OrchestrationRegistry, HostBindings) {
     )
 }
 #[test]
+fn compiled_document_factory_registers_without_any_package_manifest_loader() {
+    let (source, bindings) = fixture();
+    let budgets = source
+        .entries
+        .iter()
+        .map(|(id, entry)| (id.clone(), entry.budget.clone()))
+        .collect();
+    let original = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/design/10-goal-dag-orchestration/contract/document-review-package");
+    let directory = tempfile::tempdir().unwrap();
+    for relative in [
+        "schemas/goal-input.json",
+        "schemas/goal-text.json",
+        "schemas/text.json",
+        "schemas/review-input.json",
+        "schemas/report.json",
+        "schemas/planner-input.json",
+        "rules/document-quality.json",
+        "skills/document-review/SKILL.md",
+    ] {
+        let target = directory.path().join(relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(original.join(relative), target).unwrap();
+    }
+    assert!(!directory.path().join("package.json").exists());
+    let mut registry = document_review_registry(directory.path(), "milkie", &budgets).unwrap();
+    let receipt = registry.validate_and_freeze(&bindings).unwrap();
+    assert_eq!(receipt.capabilities, vec!["review@1"]);
+    assert!(receipt.profiles.contains_key("document-review@1"));
+}
+#[test]
 fn example_registration_is_atomic_sealed_and_does_not_execute() {
     let (mut registry, bindings) = fixture();
     let receipt = registry.validate_and_freeze(&bindings).unwrap();

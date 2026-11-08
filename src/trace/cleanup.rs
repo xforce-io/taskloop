@@ -29,6 +29,13 @@ impl TraceStore {
         run: Option<&str>,
     ) -> Result<Vec<SourceCleanup>> {
         let conn = self.conn.lock().map_err(Error::io)?;
+        Self::cleanup_view_from(&conn, execution, run)
+    }
+    pub(super) fn cleanup_view_from(
+        conn: &Connection,
+        execution: &str,
+        run: Option<&str>,
+    ) -> Result<Vec<SourceCleanup>> {
         let mut stmt=conn.prepare("SELECT run_id,executor,state,last_ms,next_ms FROM trace_cleanup WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2) ORDER BY run_id")?;
         Ok(stmt
             .query_map(params![execution, run], |r| {

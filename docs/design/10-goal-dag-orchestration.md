@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.7；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.9；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -777,7 +777,7 @@ HOST.json指定store_dir、已编译的Profile/能力工厂ID、现有Skill/Sche
 
 客户端仅在同一OS用户的0700Store目录工作；GoalClient按本地UID映射可信身份，不能从请求JSON指定principal。嵌入应用继续由宿主提供Caller与授权；首版不承诺跨OS用户/远程客户端。持锁前台宿主创建`owner.sock`并处理在线命令；这是该进程内的本地控制入口，不是独立后台服务。客户端不打开可写数据库、不写收件表。宿主使用OS peer UID与Store所有者核对身份，并以宿主配置映射Caller/Grant，不接纳请求自报的授权。
 
-Socket采用4字节无符号大端长度前缀加UTF-8 JSON请求/响应帧（单帧不超过4MiB），请求包含protocol_version、kind、goal_id、request_key、expected_revision与payload；不提供任意方法/SQL/路径调用。宿主提交命令回执后返回，响应丢失按同键重试。宿主离线或Socket不可连接返回host_not_running，**没有排队成功、延迟取消或自动启动**；遗留Socket不能作为存活证明，只有取得Store锁的宿主可清理/重建。readonly查询可通过公开GoalClient读取受支持版本的SQLite投影，不获得协调或写状态权。
+Socket采用4字节无符号大端长度前缀加UTF-8 JSON请求/响应帧（单帧不超过4MiB），请求包含protocol_version、kind、goal_id、request_key、expected_revision与payload；不提供任意方法/SQL/路径调用。宿主提交命令回执后返回，响应丢失按同键重试。在线响应含固定回执及当前revision/status/outcome/pending_runs/blockers摘要，不复制完整Goal材料；客户端复核回执Goal/键/动作身份。SDK CliDriver在开放Socket前完成存储恢复，启动时不选择业务Goal，只有submit/resume明确选定后才派发该Goal；其他记录仅做期限/停止资源对账。宿主离线或Socket不可连接返回host_not_running，**没有排队成功、延迟取消或自动启动**；遗留Socket不能作为存活证明，只有取得Store锁的宿主可清理/重建。readonly查询可通过公开GoalClient读取受支持版本的SQLite投影，不获得协调或写状态权。嵌入式GoalClient的Caller仅由可信宿主配置提供，并先核验Store属于当前OS用户且为0700；命令请求不携Caller。状态和Trace连接均以SQLite READ_ONLY打开，只核验已支持的Schema，不迁移、不执行Trace维护或恢复。Trace投影复用原事件分页、摘要、政策和源清理读取；run_policies保留实际锁定政策，离线投影不猜当前宿主内存政策。collector尚未持久化干净关闭时标collector_not_flushed，不能仅从磁盘声明全量观测完整。
 
 幂等submit不恢复已经停止的目标：在存活宿主内同键重试，原已运行Goal照常推进但不产生第二次派发；宿主不存活时，同键goal run只返回replayed回执与当前快照，若目标未终态则退出9（blocked则8）并提示显式resume。CLI run拿不到Store锁则already_running，不以重试抢占宿主。这样重试旧创建请求不会撤销之后的显式stop意图。resume具有自己的request_key/expected_revision，经§6.9前置校验后才恢复。
 

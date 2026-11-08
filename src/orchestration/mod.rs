@@ -1,10 +1,14 @@
 //! Goal contracts and orchestration. A locked plan is data, never authority to execute.
 mod admission;
 mod check;
+mod cli_driver;
+mod client;
 mod clock;
 pub(crate) mod control;
+mod control_socket;
 mod coordinator;
 mod core;
+mod document_review;
 mod driver;
 pub(crate) mod goal_budget;
 mod lifecycle;
@@ -48,7 +52,11 @@ pub(crate) use clock::{ClockObservation, GoalClock};
 pub(crate) use registry::FrozenRegistry;
 pub(crate) use registry::bindings_digest;
 
+pub use cli_driver::CliDriver;
+pub use client::GoalClient;
+pub use control_socket::GoalCommandResult;
 pub(crate) use core::GoalCore;
 pub use core::Goals;
+pub use document_review::document_review_registry;
 
 pub(crate) use record::run_scope_valid;

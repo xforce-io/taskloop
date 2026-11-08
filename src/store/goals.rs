@@ -78,7 +78,7 @@ fn decode_goal(
         record,
     })
 }
-fn goal_by_id(conn: &Connection, id: &str) -> Result<GoalRow> {
+pub(crate) fn goal_by_id(conn: &Connection, id: &str) -> Result<GoalRow> {
     let row=conn.query_row("SELECT g.id,g.owner,g.revision,g.queue_order,g.body,b.body FROM goals g JOIN goal_budget b ON b.goal_id=g.id WHERE g.id=?1",[id],goal_columns).optional()?.ok_or_else(not_found)?;
     decode_goal(row)
 }
@@ -146,9 +146,9 @@ impl Store {
         }
         Ok(None)
     }
-    pub(crate) fn goal_all(&self) -> Result<Vec<GoalRow>> {
+    pub(crate) fn goal_all_active(&self) -> Result<Vec<GoalRow>> {
         let c = self.connection()?;
-        let mut st=c.prepare("SELECT g.id,g.owner,g.revision,g.queue_order,g.body,b.body FROM goals g JOIN goal_budget b ON b.goal_id=g.id ORDER BY g.queue_order,g.id")?;
+        let mut st=c.prepare("SELECT g.id,g.owner,g.revision,g.queue_order,g.body,b.body FROM goals g JOIN goal_budget b ON b.goal_id=g.id WHERE json_extract(g.body,'$.status')!='finished' ORDER BY g.queue_order,g.id")?;
         let rows = st
             .query_map([], goal_columns)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -344,6 +344,14 @@ impl Store {
             &row.record.budget,
             &mut next.budget,
             &serde_json::from_str(&current_budget).map_err(Error::io)?,
+        )?;
+        next.budget.logical_accepted_bytes = effects.artifacts.iter().try_fold(
+            row.record.budget.logical_accepted_bytes,
+            |total, artifact| -> Result<u64> {
+                total
+                    .checked_add(self.read_blob(&artifact.artifact.sha256)?.len() as u64)
+                    .ok_or_else(|| Error::io("logical accepted byte counter overflow"))
+            },
         )?;
         if next.prepared.request_fingerprint != row.record.prepared.request_fingerprint
             || next.prepared.spec_digest != row.record.prepared.spec_digest

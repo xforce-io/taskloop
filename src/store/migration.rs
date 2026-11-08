@@ -148,6 +148,16 @@ fn check_columns(conn: &Connection, tables: &[(&str, &[&str])]) -> Result<()> {
     }
     Ok(())
 }
+pub(crate) fn validate_readonly(conn: &Connection) -> Result<()> {
+    let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version != 2 {
+        return Err(incompatible(
+            "GoalClient requires supported state.sqlite v2; it cannot migrate",
+        ));
+    }
+    check_columns(conn, BASE_COLUMNS)?;
+    check_columns(conn, GOAL_COLUMNS)
+}
 pub(super) fn initialize(conn: &mut Connection, orchestrated: bool) -> Result<()> {
     let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version > 2 {

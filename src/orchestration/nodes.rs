@@ -83,7 +83,27 @@ impl GoalCore {
                             .values()
                             .all(|m| m.status == GoalMemberStatus::Succeeded)
                     {
-                        self.begin_node_check(&mut next, node_id, observed.utc_ms)?;
+                        if let Err(error) =
+                            self.begin_node_check(&mut next, node_id, observed.utc_ms)
+                        {
+                            next.nodes
+                                .get_mut(node_id)
+                                .expect("locked node")
+                                .view
+                                .status = GoalNodeStatus::Failed;
+                            next.nodes.get_mut(node_id).expect("locked node").view.error =
+                                Some(error.clone());
+                            set_terminal(
+                                &mut next,
+                                GoalOutcome::Failed,
+                                &error.code,
+                                node_id,
+                                row.revision + 1,
+                                observed.utc_ms,
+                            );
+                            next.error = Some(error);
+                            break;
+                        }
                     }
                 }
                 if next.terminal_intent.is_none()
