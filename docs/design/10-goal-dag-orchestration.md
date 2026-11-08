@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.3；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.3.1；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -95,27 +95,50 @@ R1 固定目标、能力、规则与接纳计划。R2 Agent提案，Runtime调�
 
 ## 6 架构
 
-### 6.1 分层与执行路径
+### 6.1 分层、状态转移处理与执行路径
+
+状态协调器是唯一状态提交入口，其内部显式包含**事件接纳、转移校验、状态转移器、事务提交**。依赖调度只提出可派发动作；Planner、Worker、Gate和评价均返回候选事实，不能直接修改Goal、节点或Run状态。
 
 ```mermaid
 flowchart TD
  C[CLI / Rust宿主] --> A[Goals公开API与授权]
- A --> Q[命令幂等与状态协调器]
- Q --> P[受控Planner / 计划检查]
- P --> V[DAG / 模板 / 连接 / 预算校验]
- V --> S[锁定计划与依赖调度]
- S --> M[共享Managed Run管线]
+ A --> E
+ K[期限 / 取消 / 恢复 / 停止确认事件] --> E
+ subgraph Q[状态协调器：唯一状态提交入口]
+  E[接纳命令或执行事件，识别幂等键] --> R[读取当前Goal / 节点 / Run快照]
+  R --> V{转移校验：身份、epoch、前态、依赖、证据、预算}
+  V -->|拒绝| X[返回拒绝或原回执，不推进业务状态]
+  V -->|合法| D[状态转移器：计算新状态及待执行动作]
+  RULE[6.5转移规则与不变量] --> D
+  D --> TX{单事务CAS：状态、回执、产物引用、预算与占槽}
+  TX -->|revision冲突| R
+  TX -->|提交成功| F[已提交状态与动作]
+ end
+ DB[(state.sqlite / immutable blobs)] --> R
+ TX -->|原子持久化| DB
+ F --> O[GoalSnapshot / 产物 / 预算 / 命令回执]
+ F --> S[提交后派发：只执行已预留且仍有效的动作]
+ S --> P[受控Planner / 声明检查 / 业务Worker / 停止请求]
+ P --> M[共享Managed Run与检查管线]
  M --> H[Executor → Milkie → Harness]
- M --> G[候选Schema与领域Gate]
- G --> J[节点汇合 / Evaluation接纳]
- J --> Q
- Q --> DB[(state.sqlite / immutable blobs)]
- M -.观测.-> T[(现有Trace与治理)]
- Q -.编排观测.-> T
- Q --> O[GoalSnapshot / 产物 / 预算]
+ H --> G[候选Schema / Gate / 汇合 / 评价对象校验]
+ G --> B[结果事件：提案、输出、检查或停止事实]
+ B --> E
+ F -.已提交事实的观测投影.-> T[(现有Trace与治理)]
+ M -.运行观测.-> T
 ```
 
-主路径：授权提交→固化Goal Spec/Profile→受控Planner→结构和计划评价→单事务锁定→按依赖原子预留派发→受控Run产候选→Gate→节点汇合→Goal必需评价→提交终态。失败路径：计划不合法仅在上限内修正；输入/Worker/Gate失败传播；质量fail为not_met；检查error为failed/check_unavailable；取消和资源边界先停止再收束；未知停止单列并占容量。Trace失败只降级观测，不更改上述业务结论。
+处理顺序固定如下：
+
+1. **事件进入**：提交/补充/取消命令、Planner提案、Worker结果、检查结果、超时和停止确认都进入同一协调器。执行结束不是业务状态已接纳。
+2. **读快照与校验**：按§6.7核对当前身份、epoch、前态、计划/输入/证据摘要、依赖、取消与预算；幂等命令返回原回执，迟到或伪造结果拒绝。异步结果不以出生时revision是否等于当前值判断有效性。
+3. **计算转移**：状态转移器按§6.5规则计算Goal、节点、Run的变更和待执行动作，包括锁定计划、ready集、失败传播、等待、最终验收、停止及容量处理。它不调用模型、工具或Executor，不在此步先做外部副作用。
+4. **原子提交**：用当前revision做CAS，把业务变更、幂等回执、产物/评价引用、预算预留及占槽事实一起提交。冲突时重读并重新校验计算，不能拿旧决策直接覆盖；存储失败不派发。
+5. **提交后执行**：只派发已提交且仍有效的动作；受控Run仍须先CAS记录started才调用Executor。派发/取消竞争及崩溃窗口按§6.7–6.9处理，不能因为图上有一条动作边就盲重放。结果再作为事件进入下一次转移。
+
+图中反馈边表示Runtime处理事件的闭环，**不是业务DAG回边或锁定后重规划**。具体状态与合法事件见§6.5，事务/并发见§6.7，恢复见§6.9；模型Review只在声明检查点，不参与每次确定性转移。
+
+主路径：受理并固化Spec/Profile→受控规划→结构与计划评价事件→事务锁定→原子预留与派发→接纳公共输出→必需Goal评价→事务提交终态。失败路径同样经过状态转移器：非法提案仅在上限内修正；输入/Worker/Gate失败传播；质量fail为not_met；检查error为failed/check_unavailable；取消和资源边界先停止再收束；未知停止单列并占容量。Trace失败只降级观测，不更改业务结论。
 
 ### 6.2 固定对象与归属
 

@@ -94,3 +94,4 @@
 | GoalSignalRequest | 绑定等待身份、版本和幂等键的目标补充输入请求。 | — |
 | OrchestrationRegistry | 宿主显式注册并锁定Profile、能力、模板、检查和汇合实现的目录。 | — |
 | OrchestrationOptions | 宿主显式启用编排并规定容量及协议限制的配置。 | — |
+| 状态转移器 | 根据当前快照、已验证事件与转移规则计算状态变更和待执行动作，并由事务接纳后生效的Runtime组件。 | — |
