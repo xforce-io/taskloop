@@ -103,3 +103,4 @@
 | Managed Run | 复用输入校验、预算、工具约束、Executor调用、候选及停止事实处理的受控执行管线。 | — |
 | TransitionRule | Runtime内建的状态转移契约，固定事件、前态、条件、变更、动作及原子边界。 | — |
 | TransitionDecision | 针对当前快照计算的待提交变更与动作，CAS失败后须丢弃并重新求值。 | — |
+| RunRequest | 同Goal内持久保存的待执行调用请求，不占槽位且最多物化为一个Run。 | — |
