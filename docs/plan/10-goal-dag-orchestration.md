@@ -125,3 +125,13 @@
 - 正例positive-4-codex166已真实执行模型，但Codex发行包缺同版本code-mode-host，模型明确报告无法调用工具；Runtime未将最终聊天当产物。官方辅助包SHA256 7abd50fe5f033495a7b693c45fb82dc57093a18f1c4ba3e8043577de46c5c7c5已核对，加入隔离PATH；消费者增加创建Goal前的组件存在检查与摘要记录。
 - positive-5-codex166真正完成Planner/来源选择/两份官方网页获取；分析Run真实读取24次来源后在240秒期限内未提交，Runtime failed/limit_reached且report dependency_failed。原始捕获、候选、预算和Trace保留，未自动返工、未改判成功。此例证明执行/期限边界，不算S6.A1正例通过。
 - 下一次显式验证改进应用入口的方法：先60秒内聚焦阅读、挑选8–12条关键证据后提交，避免把时间耗在穷举引文；问题、RuleSet及全部预算不变。可显式选当前机器默认的gpt-6.1-sol模型，Harness/模型仍由可信配置冻结，不自动回退。真实正/负例/第二业务与最终verify/review/release仍待完成。
+
+
+## 实现检查点十二（2026-11-08）
+
+- document-1-sol在006f664候选真实运行Planner/审阅/质量检查，结果achieved，原始产物、Evaluation、预算与Trace保留；这是S6第二业务的开发证据，不移挂为后续候选的最终验收。
+- positive-6-sol与negative-1-sol均真实完成规划、获取、分析和文章生成，但消费者Rust checker混用了Inquiry read_source的artifact_id参数，核心artifact.read实际要求id，导致检查执行失败。已修复参数；新增受限Bridge边界用例，调用原Inquiry域检查分别验证合法引用pass、材料不足fail及伪造引用fail。未修改原失败Goal。
+- 新增留存公开产物的离线复验入口：通过GoalClient读取确切Plan/Artifact/SHA，校验修正后的领域适配器，且断言原Goal revision/outcome不变。它进一步发现positive-6分析把“无阻断缺口”的限制仍放入gaps并标ready，原Inquiry域契约正确返回fail。入口指令现明确ready要求gaps为空，非阻断限制进入judgments.limitations；原RuleSet和配额不变，不重写旧文章或改判旧任务。正/负留存复验均按实际fail通过，严格Clippy通过。
+- 消费者export模式通过只读GoalClient导出公开快照、锁定Plan与Trace，无Runtime/模型/恢复；保留原执行证据，新增只读导出文件单列。
+- 源码版本准备为0.2.0（尚非发布）：核心完整回归201通过、5项环境用例ignored，日志v020-candidate-full-regression.log；核心与Inquiry消费者严格Clippy通过，消费者域契约1通过/1需显式留存数据的工具用例ignored（该用例已另在正/负留存目录执行）。旧外部Flow消费者锁文件补入新增的5项依赖、未升级原依赖，--locked --offline实际运行通过。
+- 下一步在冻结0.2.0候选上重新执行真实正例、未达标例及第二业务；仍需其余图形/可靠性验收核对、最终keel-verify、独立review及release。S6整体未标pass，端到端未完成。

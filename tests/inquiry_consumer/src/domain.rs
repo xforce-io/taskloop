@@ -113,7 +113,7 @@ impl Native {
                 let mut values = BTreeMap::new();
                 for (alias, target) in targets {
                     let reply = tools
-                        .call("artifact.read", json!({"artifact_id":target.artifact_id}))
+                        .call("artifact.read", json!({"id":target.artifact_id}))
                         .await?;
                     let text = reply["text"]
                         .as_str()
@@ -205,5 +205,223 @@ impl Executor for Native {
                 message: error.message,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    struct Bridge {
+        data: BTreeMap<String, ArtifactData>,
+        evaluation: Mutex<Option<Value>>,
+    }
+    #[async_trait]
+    impl ToolBridge for Bridge {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![]
+        }
+        async fn call(&self, tool: &str, args: Value) -> Result<Value> {
+            match tool {
+                "artifact.read" => {
+                    if args
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        != vec!["id"]
+                    {
+                        return Err(fault(
+                            "artifact.read uses id, not the domain read_source artifact_id parameter",
+                        ));
+                    }
+                    let artifact = self
+                        .data
+                        .get(args["id"].as_str().unwrap())
+                        .ok_or_else(|| fault("read outside exact targets"))?;
+                    Ok(
+                        json!({"artifact":artifact.reference,"text":std::str::from_utf8(&artifact.bytes).unwrap()}),
+                    )
+                }
+                "artifact.write" => {
+                    assert_eq!(args["slot"], "evaluation");
+                    *self.evaluation.lock().unwrap() = Some(args["value"].clone());
+                    Ok(json!({"written":true}))
+                }
+                _ => Err(fault("undeclared tool")),
+            }
+        }
+    }
+    fn add(
+        data: &mut BTreeMap<String, ArtifactData>,
+        id: &str,
+        slot: &str,
+        value: Value,
+    ) -> CheckTarget {
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        data.insert(
+            id.into(),
+            ArtifactData {
+                reference: ArtifactRef {
+                    id: id.into(),
+                    sha256: sha.clone(),
+                    slot: slot.into(),
+                    state_id: "_tl.node.producer".into(),
+                    visit: 1,
+                },
+                bytes: bytes.into(),
+            },
+        );
+        CheckTarget {
+            artifact_id: id.into(),
+            sha256: sha,
+            schema_digest: "a".repeat(64),
+            value,
+        }
+    }
+    fn fixture(insufficient: bool, bad_citation: bool) -> (Invocation, Arc<Bridge>) {
+        let mut data = BTreeMap::new();
+        let source1 = add(
+            &mut data,
+            "source-1",
+            "capture.snapshot.r1s1",
+            json!({"fact":{"usable":true,"final_url":"https://www.sqlite.org/wal.html"},"paragraphs":["The WAL file is part of the persistent state of the database."]}),
+        );
+        let source2 = add(
+            &mut data,
+            "source-2",
+            "capture.snapshot.r1s2",
+            json!({"fact":{"usable":true,"final_url":"https://www.sqlite.org/fts5.html"},"paragraphs":["Keep the content and index consistent."]}),
+        );
+        let citation = json!({"artifact_id":"source-1","sha256":if bad_citation {"b".repeat(64)}else{source1.sha256.clone()},"paragraph":0,"quote":"persistent state"});
+        let mut evidence = citation.clone();
+        evidence["id"] = json!("e1");
+        let analysis = add(
+            &mut data,
+            "analysis",
+            "analysis",
+            json!({"evidence":[evidence],"judgments":[{"text":"WAL is persistent state","support":["e1"],"counter":[],"limitations":[]}],"gaps":[],"decision":if insufficient{"need_input"}else{"ready"}}),
+        );
+        let article = add(
+            &mut data,
+            "article",
+            "report",
+            json!({"answer_status":if insufficient{"insufficient_evidence"}else{"answered"},"conclusion":"WAL is persistent state.[1]","citations":[citation],"limitations":[]}),
+        );
+        let targets = BTreeMap::from([
+            ("source1".into(), source1),
+            ("source2".into(), source2),
+            ("analysis".into(), analysis),
+            ("article".into(), article),
+        ]);
+        let input=CheckInput{protocol_version:1,goal_id:"goal-test".into(),goal:"Verify saved sources".into(),goal_spec_digest:"a".repeat(64),check_id:"domain".into(),rules_digest:"a".repeat(64),phase:CheckInputPhase::GoalFinal,epoch:1,nonce:"nonce".into(),issued_revision:1,subject:CheckSubject::Artifacts{plan_digest:"a".repeat(64),targets},rules:serde_json::from_value(json!({"protocol_version":1,"id":"domain","version":"1","rules":[{"id":"citation_integrity","instruction":"Check exact citations","pass_condition":"Exact sources and sufficient evidence","evidence_required":true}]})).unwrap(),goal_inputs:BTreeMap::new(),evidence_refs:vec!["source-1".into(),"source-2".into(),"analysis".into(),"article".into()]};
+        let entry:EntryContract=serde_json::from_value(json!({"instruction":"Domain checker","executor":"domain","skills":[],"tools":["artifact.read","artifact.write"],"input_schema":"_tl.check-input@1","requires":[],"outputs":{"evaluation":{"schema":"_tl.evaluation-candidate@1","required":true}},"gate":"_tl.schema@1","outcomes":["completed"]})).unwrap();
+        (
+            Invocation {
+                stage_input: serde_json::to_value(input).unwrap(),
+                execution_id: "goal-test".into(),
+                run_id: "run-test".into(),
+                state_id: "_tl.check.domain".into(),
+                visit: 1,
+                entry,
+                skills: BTreeMap::new(),
+                output_schemas: BTreeMap::new(),
+                inputs: json!({}),
+                artifacts: data.values().map(|a| a.reference.clone()).collect(),
+                signal_facts: vec![],
+                work_dir: "/tmp".into(),
+                timeout_ms: 30000,
+                budget: None,
+            },
+            Arc::new(Bridge {
+                data,
+                evaluation: Mutex::new(None),
+            }),
+        )
+    }
+    #[tokio::test]
+    async fn pinned_domain_checker_uses_the_public_read_contract_and_classifies_actual_evidence() {
+        for (insufficient, bad_citation, verdict) in [
+            (false, false, "pass"),
+            (true, false, "fail"),
+            (false, true, "fail"),
+        ] {
+            let (inv, bridge) = fixture(insufficient, bad_citation);
+            let tools: Arc<dyn ToolBridge> = bridge.clone();
+            Native::DomainCheck.run(&inv, &tools).await.unwrap();
+            let result = bridge.evaluation.lock().unwrap().clone().unwrap();
+            assert_eq!(result["verdict"], verdict);
+            assert_eq!(result["results"][0]["id"], "citation_integrity");
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires explicit retained public Inquiry evidence; never promotes the original failed Goal"]
+    async fn retained_public_research_artifacts_are_classified_without_rewriting_the_original_goal()
+    {
+        let root = std::path::PathBuf::from(
+            std::env::var("INQUIRY_EVIDENCE_ROOT").expect("retained evidence directory"),
+        );
+        let snapshot: GoalSnapshot =
+            serde_json::from_slice(&std::fs::read(root.join("final-snapshot.json")).unwrap())
+                .unwrap();
+        let client = GoalClient::open(
+            root.join("store"),
+            Caller {
+                principal: "integration-owner".into(),
+                grants: vec!["integration".into()],
+            },
+        )
+        .unwrap();
+        let plan = client.plan(&snapshot.goal_id).unwrap();
+        let mut data = BTreeMap::new();
+        let mut targets = BTreeMap::new();
+        for alias in ["source1", "source2", "analysis", "article"] {
+            let output = &plan.proposal.outputs[alias];
+            let reference = &snapshot.nodes[&output.node_id].outputs[&output.port];
+            let artifact = client.read_artifact(&reference.id).unwrap();
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&artifact.bytes)),
+                reference.sha256
+            );
+            targets.insert(
+                alias.into(),
+                CheckTarget {
+                    artifact_id: reference.id.clone(),
+                    sha256: reference.sha256.clone(),
+                    schema_digest: "a".repeat(64),
+                    value: parse_unique(&artifact.bytes).unwrap(),
+                },
+            );
+            data.insert(reference.id.clone(), artifact);
+        }
+        let (mut invocation, _) = fixture(false, false);
+        let mut input: CheckInput = serde_json::from_value(invocation.stage_input).unwrap();
+        input.goal = snapshot.spec.goal.clone();
+        input.goal_id = snapshot.goal_id.clone();
+        input.goal_spec_digest = snapshot.spec_digest.clone();
+        input.subject = CheckSubject::Artifacts {
+            plan_digest: plan.plan_digest,
+            targets,
+        };
+        input.evidence_refs = data.keys().cloned().collect();
+        invocation.stage_input = serde_json::to_value(input).unwrap();
+        invocation.artifacts = data.values().map(|a| a.reference.clone()).collect();
+        let bridge = Arc::new(Bridge {
+            data,
+            evaluation: Mutex::new(None),
+        });
+        let tools: Arc<dyn ToolBridge> = bridge.clone();
+        Native::DomainCheck.run(&invocation, &tools).await.unwrap();
+        let evaluation = bridge.evaluation.lock().unwrap().clone().unwrap();
+        let expected = std::env::var("INQUIRY_DOMAIN_EXPECTED").unwrap_or_else(|_| "pass".into());
+        assert_eq!(evaluation["verdict"], expected, "{evaluation}");
+        let unchanged = client.get(&snapshot.goal_id).unwrap();
+        assert_eq!(unchanged.revision, snapshot.revision);
+        assert_eq!(
+            unchanged.outcome, snapshot.outcome,
+            "offline checking must never rewrite a business outcome"
+        );
     }
 }

@@ -12,7 +12,7 @@
 - [历史总体 RFC](docs/RFC-0001-architecture.md)：更宽的架构方向，Python/CLI/动态规划等未作为一期依赖。
 - [名词表](docs/glossary.md)
 
-当前有可构建的 Rust 0.1.0 开发版本，尚未冻结验收、独立审查或正式发布。
+当前源码候选为 Rust 0.2.0，新增 Goal/DAG 编排；尚未完成本版本验收、独立审查或正式发布。
 
 - [实现 Issue #3](https://github.com/xforce-io/taskloop/issues/3)
 - [实际集成契约与验收](docs/design/3-minimal-runtime-mvp.md)

@@ -122,10 +122,11 @@ async fn collect(goals: &Goals, id: &str, caller: &Caller, root: &Path) -> Resul
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 3 || !["check", "positive", "negative", "document"].contains(&args[1].as_str())
+    if args.len() != 3
+        || !["check", "positive", "negative", "document", "export"].contains(&args[1].as_str())
     {
         return Err(
-            "usage: taskloop-inquiry-consumer check|positive|negative|document ABSOLUTE_OUTPUT_DIR"
+            "usage: taskloop-inquiry-consumer check|positive|negative|document|export ABSOLUTE_OUTPUT_DIR"
                 .into(),
         );
     }
@@ -135,6 +136,51 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     std::fs::create_dir_all(&root)?;
     let root = root.canonicalize()?;
+    if args[1] == "export" {
+        let receipt: GoalReceipt =
+            serde_json::from_value(parse_unique(&std::fs::read(root.join("admission.json"))?)?)?;
+        let client = GoalClient::open(
+            root.join("store"),
+            Caller {
+                principal: "integration-owner".into(),
+                grants: vec!["integration".into()],
+            },
+        )?;
+        save(
+            &root,
+            "exported-snapshot.json",
+            &client.get(&receipt.goal_id)?,
+        )?;
+        match client.plan(&receipt.goal_id) {
+            Ok(plan) => save(&root, "plan.json", &plan)?,
+            Err(error) if error.code == "not_ready" => {
+                save(&root, "plan-unavailable.json", &error)?
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let mut cursor = 0;
+        let mut page_number = 0;
+        loop {
+            let page = client.trace(
+                &receipt.goal_id,
+                TraceQuery {
+                    run_id: None,
+                    after: cursor,
+                    limit: 1000,
+                },
+            )?;
+            save(&root, &format!("readonly-trace-{page_number}.json"), &page)?;
+            if page.events.is_empty() {
+                break;
+            }
+            cursor = page.next;
+            page_number += 1;
+        }
+        println!(
+            "Exported public Goal/Plan/Trace views without opening a Runtime or starting work."
+        );
+        return Ok(());
+    }
     let resources = env_path("INQUIRY_SOURCE_ROOT")?;
     let rev = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])

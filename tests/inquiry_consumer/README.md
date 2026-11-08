@@ -27,9 +27,10 @@ cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -
 cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- positive /absolute/output/positive
 cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- negative /absolute/output/negative
 cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- document /absolute/output/document
+cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- export /absolute/output/positive
 ```
 
-首次缺锁定依赖时可先 `cargo fetch --locked --manifest-path tests/inquiry_consumer/Cargo.toml`；不升级依赖来掩盖失败。`check`只核验两个注册目录、固定资源与依赖，不启动模型或抓网页。其余命令会调用真实模型；预算、规则和问题在调用前固定，不能失败后放宽。输出目录用于一个任务，失败证据保留，重新实验用新目录。
+首次缺锁定依赖时可先 `cargo fetch --locked --manifest-path tests/inquiry_consumer/Cargo.toml`；不升级依赖来掩盖失败。`check`只核验两个注册目录、固定资源与依赖，不启动模型或抓网页。export只通过GoalClient导出既有任务的公开快照、锁定计划和Trace，不打开Runtime、不恢复工作，也不要求模型登录；其余执行命令会调用真实模型；预算、规则和问题在调用前固定，不能失败后放宽。输出目录用于一个任务，失败证据保留，重新实验用新目录。
 
 - positive：真实Planner生成受检DAG，应用使用用户明确指定的两份SQLite官方URL，经原Inquiry Fetch取得原文/快照，真实Agent分析、写作及独立语义评价。Rust checker调用原Inquiry分析/报告域校验，检查精确引用、分析血缘与引文上限。要求achieved。
 - negative：相同资料无法支持特定Palantir业务数值。原规则不变，要求not_met；必须保留文章和缺口，不自动返工。
@@ -42,5 +43,6 @@ cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -
 开发检查：
 
 ```sh
+cargo test --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml
 cargo clippy --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml --all-targets -- -D warnings
 ```
