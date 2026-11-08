@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.5；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.6；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -647,10 +647,11 @@ state.sqlite v2在同一库新增Goal相关存储，旧executions/commands/artif
 | goals | goal_id、owner、request_key、request_fp、revision、protocol、冻结Spec/Profile、GoalRecord | UNIQUE(owner,request_key)，revision CAS；GoalRecord含有界节点/Run/预算账目 |
 | goal_plans | goal_id + plan_digest，规范化字节及锁定检查 | 每Goal最多1份accepted，提案另列历史 |
 | goal_command_receipts | owner + goal_id + kind + request_key、fingerprint、固定响应/错误、applied_revision | 在线命令与业务变更同事务；同键异参拒绝；无离线命令表 |
-| goal_artifacts | artifact_id→goal/node/worker归属、plan/schema摘要 | 与公共输出接纳同事务，复用blob存储 |
+| goal_artifacts | artifact_id→goal/node/member归属、plan/schema摘要、accepted、producer_run_id | 公共输出accepted=true且与接纳同事务；诊断候选accepted=false，无import权限；复用blob存储 |
 | goal_checks | evaluation_id、请求subject、结果/候选摘要、接纳revision | 不能覆盖旧检查，修订产生新对象 |
+| goal_tool_receipts | receipt_id、goal_id、run_id、完整回执blob摘要 | 仅原受信Run可写入，属于工具执行事实，不授予产物接纳权限 |
 
-不引入每个Worker一套独立Flow表，不把Trace当事件溯源主库。GoalRecord容量由图/Run/产物数量上限约束；工具大内容放受限blob，Trace内容依现有政策，不无限膨胀Goal行。高频预算准入在同一Store提供专用事务操作，不要求每次复制整份旧快照。
+不引入每个Worker一套独立Flow表，不把Trace当事件溯源主库。GoalRecord容量由图/Run/产物数量上限约束；工具大内容放受限blob，Trace内容依现有政策，不无限膨胀Goal行。高频预算准入在同一Store提供专用事务操作，不要求每次复制整份旧快照。工具/字节计量和诊断候选不递增业务revision；状态事务在同一IMMEDIATE事务内合并自读取以来的单调计量增量，防止旧快照覆盖实际消费，也避免工具调用使在线命令持续版本冲突。原始回执正文保存在blob中，Goal记录仅保留有界引用。JSON候选携schema_ref/schema_digest；二进制附件的两者为null，改以冻结attachment_policy_digest标识约束，不能伪称通过JSON Schema或作为JSON import。
 
 | 崩溃窗口 | 重开时的事实与动作 |
 |---|---|

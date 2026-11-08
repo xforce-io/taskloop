@@ -156,6 +156,9 @@ impl ManagedBridge {
 }
 #[async_trait]
 impl ToolBridge for ManagedBridge {
+    fn goal_context(&self) -> Option<GoalRunContext> {
+        self.context.goal.clone()
+    }
     fn budget_hint(&self) -> Option<crate::BudgetHint> {
         self.budget.hint()
     }
@@ -416,7 +419,7 @@ pub(crate) async fn execute_managed(
             message: "executor cannot enforce requested model iteration limit".into(),
         }
     } else {
-        match tokio::time::timeout_at(
+        let native = tokio::time::timeout_at(
             budget.deadline,
             AssertUnwindSafe(async {
                 if observe {
@@ -435,11 +438,25 @@ pub(crate) async fn execute_managed(
                 }
             })
             .catch_unwind(),
-        )
-        .await
-        {
-            Ok(Ok(outcome)) => outcome,
-            failed_execution => {
+        );
+        let returned = tokio::select! {
+            biased;
+            result = native => Some(result),
+            _ = cancel.cancelled() => None,
+        };
+        match returned {
+            Some(Ok(Ok(outcome))) => outcome,
+            None => {
+                internal_stop = true;
+                if confirm_stop(&executor, &run_id).await == StopState::Confirmed {
+                    ExecutionOutcome::Cancelled
+                } else {
+                    ExecutionOutcome::StopUnknown {
+                        message: "cancellation did not establish a native stop".into(),
+                    }
+                }
+            }
+            Some(failed_execution) => {
                 internal_stop = true;
                 if budget.guard_time().is_err() {
                     budget.mark(crate::BudgetLimit::RunTime);

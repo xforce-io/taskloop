@@ -800,3 +800,28 @@ pub(crate) fn prepared_fixture() -> super::admission::PreparedGoal {
         )
         .unwrap()
 }
+
+#[test]
+fn executor_schema_bundle_is_closed_and_preserves_reference_scope() {
+    use super::schema::{SchemaSource, Schemas};
+    let sources=BTreeMap::from([
+        ("root".into(),SchemaSource::new(br##"{"type":"object","required":["value"],"properties":{"value":{"$ref":"leaf#/$defs/value"}},"additionalProperties":false}"##).unwrap()),
+        ("leaf".into(),SchemaSource::new(br#"{"$defs":{"value":{"type":"string","const":"locked"}}}"#).unwrap()),
+    ]);
+    let schemas = Schemas::compile(&sources).unwrap();
+    let bundle = schemas.bundle("root").unwrap();
+    let validator = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .build(&bundle)
+        .unwrap();
+    assert!(validator.is_valid(&json!({"value":"locked"})));
+    assert!(!validator.is_valid(&json!({"value":42})));
+    assert!(!validator.is_valid(&json!({"value":"different"})));
+    let planner = schemas.bundle("_tl.planner-result@1").unwrap();
+    assert!(
+        jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&planner)
+            .is_ok()
+    );
+}

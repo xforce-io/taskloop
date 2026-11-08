@@ -23,7 +23,7 @@ pub use execution::*;
 mod managed;
 mod phase;
 mod runtime;
-pub use runtime::{Runtime, RuntimeOptions, validate};
+pub use runtime::{Runtime, RuntimeOptions, TraceSetup, validate};
 
 mod codex;
 pub use codex::CodexExecutor;

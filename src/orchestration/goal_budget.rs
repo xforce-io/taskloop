@@ -1,7 +1,7 @@
 use super::{GoalLimits, schema::invalid};
 use crate::{Result, RunBudgetPolicy};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GoalBudgetAmount {
@@ -59,6 +59,9 @@ pub struct GoalMeter {
     pub sequence: u64,
     pub active_ms: u64,
     pub native_stop_confirmed: bool,
+    pub tool_calls: u64,
+    pub candidate_bytes: u64,
+    pub calls_rejected: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalBudgetOverrun {
@@ -80,6 +83,7 @@ pub struct GoalBudget {
     pub rejected_calls: u64,
     pub rejected_bytes: u64,
     pub overruns: Vec<GoalBudgetOverrun>,
+    pub incomplete_active_subjects: BTreeSet<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BudgetAdmission {
@@ -205,12 +209,19 @@ impl GoalBudget {
         Ok(BudgetAdmission::Granted)
     }
     pub(crate) fn admit_tool(&mut self, run: &str) -> Result<()> {
+        if !self.meters.contains_key(run) {
+            return Err(invalid("/budget", "original Run meter missing"));
+        }
         let reservation = self
             .reserved
             .get_mut(run)
             .ok_or_else(|| invalid("/budget", "Run has no reservation"))?;
         if reservation.remaining.tool_calls == 0 {
             self.rejected_calls = self.rejected_calls.saturating_add(1);
+            self.meters
+                .get_mut(run)
+                .expect("meter checked")
+                .calls_rejected = self.meters[run].calls_rejected.saturating_add(1);
             return Err(invalid(
                 "/budget/tool_calls",
                 "Goal Run tool allocation exhausted",
@@ -221,10 +232,14 @@ impl GoalBudget {
             .tool_calls
             .checked_add(1)
             .ok_or_else(|| invalid("/budget", "tool counter overflow"))?;
+        self.meters.get_mut(run).expect("meter checked").tool_calls += 1;
         reservation.remaining.tool_calls -= 1;
         Ok(())
     }
     pub(crate) fn admit_bytes(&mut self, run: &str, bytes: u64) -> Result<()> {
+        if !self.meters.contains_key(run) {
+            return Err(invalid("/budget", "original Run meter missing"));
+        }
         let reservation = self
             .reserved
             .get_mut(run)
@@ -241,6 +256,10 @@ impl GoalBudget {
             .candidate_bytes
             .checked_add(bytes)
             .ok_or_else(|| invalid("/budget", "byte counter overflow"))?;
+        self.meters
+            .get_mut(run)
+            .expect("meter checked")
+            .candidate_bytes += bytes;
         reservation.remaining.candidate_bytes -= bytes;
         Ok(())
     }
@@ -254,6 +273,30 @@ impl GoalBudget {
         native_stop_confirmed: bool,
         limits: &GoalLimits,
     ) -> Result<bool> {
+        self.observe_active(
+            run,
+            sequence,
+            cumulative_active_ms,
+            native_stop_confirmed,
+            native_stop_confirmed,
+            limits,
+        )
+    }
+    pub(crate) fn observe_active(
+        &mut self,
+        run: &str,
+        sequence: u64,
+        cumulative_active_ms: u64,
+        native_stop_confirmed: bool,
+        complete: bool,
+        limits: &GoalLimits,
+    ) -> Result<bool> {
+        if complete && !native_stop_confirmed {
+            return Err(invalid(
+                "/budget",
+                "unconfirmed native execution cannot complete settlement",
+            ));
+        }
         let previous = self
             .meters
             .get(run)
@@ -286,18 +329,21 @@ impl GoalBudget {
             .ok_or_else(|| invalid("/budget", "actual active counter overflow"))?;
         if let Some(reservation) = self.reserved.get_mut(run) {
             reservation.remaining.active_ms = reservation.remaining.active_ms.saturating_sub(delta);
-            if cumulative_active_ms > reservation.allocation.active_ms
-                && !self
+            if cumulative_active_ms > reservation.allocation.active_ms {
+                if let Some(overrun) = self
                     .overruns
-                    .iter()
-                    .any(|o| o.subject == run && o.dimension == "run_active_ms")
-            {
-                self.overruns.push(GoalBudgetOverrun {
-                    subject: run.into(),
-                    dimension: "run_active_ms".into(),
-                    allocation: reservation.allocation.active_ms,
-                    actual: cumulative_active_ms,
-                });
+                    .iter_mut()
+                    .find(|o| o.subject == run && o.dimension == "run_active_ms")
+                {
+                    overrun.actual = cumulative_active_ms;
+                } else {
+                    self.overruns.push(GoalBudgetOverrun {
+                        subject: run.into(),
+                        dimension: "run_active_ms".into(),
+                        allocation: reservation.allocation.active_ms,
+                        actual: cumulative_active_ms,
+                    });
+                }
             }
         }
         if self.used.active_ms > limits.max_active_ms {
@@ -322,10 +368,18 @@ impl GoalBudget {
                 sequence,
                 active_ms: cumulative_active_ms,
                 native_stop_confirmed,
+                tool_calls: previous.tool_calls,
+                candidate_bytes: previous.candidate_bytes,
+                calls_rejected: previous.calls_rejected,
             },
         );
         if native_stop_confirmed {
-            self.reserved.remove(run);
+            if complete {
+                self.reserved.remove(run);
+            } else if let Some(reservation) = self.reserved.get_mut(run) {
+                reservation.remaining.tool_calls = 0;
+                reservation.remaining.candidate_bytes = 0;
+            }
         }
         Ok(true)
     }
@@ -485,7 +539,39 @@ pub struct GoalBudgetView {
     pub available: GoalBudgetAmount,
 }
 impl GoalBudget {
+    pub(crate) fn permanent_available(&self, limits: &GoalLimits) -> GoalBudgetAmount {
+        if !self.incomplete_active_subjects.is_empty() {
+            return GoalBudgetAmount::default();
+        }
+        let active = self
+            .protected_final
+            .values()
+            .map(|r| r.active_ms as u128)
+            .sum::<u128>()
+            + self.used.active_ms as u128;
+        let calls = self
+            .protected_final
+            .values()
+            .map(|r| r.tool_calls as u128)
+            .sum::<u128>()
+            + self.used.tool_calls as u128;
+        let bytes = self
+            .protected_final
+            .values()
+            .map(|r| r.candidate_bytes as u128)
+            .sum::<u128>()
+            + self.used.candidate_bytes as u128;
+        GoalBudgetAmount {
+            active_ms: (limits.max_active_ms as u128).saturating_sub(active) as u64,
+            tool_calls: (limits.max_tool_calls as u128).saturating_sub(calls) as u64,
+            candidate_bytes: (limits.max_total_candidate_bytes as u128).saturating_sub(bytes)
+                as u64,
+        }
+    }
     pub(crate) fn available(&self, limits: &GoalLimits) -> GoalBudgetAmount {
+        if !self.incomplete_active_subjects.is_empty() {
+            return GoalBudgetAmount::default();
+        }
         let active = self
             .reserved
             .values()
@@ -517,5 +603,86 @@ impl GoalBudget {
             candidate_bytes: (limits.max_total_candidate_bytes as u128).saturating_sub(bytes)
                 as u64,
         }
+    }
+}
+
+#[cfg(test)]
+mod settlement_tests {
+    use super::*;
+    fn limits() -> GoalLimits {
+        GoalLimits {
+            max_wall_ms: 1000,
+            max_active_ms: 400,
+            max_runs: 2,
+            max_transitions: 5,
+            max_tool_calls: 12,
+            max_total_candidate_bytes: 120,
+            max_concurrent_runs: 4,
+        }
+    }
+    fn amount() -> GoalBudgetAmount {
+        GoalBudgetAmount {
+            active_ms: 100,
+            tool_calls: 3,
+            candidate_bytes: 30,
+        }
+    }
+    #[test]
+    fn ordinary_work_cannot_consume_the_final_run_count() {
+        let mut b = GoalBudget::default();
+        let limits = limits();
+        b.protect_final(BTreeMap::from([("quality".into(), amount())]), &limits)
+            .unwrap();
+        assert_eq!(
+            b.reserve("planner", amount(), None, true, &limits).unwrap(),
+            BudgetAdmission::Granted
+        );
+        b.settle("planner", 1, 1, true, &limits).unwrap();
+        assert_eq!(
+            b.reserve("extra-work", amount(), None, true, &limits)
+                .unwrap(),
+            BudgetAdmission::Exhausted
+        );
+        assert_eq!(
+            b.reserve("quality-run", amount(), Some("quality"), true, &limits)
+                .unwrap(),
+            BudgetAdmission::Granted
+        );
+    }
+    #[test]
+    fn native_stop_releases_tools_and_bytes_but_retains_an_unfinished_check_allocation() {
+        let mut b = GoalBudget::default();
+        let limits = limits();
+        b.reserve("run", amount(), None, true, &limits).unwrap();
+        b.observe_active("run", 1, 20, true, false, &limits)
+            .unwrap();
+        assert!(b.meters["run"].native_stop_confirmed);
+        assert_eq!(
+            b.reserved["run"].remaining,
+            GoalBudgetAmount {
+                active_ms: 80,
+                tool_calls: 0,
+                candidate_bytes: 0
+            }
+        );
+        b.observe_active("run", 2, 30, true, true, &limits).unwrap();
+        assert!(!b.reserved.contains_key("run"));
+        assert_eq!(b.used.active_ms, 30);
+    }
+}
+
+impl GoalBudget {
+    pub(crate) fn observe_rejected_calls(&mut self, run: &str, total: u64) -> crate::Result<()> {
+        let meter = self
+            .meters
+            .get_mut(run)
+            .ok_or_else(|| invalid("/budget", "original Run meter missing"))?;
+        if total > meter.calls_rejected {
+            self.rejected_calls = self
+                .rejected_calls
+                .saturating_add(total - meter.calls_rejected);
+            meter.calls_rejected = total;
+        }
+        Ok(())
     }
 }

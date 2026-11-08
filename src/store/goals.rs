@@ -28,6 +28,10 @@ pub(crate) enum GoalWriteGuard<'a> {
         run_id: &'a str,
         binding: &'a str,
     },
+    NodeResult {
+        node_id: &'a str,
+        nonce: &'a str,
+    },
     Signal {
         wait_id: &'a str,
         nonce: &'a str,
@@ -219,8 +223,8 @@ impl Store {
             }
         }
         for import in &request.spec.imports {
-            let source:Option<(String,String,String)>=tx.query_row("SELECT g.owner,a.sha256,a.schema_digest FROM goal_artifacts a JOIN goals g ON g.id=a.goal_id WHERE a.id=?1",[&import.artifact_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-            if !matches!(source,Some((ref source_owner,ref sha,ref schema)) if source_owner==owner&&sha==&import.sha256&&schema==&import.schema_digest)
+            let source:Option<(String,String,Option<String>)>=tx.query_row("SELECT g.owner,a.sha256,a.schema_digest FROM goal_artifacts a JOIN goals g ON g.id=a.goal_id WHERE a.id=?1 AND a.accepted=1",[&import.artifact_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            if !matches!(source,Some((ref source_owner,ref sha,ref schema)) if source_owner==owner&&sha==&import.sha256&&schema.as_deref()==Some(import.schema_digest.as_str()))
             {
                 return Err(Error::new(
                     "capability_denied",
@@ -331,6 +335,16 @@ impl Store {
         check_guard(&row.record, &guard, observation, trusted)?;
         validate_goal_change(&row.record, record, &guard, effects)?;
         let mut next = record.clone();
+        let current_budget: String = tx.query_row(
+            "SELECT body FROM goal_budget WHERE goal_id=?1",
+            [&row.id],
+            |r| r.get(0),
+        )?;
+        merge_admission_counters(
+            &row.record.budget,
+            &mut next.budget,
+            &serde_json::from_str(&current_budget).map_err(Error::io)?,
+        )?;
         if next.prepared.request_fingerprint != row.record.prepared.request_fingerprint
             || next.prepared.spec_digest != row.record.prepared.spec_digest
             || next.prepared.profile_digest != row.record.prepared.profile_digest
@@ -351,9 +365,19 @@ impl Store {
             guard,
             GoalWriteGuard::Cleanup | GoalWriteGuard::Recovery | GoalWriteGuard::Settlement { .. }
         );
+        let business = effects
+            .business_edges
+            .unwrap_or(if cleanup { 0 } else { edges });
+        if business > edges {
+            return Err(Error::io(
+                "business transition count exceeds committed state edges",
+            ));
+        }
         next.budget
-            .charge_transitions(edges, cleanup, &next.prepared.effective_limits)
+            .charge_transitions(business, false, &next.prepared.effective_limits)
             .map_err(|e| Error::new("budget_exhausted", e.path, e.message))?;
+        next.budget
+            .charge_transitions(edges - business, true, &next.prepared.effective_limits)?;
         sync_goal_leases(
             &tx,
             &row.id,
@@ -389,19 +413,12 @@ impl Store {
             if artifact.goal_id != row.id {
                 return Err(Error::io("cross-Goal artifact in commit"));
             }
-            tx.execute(
-                "INSERT INTO goal_artifacts VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-                params![
-                    artifact.artifact.id,
-                    row.id,
-                    artifact.node_id,
-                    artifact.member_id,
-                    artifact.plan_digest,
-                    artifact.schema_digest,
-                    artifact.artifact.sha256,
-                    serde_json::to_string(artifact)?
-                ],
-            )?;
+            if !artifact.accepted {
+                return Err(Error::io(
+                    "business effects cannot accept a diagnostic candidate",
+                ));
+            }
+            insert_goal_artifact(&tx, artifact)?;
         }
         if let Some(plan) = &effects.plan {
             tx.execute(
@@ -441,6 +458,31 @@ impl Store {
         let end = clock.observe()?;
         let trusted = update_highwater(&tx, end)?;
         check_guard(&row.record, &guard, end, trusted)?;
+        if next.outcome == Some(GoalOutcome::Achieved) && row.record.outcome != next.outcome {
+            let mut facts = next.permissions(end.utc_ms, trusted);
+            facts.status = GoalStatus::Running;
+            if !facts.finish_allowed(&FinishFacts {
+                required_proofs_match_and_pass: effects.finish_proofs_valid,
+                all_nodes_succeeded: next
+                    .nodes
+                    .values()
+                    .all(|n| n.view.status == GoalNodeStatus::Succeeded),
+                all_runs_settled: next
+                    .runs
+                    .values()
+                    .all(|r| r.view.phase == GoalRunPhase::Settled),
+                cleanup_complete: next
+                    .requests
+                    .values()
+                    .all(|r| r.cancelled || r.run_id.is_some()),
+            }) {
+                return Err(Error::new(
+                    "stale_attempt",
+                    "/finish",
+                    "Goal finish permission closed before commit",
+                ));
+            }
+        }
         tx.commit()?;
         Ok(GoalCommit::Saved(GoalRow {
             id: row.id.clone(),
@@ -483,17 +525,19 @@ fn check_guard(
     let facts = before.permissions(observed.utc_ms, trusted);
     let allowed = match guard {
         GoalWriteGuard::Advance => facts.advance_allowed(),
-        GoalWriteGuard::Result { run_id, binding } => before.runs.get(*run_id).is_some_and(|run| {
-            facts.result_allowed(&ResultAuthority {
-                original_source_valid: run.executor_binding == *binding
-                    && run.view.started
-                    && !run.view.stop_unknown,
-                ownership_and_digests_valid: true,
-                epoch: run.view.epoch,
-                predecessor_valid: !run.business_disposed
-                    && run.view.phase != GoalRunPhase::Settled,
+        GoalWriteGuard::Result { run_id, binding } => {
+            facts.result_allowed(&before.result_authority(run_id, binding))
+        }
+        GoalWriteGuard::NodeResult { node_id, nonce } => {
+            before.nodes.get(*node_id).is_some_and(|node| {
+                facts.result_allowed(&ResultAuthority {
+                    original_source_valid: true,
+                    ownership_and_digests_valid: node.checking_nonce.as_deref() == Some(*nonce),
+                    epoch: node.checking_epoch.unwrap_or(0),
+                    predecessor_valid: node.view.status == GoalNodeStatus::Checking,
+                })
             })
-        }),
+        }
         GoalWriteGuard::Signal { wait_id, nonce } => {
             before.waiting.get(*wait_id).is_some_and(|wait| {
                 facts.signal_allowed(&SignalAuthority {
@@ -560,7 +604,7 @@ fn check_guard(
         ))
     }
 }
-fn state_edges(before: &GoalRecord, after: &GoalRecord) -> u64 {
+pub(crate) fn state_edges(before: &GoalRecord, after: &GoalRecord) -> u64 {
     let goal = u64::from(
         (before.status, before.stage, before.outcome) != (after.status, after.stage, after.outcome),
     );
@@ -765,7 +809,8 @@ fn validate_goal_change(
     }
     if after.outcome == Some(GoalOutcome::Achieved)
         && before.outcome != after.outcome
-        && !matches!(guard, GoalWriteGuard::Finish { .. })
+        && (!effects.finish_proofs_valid
+            || matches!(guard, GoalWriteGuard::Cleanup | GoalWriteGuard::Recovery))
     {
         return Err(Error::io("achieved requires finish permission"));
     }
@@ -820,6 +865,8 @@ fn validate_goal_change(
 pub(crate) enum GoalBudgetCharge {
     Tool,
     CandidateBytes(u64),
+    RejectedCalls(u64),
+    RejectedBytes(u64),
 }
 impl Store {
     /// High-frequency admission reads only authority plus the budget row, not a cloned GoalRecord.
@@ -848,11 +895,39 @@ impl Store {
         let mut c = self.connection()?;
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let path = format!("$.runs.\"{run_id}\"");
-        let (revision,raw,budget):(i64,String,String)=tx.query_row("SELECT g.revision,json_object('status',json_extract(g.body,'$.status'),'stage',json_extract(g.body,'$.stage'),'terminal',json_extract(g.body,'$.terminal_intent') IS NOT NULL,'blocked',json_array_length(json_extract(g.body,'$.blockers'))>0,'pause',json_extract(g.body,'$.pause_at_utc_ms'),'epoch',json_extract(g.body,'$.epoch'),'wall',json_extract(g.body,'$.prepared.wall_deadline_utc_ms'),'planning',json_extract(g.body,'$.prepared.planning_deadline_utc_ms'),'run',json_extract(g.body,?2)),b.body FROM goals g JOIN goal_budget b ON b.goal_id=g.id WHERE g.id=?1",params![id,path],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or_else(not_found)?;
+        let (_revision,raw,budget):(i64,String,String)=tx.query_row("SELECT g.revision,json_object('status',json_extract(g.body,'$.status'),'stage',json_extract(g.body,'$.stage'),'terminal',json_extract(g.body,'$.terminal_intent') IS NOT NULL,'blocked',json_array_length(json_extract(g.body,'$.blockers'))>0,'pause',json_extract(g.body,'$.pause_at_utc_ms'),'epoch',json_extract(g.body,'$.epoch'),'wall',json_extract(g.body,'$.prepared.wall_deadline_utc_ms'),'planning',json_extract(g.body,'$.prepared.planning_deadline_utc_ms'),'run',json_extract(g.body,?2),'request',json_extract(g.body,'$.requests.'||json_quote(json_extract(g.body,?2||'.request_id'))),'node',json_extract(g.body,'$.nodes.'||json_quote(json_extract(g.body,?2||'.view.role.node_id'))),'check',json_extract(g.body,'$.checks.'||json_quote(json_extract(g.body,'$.requests.'||json_quote(json_extract(g.body,?2||'.request_id'))||'.check_request_id'))),'planning_attempt',json_extract(g.body,'$.planning_attempts'),'latest_proposal_digest',json_extract(g.body,'$.proposals[#-1].proposal_digest')),b.body FROM goals g JOIN goal_budget b ON b.goal_id=g.id WHERE g.id=?1",params![id,path],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or_else(not_found)?;
         let auth: Value = serde_json::from_str(&raw).map_err(Error::io)?;
         let original: crate::orchestration::GoalRunRecord =
             serde_json::from_value(auth["run"].clone())
                 .map_err(|_| Error::new("stale_attempt", "/run", "original Run unavailable"))?;
+        let request: crate::orchestration::GoalRunRequest =
+            serde_json::from_value(auth["request"].clone()).map_err(|_| {
+                Error::new(
+                    "stale_attempt",
+                    "/request",
+                    "original Run request unavailable",
+                )
+            })?;
+        let node = if auth["node"].is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value::<crate::orchestration::GoalNodeRecord>(
+                    auth["node"].clone(),
+                )
+                .map_err(Error::io)?,
+            )
+        };
+        let issued = if auth["check"].is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value::<crate::orchestration::GoalCheckRecord>(
+                    auth["check"].clone(),
+                )
+                .map_err(Error::io)?,
+            )
+        };
         let check = |observed: ClockObservation, trusted: bool| -> Result<()> {
             let facts = crate::orchestration::control::PermissionFacts {
                 status: serde_json::from_value(auth["status"].clone()).map_err(Error::io)?,
@@ -878,7 +953,15 @@ impl Store {
                     && !original.view.stop_unknown
                     && original.executor_binding == binding
                     && original.view.epoch == epoch,
-                ownership_and_digests_valid: true,
+                ownership_and_digests_valid: crate::orchestration::run_scope_valid(
+                    &original,
+                    &request,
+                    node.as_ref(),
+                    issued.as_ref(),
+                    facts.stage,
+                    auth["planning_attempt"].as_u64().unwrap_or(0),
+                    auth["latest_proposal_digest"].as_str(),
+                ),
                 epoch,
                 predecessor_valid: original.view.phase == GoalRunPhase::Started
                     && !original.business_disposed,
@@ -898,17 +981,15 @@ impl Store {
         let result = match charge {
             GoalBudgetCharge::Tool => budget.admit_tool(run_id),
             GoalBudgetCharge::CandidateBytes(bytes) => budget.admit_bytes(run_id, bytes),
+            GoalBudgetCharge::RejectedCalls(total) => budget.observe_rejected_calls(run_id, total),
+            GoalBudgetCharge::RejectedBytes(bytes) => {
+                budget.rejected_bytes = budget.rejected_bytes.saturating_add(bytes);
+                Ok(())
+            }
         };
-        let next = revision
-            .checked_add(1)
-            .ok_or_else(|| Error::io("Goal revision overflow"))?;
         tx.execute(
             "UPDATE goal_budget SET body=?1 WHERE goal_id=?2",
             params![serde_json::to_string(&budget)?, id],
-        )?;
-        tx.execute(
-            "UPDATE goals SET revision=?1 WHERE id=?2 AND revision=?3",
-            params![next, id, revision],
         )?;
         let observed = clock.observe()?;
         let trusted = update_highwater(&tx, observed)?;
@@ -935,6 +1016,7 @@ mod tests {
         (dir, store, clock, record)
     }
     fn materialize(record: &mut GoalRecord, id: &str) {
+        record.planning_attempts = 1;
         let role = GoalRunRole::Planner { attempt: 1 };
         let request_id = format!("request-{id}");
         let input = "0".repeat(64);
@@ -997,6 +1079,15 @@ mod tests {
                 business_disposed: false,
                 settlement_sequence: 0,
                 active_ms: 0,
+                allocation: GoalBudgetAmount {
+                    active_ms: 100,
+                    tool_calls: 3,
+                    candidate_bytes: 30,
+                },
+                run_allocation_ms: 90,
+                check_allocation_ms: 10,
+                tool_receipt_shas: vec![],
+                execution_outcome: None,
             },
         );
     }
@@ -1135,8 +1226,11 @@ mod tests {
             node_id: Some("review".into()),
             member_id: None,
             plan_digest: None,
-            schema_ref: "report".into(),
-            schema_digest: "0".repeat(64),
+            schema_ref: Some("report".into()),
+            schema_digest: Some("0".repeat(64)),
+            accepted: true,
+            producer_run_id: None,
+            attachment_policy_digest: None,
             producer_kind: "public".into(),
         };
         let effects = GoalCommitEffects {
@@ -1195,6 +1289,7 @@ mod tests {
             .count();
         assert_eq!(accepted, 3);
         let current = store.goal_load("goal-one").unwrap();
+        assert_eq!(current.revision, row.revision);
         assert_eq!(current.record.budget.used.tool_calls, 3);
         assert_eq!(
             current.record.budget.reserved["run-one"]
@@ -1213,6 +1308,27 @@ mod tests {
             .unwrap();
         let row = start(&store, row, "run-one", &clock);
         let mut cancelled = row.record.clone();
+        // Admit after the snapshot: cancellation must merge rather than erase these facts.
+        store
+            .goal_budget_admit(
+                "goal-one",
+                "run-one",
+                1,
+                "original-binding",
+                GoalBudgetCharge::Tool,
+                &clock,
+            )
+            .unwrap();
+        store
+            .goal_budget_admit(
+                "goal-one",
+                "run-one",
+                1,
+                "original-binding",
+                GoalBudgetCharge::CandidateBytes(7),
+                &clock,
+            )
+            .unwrap();
         cancelled.epoch += 1;
         cancelled.status = GoalStatus::Stopping;
         cancelled.terminal_intent = Some(GoalTerminalIntent {
@@ -1223,6 +1339,15 @@ mod tests {
             subject: "goal-one".into(),
         });
         let row = save(&store, &row, &cancelled, GoalWriteGuard::Cleanup, &clock);
+        assert_eq!(row.record.budget.used.tool_calls, 1);
+        assert_eq!(row.record.budget.used.candidate_bytes, 7);
+        assert_eq!(row.record.budget.meters["run-one"].tool_calls, 1);
+        assert_eq!(
+            row.record.budget.reserved["run-one"]
+                .remaining
+                .candidate_bytes,
+            23
+        );
         assert_eq!(
             store
                 .goal_budget_admit(
@@ -1319,5 +1444,214 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+}
+
+/// High-frequency admission changes only monotonic counters and the corresponding remaining
+/// tool/byte reservations. Merge these deltas under the state transaction instead of invalidating
+/// the public business revision for every call. Other budget facts remain protected by Goal CAS.
+fn merge_admission_counters(
+    before: &GoalBudget,
+    after: &mut GoalBudget,
+    current: &GoalBudget,
+) -> Result<()> {
+    fn delta(old: u64, current: u64) -> Result<u64> {
+        current
+            .checked_sub(old)
+            .ok_or_else(|| Error::io("admission counter moved backwards"))
+    }
+    fn add(value: &mut u64, amount: u64) -> Result<()> {
+        *value = value
+            .checked_add(amount)
+            .ok_or_else(|| Error::io("admission counter overflow"))?;
+        Ok(())
+    }
+    add(
+        &mut after.used.tool_calls,
+        delta(before.used.tool_calls, current.used.tool_calls)?,
+    )?;
+    add(
+        &mut after.used.candidate_bytes,
+        delta(before.used.candidate_bytes, current.used.candidate_bytes)?,
+    )?;
+    add(
+        &mut after.rejected_calls,
+        delta(before.rejected_calls, current.rejected_calls)?,
+    )?;
+    add(
+        &mut after.rejected_bytes,
+        delta(before.rejected_bytes, current.rejected_bytes)?,
+    )?;
+    for (id, old) in &before.reserved {
+        let Some(now) = current.reserved.get(id) else {
+            return Err(Error::io(
+                "reservation changed without a Goal state revision",
+            ));
+        };
+        if let Some(next) = after.reserved.get_mut(id) {
+            next.remaining.tool_calls = next
+                .remaining
+                .tool_calls
+                .saturating_sub(delta(now.remaining.tool_calls, old.remaining.tool_calls)?);
+            next.remaining.candidate_bytes = next.remaining.candidate_bytes.saturating_sub(delta(
+                now.remaining.candidate_bytes,
+                old.remaining.candidate_bytes,
+            )?);
+        }
+    }
+    for (id, old) in &before.meters {
+        let Some(now) = current.meters.get(id) else {
+            return Err(Error::io("original Run meter disappeared"));
+        };
+        let Some(next) = after.meters.get_mut(id) else {
+            return Err(Error::io("Run meter cannot be deleted"));
+        };
+        add(&mut next.tool_calls, delta(old.tool_calls, now.tool_calls)?)?;
+        add(
+            &mut next.candidate_bytes,
+            delta(old.candidate_bytes, now.candidate_bytes)?,
+        )?;
+        add(
+            &mut next.calls_rejected,
+            delta(old.calls_rejected, now.calls_rejected)?,
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_goal_artifact(conn: &Connection, artifact: &GoalArtifact) -> Result<()> {
+    conn.execute(
+        "INSERT INTO goal_artifacts VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![
+            artifact.artifact.id,
+            artifact.goal_id,
+            artifact.node_id,
+            artifact.member_id,
+            artifact.plan_digest,
+            artifact.schema_digest,
+            artifact.artifact.sha256,
+            serde_json::to_string(artifact)?,
+            artifact.accepted,
+            artifact.producer_run_id
+        ],
+    )?;
+    Ok(())
+}
+impl Store {
+    pub(crate) fn goal_save_tool_receipt(
+        &self,
+        goal_id: &str,
+        receipt: &ArtifactReceipt,
+        epoch: u64,
+        binding: &str,
+    ) -> Result<String> {
+        let bytes = serde_json::to_vec(receipt)?;
+        let sha = self.write_blob(&bytes)?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let path = format!("$.runs.{}", serde_json::to_string(&receipt.run_id)?);
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT json_extract(body,?2) FROM goals WHERE id=?1",
+                params![goal_id, path],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let run: crate::orchestration::GoalRunRecord =
+            serde_json::from_str(&raw.ok_or_else(not_found)?).map_err(Error::io)?;
+        if receipt.execution_id != goal_id
+            || !run.view.started
+            || run.view.epoch != epoch
+            || run.executor_binding != binding
+        {
+            return Err(Error::new(
+                "stale_attempt",
+                "/run",
+                "untrusted tool receipt producer",
+            ));
+        }
+        tx.execute(
+            "INSERT INTO goal_tool_receipts VALUES(?1,?2,?3,?4)",
+            params![receipt.id, goal_id, receipt.run_id, sha],
+        )?;
+        tx.commit()?;
+        Ok(receipt.id.clone())
+    }
+    pub(crate) fn goal_tool_receipt_shas(&self, goal: &str, run: &str) -> Result<Vec<String>> {
+        let c = self.connection()?;
+        let mut statement = c.prepare(
+            "SELECT sha256 FROM goal_tool_receipts WHERE goal_id=?1 AND run_id=?2 ORDER BY rowid",
+        )?;
+        Ok(statement
+            .query_map(params![goal, run], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+    pub(crate) fn goal_artifacts(&self, id: &str, owner: &str) -> Result<Vec<GoalArtifact>> {
+        let c = self.connection()?;
+        let mut st=c.prepare("SELECT a.metadata FROM goal_artifacts a JOIN goals g ON g.id=a.goal_id WHERE a.goal_id=?1 AND g.owner=?2 ORDER BY a.rowid")?;
+        let records = st
+            .query_map(params![id, owner], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        records
+            .into_iter()
+            .map(|r| serde_json::from_str(&r).map_err(Error::io))
+            .collect()
+    }
+    pub(crate) fn goal_run_candidates(
+        &self,
+        id: &str,
+        run: &str,
+    ) -> Result<BTreeMap<String, GoalArtifact>> {
+        let c = self.connection()?;
+        let mut st=c.prepare("SELECT metadata FROM goal_artifacts WHERE goal_id=?1 AND producer_run_id=?2 AND accepted=0 ORDER BY rowid")?;
+        let records = st
+            .query_map(params![id, run], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut latest = BTreeMap::new();
+        for raw in records {
+            let artifact: GoalArtifact = serde_json::from_str(&raw).map_err(Error::io)?;
+            latest.insert(artifact.artifact.slot.clone(), artifact);
+        }
+        Ok(latest)
+    }
+    /// Diagnostic writes never accept output, modify the public revision, or grant import authority.
+    pub(crate) fn goal_save_candidate(
+        &self,
+        id: &str,
+        run_id: &str,
+        epoch: u64,
+        binding: &str,
+        artifact: &GoalArtifact,
+    ) -> Result<()> {
+        let mut c = self.connection()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if artifact.accepted
+            || artifact.goal_id != id
+            || artifact.producer_run_id.as_deref() != Some(run_id)
+        {
+            return Err(Error::io("candidate identity mismatch"));
+        }
+        let path = format!("$.runs.{}", serde_json::to_string(run_id)?);
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT json_extract(body,?2) FROM goals WHERE id=?1",
+                params![id, path],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let run: crate::orchestration::GoalRunRecord =
+            serde_json::from_str(&raw.ok_or_else(not_found)?).map_err(Error::io)?;
+        if run.view.epoch != epoch || run.executor_binding != binding || !run.view.started {
+            return Err(Error::new(
+                "stale_attempt",
+                "/run",
+                "original candidate producer is not trusted",
+            ));
+        }
+        insert_goal_artifact(&tx, artifact)?;
+        tx.commit()?;
+        Ok(())
     }
 }

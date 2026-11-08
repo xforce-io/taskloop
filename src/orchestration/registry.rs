@@ -289,11 +289,37 @@ impl OrchestrationRegistry {
         if bytes > 16 * 1024 * 1024 {
             return Err(invalid("/resources", "resources exceed 16 MiB"));
         }
+        if bindings
+            .gates
+            .keys()
+            .any(|id| id.starts_with("_tl.") || id.starts_with("taskloop:"))
+            || bindings.tools.keys().any(|id| builtin_tool(id))
+        {
+            return Err(invalid(
+                "/bindings",
+                "Core gate/tool bindings cannot be overridden",
+            ));
+        }
         let schemas = Arc::new(Schemas::compile(&self.schemas)?);
         for (id, entry) in &self.entries {
             schemas.contract("dag-entry", &serde_json::to_value(&entry.contract)?)?;
             let p = &entry.budget;
             p.validate(u64::MAX, crate::store::MAX_BLOB_BYTES)?;
+            if [
+                p.max_run_ms,
+                p.max_check_ms,
+                Some(p.max_tool_calls),
+                p.max_model_iterations,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|n| n > i64::MAX as u64)
+            {
+                return Err(invalid(
+                    "/entry_budgets",
+                    "Goal budget integers must fit SQLite counters",
+                ));
+            }
             if p.max_run_ms.is_none() || p.max_check_ms.is_none() {
                 return Err(invalid(
                     &format!("/entries/{id}/budget"),
@@ -310,10 +336,14 @@ impl OrchestrationRegistry {
                     "Goal requires managed execution and isolation",
                 ));
             }
-            if p.max_model_iterations.is_some()
-                && executor.budget_limits().model_iterations
+            if p.max_model_iterations.is_some_and(|n| {
+                executor.budget_limits().model_iterations
                     != crate::ModelIterationSupport::RuntimeValidated
-            {
+                    || executor
+                        .budget_limits()
+                        .max_model_iterations
+                        .is_some_and(|maximum| n > maximum)
+            }) {
                 return Err(invalid(
                     "/executor",
                     "model iteration constraint unsupported",
@@ -521,6 +551,12 @@ fn validate_node(
             .ok_or_else(|| invalid("/members/entry_ref", "unknown member entry"))?;
         match member {
             NodeMember::NodePorts { input_bindings, .. } => {
+                if schemas.same(&entry.contract.input_schema, "_tl.check-input@1")? {
+                    return Err(invalid(
+                        "/members/input_mode",
+                        "Core CheckInput requires Runtime-issued check_request mode",
+                    ));
+                }
                 let (target, target_base) = schemas.selected(&entry.contract.input_schema, "")?;
                 fixed_object(schemas, &entry.contract.input_schema)?;
                 let props = target["properties"].as_object().expect("fixed object");

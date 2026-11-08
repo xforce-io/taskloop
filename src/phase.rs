@@ -304,6 +304,7 @@ async fn run_checked(
         accepted: artifacts.clone(),
         signal_facts: record.signals.clone(),
         cancellation: cancel.clone(),
+        goal: None,
     };
     let explicit = inner.options.entry_budgets.contains_key(&entry);
     let policy = inner

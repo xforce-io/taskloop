@@ -3,7 +3,12 @@ mod admission;
 mod check;
 mod clock;
 pub(crate) mod control;
+mod coordinator;
+mod core;
+mod driver;
 pub(crate) mod goal_budget;
+mod lifecycle;
+mod nodes;
 mod plan;
 mod record;
 mod registry;
@@ -35,9 +40,14 @@ pub(crate) mod tests;
 
 pub(crate) use record::{
     GoalCheckRecord, GoalCommitEffects, GoalNodeRecord, GoalRecord, GoalRunRecord, GoalRunRequest,
-    ProposalRecord,
 };
 
 pub(crate) use clock::{ClockObservation, GoalClock};
 
 pub(crate) use registry::FrozenRegistry;
+pub(crate) use registry::bindings_digest;
+
+pub(crate) use core::GoalCore;
+pub use core::Goals;
+
+pub(crate) use record::run_scope_valid;

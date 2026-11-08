@@ -19,9 +19,13 @@ CREATE TABLE goal_budget(goal_id TEXT PRIMARY KEY,body TEXT NOT NULL);
 CREATE TABLE goal_plans(goal_id TEXT NOT NULL,digest TEXT NOT NULL,bytes BLOB NOT NULL,accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),metadata TEXT NOT NULL,PRIMARY KEY(goal_id,digest));
 CREATE UNIQUE INDEX one_locked_goal_plan ON goal_plans(goal_id) WHERE accepted=1;
 CREATE TABLE goal_command_receipts(owner TEXT NOT NULL,goal_id TEXT NOT NULL,kind TEXT NOT NULL,request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL,applied_revision INTEGER NOT NULL,PRIMARY KEY(owner,goal_id,kind,request_key));
-CREATE TABLE goal_artifacts(id TEXT PRIMARY KEY,goal_id TEXT NOT NULL,node_id TEXT,member_id TEXT,plan_digest TEXT,schema_digest TEXT NOT NULL,sha256 TEXT NOT NULL,metadata TEXT NOT NULL);
+CREATE TABLE goal_artifacts(id TEXT PRIMARY KEY,goal_id TEXT NOT NULL,node_id TEXT,member_id TEXT,plan_digest TEXT,schema_digest TEXT,sha256 TEXT NOT NULL,metadata TEXT NOT NULL,accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),producer_run_id TEXT);
+CREATE INDEX candidates_by_run ON goal_artifacts(goal_id,producer_run_id,accepted);
+CREATE UNIQUE INDEX one_public_goal_output ON goal_artifacts(goal_id,node_id,json_extract(metadata,'$.artifact.slot')) WHERE accepted=1 AND node_id IS NOT NULL AND member_id IS NULL;
 CREATE TABLE goal_checks(evaluation_id TEXT PRIMARY KEY,goal_id TEXT NOT NULL,request TEXT NOT NULL,candidate_digest TEXT,receipt TEXT,accepted_revision INTEGER);
 CREATE INDEX checks_by_goal ON goal_checks(goal_id);
+CREATE TABLE goal_tool_receipts(id TEXT PRIMARY KEY,goal_id TEXT NOT NULL,run_id TEXT NOT NULL,sha256 TEXT NOT NULL);
+CREATE INDEX tool_receipts_by_run ON goal_tool_receipts(goal_id,run_id);
 INSERT OR IGNORE INTO meta(key,value) VALUES('last_observed_utc_ms',0);";
 const BASE_COLUMNS: &[(&str, &[&str])] = &[
     (
@@ -51,6 +55,7 @@ const BASE_COLUMNS: &[(&str, &[&str])] = &[
     ("meta", &["key", "value"]),
 ];
 const GOAL_COLUMNS: &[(&str, &[&str])] = &[
+    ("goal_tool_receipts", &["id", "goal_id", "run_id", "sha256"]),
     (
         "run_leases",
         &[
@@ -108,6 +113,8 @@ const GOAL_COLUMNS: &[(&str, &[&str])] = &[
             "schema_digest",
             "sha256",
             "metadata",
+            "accepted",
+            "producer_run_id",
         ],
     ),
     (

@@ -80,8 +80,11 @@ pub struct GoalArtifact {
     pub node_id: Option<String>,
     pub member_id: Option<String>,
     pub plan_digest: Option<String>,
-    pub schema_ref: String,
-    pub schema_digest: String,
+    pub schema_ref: Option<String>,
+    pub schema_digest: Option<String>,
+    pub attachment_policy_digest: Option<String>,
+    pub accepted: bool,
+    pub producer_run_id: Option<String>,
     pub producer_kind: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +186,7 @@ pub struct GoalReceipt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalSignalRequest {
+    pub protocol_version: u32,
     pub wait_id: String,
     pub nonce: String,
     pub payload: Value,
@@ -205,6 +209,8 @@ pub(crate) struct GoalNodeRecord {
     pub input_artifact_ids: Vec<String>,
     pub check_request_id: Option<String>,
     pub checking_started_at_ms: Option<u64>,
+    pub checking_nonce: Option<String>,
+    pub checking_epoch: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GoalRunRequest {
@@ -233,6 +239,12 @@ pub(crate) struct GoalRunRecord {
     pub business_disposed: bool,
     pub settlement_sequence: u64,
     pub active_ms: u64,
+    pub allocation: GoalBudgetAmount,
+    pub run_allocation_ms: u64,
+    pub check_allocation_ms: u64,
+    pub tool_receipt_shas: Vec<String>,
+    #[serde(default)]
+    pub execution_outcome: Option<crate::ExecutionOutcome>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct GoalCheckRecord {
@@ -247,6 +259,7 @@ pub(crate) struct GoalCheckRecord {
 pub(crate) struct ProposalRecord {
     pub attempt: u64,
     pub candidate_sha: String,
+    pub validated_proposal_sha: Option<String>,
     pub proposal_digest: Option<String>,
     pub failure: Option<PlanValidationFailure>,
     pub check_ids: Vec<String>,
@@ -404,6 +417,8 @@ pub(crate) struct GoalCommitEffects {
     pub artifacts: Vec<GoalArtifact>,
     pub checks: Vec<(IssuedCheck, Option<EvaluationReceipt>)>,
     pub plan: Option<LockedPlan>,
+    pub business_edges: Option<u64>,
+    pub finish_proofs_valid: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,4 +427,118 @@ pub struct GoalStopSummary {
     pub terminal_at_utc_ms: Option<u64>,
     pub pending_runs: Vec<String>,
     pub stop_unknown_runs: Vec<String>,
+}
+
+impl GoalRunRole {
+    pub(crate) fn order_key(&self) -> (u8, String, String) {
+        match self {
+            Self::Planner { attempt } => (0, format!("{attempt:03}"), String::new()),
+            Self::PlanCheck { check_id, .. } => (1, check_id.clone(), String::new()),
+            Self::NodeMember { node_id, member_id } => (2, node_id.clone(), member_id.clone()),
+            Self::FinalCheck { check_id } => (3, check_id.clone(), String::new()),
+        }
+    }
+}
+
+pub(crate) fn run_scope_valid(
+    run: &GoalRunRecord,
+    request: &GoalRunRequest,
+    node: Option<&GoalNodeRecord>,
+    check: Option<&GoalCheckRecord>,
+    stage: GoalStage,
+    planning_attempt: u64,
+    latest_proposal_digest: Option<&str>,
+) -> bool {
+    if request.cancelled
+        || request.run_id.as_deref() != Some(&run.view.run_id)
+        || request.input_sha != run.input_sha
+        || request.input_digest != run.input_sha
+        || request.epoch != run.view.epoch
+        || request.entry_ref != run.view.entry_ref
+        || request.role != run.view.role
+    {
+        return false;
+    }
+    match &run.view.role {
+        GoalRunRole::Planner { attempt } => {
+            stage == GoalStage::Planning && *attempt == planning_attempt
+        }
+        GoalRunRole::PlanCheck {
+            check_id,
+            proposal_digest,
+        } => {
+            stage == GoalStage::PlanChecking
+                && latest_proposal_digest == Some(proposal_digest.as_str())
+                && check.is_some_and(|c| {
+                    c.view.check_id == *check_id
+                        && c.view.phase == CheckInputPhase::Plan
+                        && c.view.status == "issued"
+                        && c.producer_run_id.as_deref() == Some(&run.view.run_id)
+                        && c.input_sha == run.input_sha
+                })
+        }
+        GoalRunRole::NodeMember { member_id, .. } => {
+            stage == GoalStage::Executing
+                && node.is_some_and(|n| {
+                    matches!(
+                        n.view.status,
+                        GoalNodeStatus::Running | GoalNodeStatus::Checking
+                    ) && n
+                        .view
+                        .members
+                        .get(member_id)
+                        .is_some_and(|m| m.run_id.as_deref() == Some(&run.view.run_id))
+                })
+        }
+        GoalRunRole::FinalCheck { check_id } => {
+            stage == GoalStage::GoalChecking
+                && check.is_some_and(|c| {
+                    c.view.check_id == *check_id
+                        && c.view.phase == CheckInputPhase::GoalFinal
+                        && c.view.status == "issued"
+                        && c.producer_run_id.as_deref() == Some(&run.view.run_id)
+                        && c.input_sha == run.input_sha
+                })
+        }
+    }
+}
+impl GoalRecord {
+    pub(crate) fn result_authority(&self, id: &str, binding: &str) -> control::ResultAuthority {
+        let Some(run) = self.runs.get(id) else {
+            return control::ResultAuthority {
+                original_source_valid: false,
+                ownership_and_digests_valid: false,
+                epoch: 0,
+                predecessor_valid: false,
+            };
+        };
+        let node = match &run.view.role {
+            GoalRunRole::NodeMember { node_id, .. } => self.nodes.get(node_id),
+            _ => None,
+        };
+        let request = self.requests.get(&run.request_id);
+        let check = request
+            .and_then(|r| r.check_request_id.as_ref())
+            .and_then(|id| self.checks.get(id));
+        control::ResultAuthority {
+            original_source_valid: run.executor_binding == binding
+                && run.view.started
+                && !run.view.stop_unknown,
+            ownership_and_digests_valid: request.is_some_and(|request| {
+                run_scope_valid(
+                    run,
+                    request,
+                    node,
+                    check,
+                    self.stage,
+                    self.planning_attempts,
+                    self.proposals
+                        .last()
+                        .and_then(|p| p.proposal_digest.as_deref()),
+                )
+            }),
+            epoch: run.view.epoch,
+            predecessor_valid: !run.business_disposed && run.view.phase != GoalRunPhase::Settled,
+        }
+    }
 }

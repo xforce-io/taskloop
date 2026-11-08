@@ -164,6 +164,29 @@ impl Schemas {
             "/value",
         )
     }
+    /// A closed schema document for an executor's prompt/validator, preserving each resource's base URI.
+    /// Runtime acceptance continues to use the original locked bytes and validators.
+    pub fn bundle(&self, name: &str) -> Result<Value> {
+        let mut pending = std::collections::BTreeSet::from([name.to_owned()]);
+        let mut definitions = serde_json::Map::new();
+        while let Some(id) = pending.pop_first() {
+            let key = digest(id.as_bytes());
+            if definitions.contains_key(&key) {
+                continue;
+            }
+            let source = self.source(&id)?;
+            let mut schema = rewrite_refs(&source.value, &self.sources)?;
+            if !schema.is_object() {
+                schema = serde_json::json!({"allOf":[schema]});
+            }
+            schema["$id"] = uri(&id).into();
+            definitions.insert(key, schema);
+            pending.extend(self.references(&id)?);
+        }
+        Ok(
+            serde_json::json!({"$schema":"https://json-schema.org/draft/2020-12/schema","$ref":uri(name),"$defs":definitions}),
+        )
+    }
     pub fn source(&self, name: &str) -> Result<&SchemaSource> {
         self.sources
             .get(name)
@@ -334,7 +357,20 @@ fn rewrite_refs(value: &Value, sources: &BTreeMap<String, SchemaSource>) -> Resu
             .and_then(Value::as_object)
             .is_some_and(|m| {
                 m.iter().any(|(k, v)| {
-                    v == true && !k.starts_with("https://json-schema.org/draft/2020-12/vocab/")
+                    v == true
+                        && ![
+                            "core",
+                            "applicator",
+                            "unevaluated",
+                            "validation",
+                            "meta-data",
+                            "format-annotation",
+                            "content",
+                        ]
+                        .iter()
+                        .any(|known| {
+                            k == &format!("https://json-schema.org/draft/2020-12/vocab/{known}")
+                        })
                 })
             })
         {

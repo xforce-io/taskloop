@@ -207,7 +207,7 @@ impl BudgetState {
             used: 0,
             remaining: call_limit,
             read_remaining: call_limit.saturating_sub(policy.submission_reserve),
-            submission_reserve: policy.submission_reserve,
+            submission_reserve: policy.submission_reserve.min(call_limit),
             remaining_ms: effective,
             mode: "explore".into(),
         };
@@ -278,7 +278,7 @@ impl BudgetState {
             used: d.calls_used,
             remaining: left,
             read_remaining: reads,
-            submission_reserve: d.policy.submission_reserve,
+            submission_reserve: d.policy.submission_reserve.min(d.effective_tool_calls),
             remaining_ms: remaining,
             mode: mode.into(),
         };
@@ -323,9 +323,6 @@ impl BudgetState {
             ));
         }
         Ok(())
-    }
-    pub fn admit_tool(&self, id: &str) -> Result<()> {
-        self.admit_tool_with(id, || Ok(()))
     }
     pub(crate) fn admit_tool_with(
         &self,
@@ -372,9 +369,6 @@ impl BudgetState {
         d.calls_used += 1;
         self.update(&mut d);
         Ok(())
-    }
-    pub fn admit_bytes(&self, bytes: u64, retained: u64) -> Result<()> {
-        self.admit_bytes_with(bytes, retained, || Ok(()))
     }
     pub(crate) fn admit_bytes_with(
         &self,

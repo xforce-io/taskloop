@@ -65,8 +65,39 @@ pub struct ToolContext {
     pub accepted: Vec<ArtifactData>,
     pub signal_facts: Vec<SignalFact>,
     pub(crate) cancellation: CancellationToken,
+    pub(crate) goal: Option<GoalRunContext>,
+}
+/// Runtime-assigned attribution. These values identify work; they do not grant access.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalRunContext {
+    pub goal_id: String,
+    pub plan_digest: Option<String>,
+    pub role: crate::GoalRunRole,
+    pub evaluation_id: Option<String>,
+    pub epoch: u64,
+}
+impl GoalRunContext {
+    pub(crate) fn state_id(&self) -> String {
+        match &self.role {
+            crate::GoalRunRole::Planner { .. } => "_tl.planner".into(),
+            crate::GoalRunRole::NodeMember { node_id, member_id } => {
+                format!("_tl.node.{node_id}.member.{member_id}")
+            }
+            crate::GoalRunRole::PlanCheck { check_id, .. }
+            | crate::GoalRunRole::FinalCheck { check_id } => format!("_tl.check.{check_id}"),
+        }
+    }
+    pub(crate) fn visit(&self) -> u64 {
+        match self.role {
+            crate::GoalRunRole::Planner { attempt } => attempt,
+            _ => 1,
+        }
+    }
 }
 impl ToolContext {
+    pub fn goal(&self) -> Option<&GoalRunContext> {
+        self.goal.as_ref()
+    }
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
@@ -188,6 +219,9 @@ impl ExecutorCapabilities {
 #[async_trait]
 pub trait ToolBridge: Send + Sync {
     fn specs(&self) -> Vec<ToolSpec>;
+    fn goal_context(&self) -> Option<GoalRunContext> {
+        None
+    }
     fn budget_hint(&self) -> Option<crate::BudgetHint> {
         None
     }

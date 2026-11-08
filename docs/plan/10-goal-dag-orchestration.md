@@ -42,3 +42,12 @@
 - 常规完整套件167通过、5项原有环境用例ignored；原始日志：`target/verify-taskloop/10-dev/foundation-tests.log`。此处仍不是Goal执行E2E或独立review结论。
 - L2 v0.10.5补全Planner固定planning_feedback输入；资源示例及字节摘要同步，既有离线语义例8项反例仍通过。EvaluationReceipt仅复制目标身份摘要，目标正文保留在有界CheckInput/内容寻址blob中。
 - Goal记录/检查输入/预算类型已定义，但Goal协调器、共享Dispatcher完整接线和外部候选解码前限额尚未完成；CLI/两个真实业务/真实Agent/最终review与release继续保持待办。
+
+
+## 实现检查点三（2026-11-08）
+
+- 已接公开 `Runtime::open_orchestrated`/`Runtime::goals`，共享Dispatcher同时管理旧Flow与Goal，原生执行复用Managed Run；Goal启动前原子登记身份、槽位和停止Token。
+- 已接规划有界修正/锁定、节点输入/成员请求/固定投影、最终检查、规划补充输入，以及Goal侧期限/恢复/停止对账的初版。诊断候选与公共接纳分开；热计量不递增业务revision，状态CAS合并并发实际消费。
+- 进程内受控Executor已跑规划→业务节点→最终检查，区分achieved/not_met/error；公开Runtime自动推进正例及规划等待→pause拒绝signal→resume→signal幂等正例通过。此处不是实际Agent或CLI验收证据。
+- 替换Dispatcher后的完整常规回归176通过、5项既有环境用例ignored（`shared-dispatcher-regressions.log`）；之后补充输入等最新改动仍在聚焦验证，不把旧完整回归移挂为最新候选证据。
+- L2 v0.10.6补全业务revision与计量/诊断分离及附件Schema元数据；原18项验收保持不变。恢复/停止、并行/检查点/两业务等负路径仍需补全和取证；外部候选解码前限额、Goal Trace归属、CLI/客户端、真实业务与Agent、功能地图、独立review和release尚未完成。
