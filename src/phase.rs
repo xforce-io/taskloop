@@ -365,6 +365,7 @@ async fn run_checked(
         budget: budget.clone(),
         storage_failure: Mutex::new(None),
         trace: trace.clone(),
+        json_candidate_max: None,
     });
     let time_left = budget.snapshot().hint.remaining_ms;
     let output_schemas = contract

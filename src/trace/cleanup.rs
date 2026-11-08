@@ -58,6 +58,24 @@ impl TraceStore {
     }
 }
 impl RunTrace {
+    pub(crate) fn reserve_coordinator(&self) {
+        let result = (|| -> Result<()> {
+            let conn = self.store.conn.lock().map_err(Error::io)?;
+            self.store
+                .admit(&conn, &self.execution, &self.run, self.observed_ms)?;
+            if self.store.policy.is_some() {
+                conn.execute(
+                    "INSERT OR IGNORE INTO trace_cleanup VALUES(?1,?2,'','','not_applicable',0,0)",
+                    params![self.execution, self.run],
+                )?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.store
+                .fault(&self.execution, &self.run, "admission_storage");
+        }
+    }
     pub fn reserve_executor(&self, name: &str, identity: &Value) -> bool {
         let reserved = (|| -> Result<()> {
             let conn = self.store.conn.lock().map_err(Error::io)?;
@@ -103,21 +121,32 @@ pub(crate) async fn cleanup_loop(inner: Arc<Inner>) {
         match trace.cleanup_due() {
             Ok(Some(job)) => {
                 let operation = async {
-                    let Ok(row) = inner.store.load(&job.execution) else {
-                        return "binding_unavailable";
-                    };
-                    let Ok(record) = crate::runtime::decode(&row) else {
-                        return "binding_unavailable";
-                    };
-                    // Expiry is not retirement: an admitted/starting invocation can
-                    // still create a source after its observation deadline passes.
-                    let active = record.active.as_ref().is_some_and(|r| r.id == job.run);
-                    let settled = record.attempts.iter().any(|a| {
-                        a.run_id == job.run
-                            && !matches!(a.outcome, crate::ExecutionOutcome::StopUnknown { .. })
-                    });
-                    if active && !settled || record.stop_unknown && record.active.is_none() {
-                        return "deferred";
+                    if let Ok(goal) = inner.store.goal_load(&job.execution) {
+                        let Some(run) = goal.record.runs.get(&job.run) else {
+                            return "binding_unavailable";
+                        };
+                        if !run.view.native_stop_confirmed
+                            || !run.view.started && run.view.phase != crate::GoalRunPhase::Settled
+                        {
+                            return "deferred";
+                        }
+                    } else {
+                        let Ok(row) = inner.store.load(&job.execution) else {
+                            return "binding_unavailable";
+                        };
+                        let Ok(record) = crate::runtime::decode(&row) else {
+                            return "binding_unavailable";
+                        };
+                        // Expiry is not retirement: an admitted/starting invocation can
+                        // still create a source after its observation deadline passes.
+                        let active = record.active.as_ref().is_some_and(|r| r.id == job.run);
+                        let settled = record.attempts.iter().any(|a| {
+                            a.run_id == job.run
+                                && !matches!(a.outcome, crate::ExecutionOutcome::StopUnknown { .. })
+                        });
+                        if active && !settled || record.stop_unknown && record.active.is_none() {
+                            return "deferred";
+                        }
                     }
                     let Some(executor) = inner.bindings.executors.get(&job.executor) else {
                         return "binding_unavailable";

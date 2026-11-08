@@ -20,6 +20,9 @@ pub(crate) trait ManagedRunOwner: Send + Sync {
     fn admit_candidate_bytes(&self, _bytes: u64) -> Result<()> {
         Ok(())
     }
+    fn reject_candidate_bytes(&self, _bytes: u64) -> Result<()> {
+        Ok(())
+    }
     fn allow_cancelled_submission(&self) -> bool {
         false
     }
@@ -54,6 +57,7 @@ pub(crate) struct ManagedBridge {
     pub budget: Arc<crate::budget::BudgetState>,
     pub storage_failure: Mutex<Option<Error>>,
     pub trace: Option<Arc<crate::trace::RunTrace>>,
+    pub json_candidate_max: Option<usize>,
 }
 impl ManagedBridge {
     fn write(&self, candidate: Candidate) -> Result<()> {
@@ -74,6 +78,19 @@ impl ManagedBridge {
             return Err(Error::new("artifact_invalid", "/slot", "invalid slot name"));
         }
         if let Some(output) = self.entry.outputs.get(&candidate.slot) {
+            if self
+                .json_candidate_limit()
+                .is_some_and(|max| candidate.bytes.len() > max)
+            {
+                self.budget.mark(BudgetLimit::CandidateBytes);
+                self.owner
+                    .reject_candidate_bytes(candidate.bytes.len() as u64)?;
+                return Err(Error::new(
+                    "limit_reached",
+                    "/candidate",
+                    "JSON candidate exceeds the admitted limit",
+                ));
+            }
             self.resources
                 .validate_value(&output.schema, &candidate.value()?)?;
         } else if !self
@@ -156,6 +173,48 @@ impl ManagedBridge {
 }
 #[async_trait]
 impl ToolBridge for ManagedBridge {
+    fn json_candidate_limit(&self) -> Option<usize> {
+        self.context.goal.as_ref().map(|_| {
+            let snapshot = self.budget.snapshot();
+            snapshot
+                .effective_candidate_bytes
+                .saturating_sub(snapshot.candidate_bytes_used)
+                .min(self.json_candidate_max.unwrap_or(4_194_304) as u64)
+                .min(4_194_304) as usize
+        })
+    }
+    async fn reject_json_candidate(&self, bytes: u64, metadata: ToolCallMetadata) -> Result<Value> {
+        self.active()?;
+        if !self.entry.tools.iter().any(|t| t == "artifact.write") {
+            return Err(Error::new(
+                "capability_denied",
+                "/tool",
+                "artifact.write is not granted",
+            ));
+        }
+        let admitted = self
+            .budget
+            .admit_tool_with("artifact.write", || self.owner.admit_tool("artifact.write"));
+        self.persist_budget()?;
+        admitted?;
+        self.budget.mark(BudgetLimit::CandidateBytes);
+        self.owner.reject_candidate_bytes(bytes)?;
+        if let Some(trace) = &self.trace {
+            let span = crate::trace::RunTrace::span();
+            trace.emit(
+                "tool.started",
+                &span,
+                Some(trace.phase_span()),
+                json!({"tool":"artifact.write","call_id":metadata.call_id,"input_content":null}),
+            );
+            trace.emit("tool.finished", &span, None, json!({"tool":"artifact.write","ok":false,"code":"limit_reached","candidate_bytes":bytes}));
+        }
+        Err(Error::new(
+            "limit_reached",
+            "/candidate",
+            "external JSON candidate exceeds the admitted limit",
+        ))
+    }
     fn goal_context(&self) -> Option<GoalRunContext> {
         self.context.goal.clone()
     }

@@ -243,6 +243,9 @@ impl MilkieExecutor {
 }
 #[async_trait]
 impl Executor for MilkieExecutor {
+    fn enforces_json_candidate_limit(&self) -> bool {
+        true
+    }
     fn budget_limits(&self) -> ExecutorBudgetLimits {
         ExecutorBudgetLimits {
             max_run_ms: Some(3_600_000),
@@ -616,7 +619,7 @@ impl Context {
         }
         self.offer(true, value);
     }
-    async fn tool(&self, args: &Value) -> Value {
+    async fn tool(&self, args: &Value, rejected_candidate_bytes: Option<u64>) -> Value {
         if self.cancel.is_cancelled() {
             return json!({"ok":false,"code":"rejected","message":"Execution no longer accepts host tools"});
         }
@@ -660,7 +663,11 @@ impl Context {
         {
             return json!({"ok":false,"code":"rejected","message":"Invalid call identity"});
         }
-        let result = tokio::select! { _ = self.cancel.cancelled() => return json!({"ok":false,"code":"rejected","message":"Execution cancelled"}), result = self.bridge.call_with_metadata(tool, args["input"].clone(), metadata) => result };
+        let result = tokio::select! { _ = self.cancel.cancelled() => return json!({"ok":false,"code":"rejected","message":"Execution cancelled"}), result = async {
+            if let Some(bytes) = rejected_candidate_bytes {
+                self.bridge.reject_json_candidate(bytes, metadata).await
+            } else { self.bridge.call_with_metadata(tool, args["input"].clone(), metadata).await }
+        } => result };
         match result {
             Ok(value) => json!({"ok":true,"output":value.to_string()}),
             Err(error) => {
@@ -677,6 +684,72 @@ impl Context {
             }
         }
     }
+}
+
+/// Inspect only borrowed raw slices before constructing any candidate Value. Oversized candidates
+/// become rejection-only messages; their payload is never substituted into a normal tool call.
+fn decode_frame(bytes: &[u8], context: Option<&Context>) -> Result<(Value, Option<u64>)> {
+    use serde_json::value::RawValue;
+    #[derive(Deserialize)]
+    struct Envelope<'a> {
+        jsonrpc: String,
+        #[serde(borrow)]
+        id: Option<&'a RawValue>,
+        method: Option<String>,
+        #[serde(borrow)]
+        params: Option<&'a RawValue>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Arguments<'a> {
+        run_id: Option<String>,
+        context_id: Option<String>,
+        call_id: Option<String>,
+        native_call_id: Option<String>,
+        traceparent: Option<String>,
+        name: Option<String>,
+        #[serde(borrow)]
+        input: Option<&'a RawValue>,
+    }
+    #[derive(Deserialize)]
+    struct CandidateInput<'a> {
+        slot: Option<String>,
+        #[serde(borrow)]
+        value: Option<&'a RawValue>,
+    }
+    if bytes.len() > MAX_FRAME {
+        return Err(Error::new(
+            "input_invalid",
+            "/frame",
+            "sidecar frame exceeds limit",
+        ));
+    }
+    if let Some(context) = context
+        && let Some(limit) = context.bridge.json_candidate_limit()
+    {
+        let envelope: Envelope<'_> = serde_json::from_slice(bytes)?;
+        if envelope.method.as_deref() == Some("tool.call")
+            && let (Some(id), Some(params)) = (envelope.id, envelope.params)
+        {
+            let args: Arguments<'_> = serde_json::from_str(params.get())?;
+            let mapped = args.name.as_ref().and_then(|name| context.tools.get(name));
+            if mapped.is_some_and(|id| id == "artifact.write")
+                && let Some(input) = args.input
+            {
+                let input: CandidateInput<'_> = serde_json::from_str(input.get())?;
+                if let Some(value) = input.value
+                    && value.get().len() > limit
+                {
+                    let id = crate::parse_unique(id.get().as_bytes())?;
+                    let message = json!({"jsonrpc":envelope.jsonrpc,"method":"tool.call","id":id,"params":{
+                        "runId":args.run_id,"contextId":args.context_id,"callId":args.call_id,"nativeCallId":args.native_call_id,
+                        "traceparent":args.traceparent,"name":args.name,"input":{"slot":input.slot}}});
+                    return Ok((message, Some(value.get().len() as u64)));
+                }
+            }
+        }
+    }
+    Ok((crate::parse_unique(bytes)?, None))
 }
 
 type Pending = Arc<Mutex<BTreeMap<u64, (String, oneshot::Sender<Value>)>>>;
@@ -777,7 +850,9 @@ impl Rpc {
                 if size == 0 || line.len() > MAX_FRAME || line.last() != Some(&b'\n') {
                     break;
                 }
-                let Ok(message) = crate::parse_unique(&line) else {
+                let Ok((message, rejected_candidate_bytes)) =
+                    decode_frame(&line, context.as_deref())
+                else {
                     break;
                 };
                 line.clear();
@@ -817,7 +892,7 @@ impl Rpc {
                         let (writer, context) = (w.clone(), context.clone());
                         jobs.spawn(async move {
                             let _permit = permit;
-                            let result = if let Some(context) = context { context.tool(&message["params"]).await } else { json!({"ok":false,"code":"rejected","message":"No active host context"}) };
+                            let result = if let Some(context) = context { context.tool(&message["params"], rejected_candidate_bytes).await } else { json!({"ok":false,"code":"rejected","message":"No active host context"}) };
                             let _ = send(&writer, json!({"jsonrpc":"2.0","id":id,"result":result})).await;
                         });
                     }
@@ -1445,6 +1520,71 @@ async fn perform(
 #[cfg(test)]
 mod observation_progress_tests {
     use super::*;
+    struct BoundedBridge(AtomicU64);
+    #[async_trait]
+    impl ToolBridge for BoundedBridge {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![]
+        }
+        fn json_candidate_limit(&self) -> Option<usize> {
+            Some(32)
+        }
+        async fn call(&self, _: &str, _: Value) -> Result<Value> {
+            panic!("oversized candidates must never enter normal tool dispatch")
+        }
+        async fn reject_json_candidate(&self, bytes: u64, _: ToolCallMetadata) -> Result<Value> {
+            self.0.fetch_add(bytes, Ordering::SeqCst);
+            Err(Error::new(
+                "limit_reached",
+                "/candidate",
+                "bounded rejection",
+            ))
+        }
+    }
+    fn bounded_context(bridge: Arc<BoundedBridge>) -> Context {
+        Context {
+            trace_id: None,
+            bridge,
+            tools: BTreeMap::from([("mapped_write".into(), "artifact.write".into())]),
+            source: Mutex::new(Some(("native-run".into(), "context".into()))),
+            cancel: CancellationToken::new(),
+            delivery: None,
+            observation_bad: Arc::new(AtomicBool::new(false)),
+            delivery_pending: Arc::new(AtomicU64::new(0)),
+            progress: Arc::new(Mutex::new(ObservationProgress::default())),
+        }
+    }
+    #[tokio::test]
+    async fn oversized_candidate_is_not_decoded_and_still_requires_original_tool_correlation() {
+        let bridge = Arc::new(BoundedBridge(AtomicU64::new(0)));
+        let context = bounded_context(bridge.clone());
+        let mut frame = br#"{"jsonrpc":"2.0","id":1,"method":"tool.call","params":{"runId":"native-run","contextId":"context","callId":"call","name":"mapped_write","input":{"slot":"report","value":""#.to_vec();
+        frame.extend(std::iter::repeat_n(b'x', 5 * 1024 * 1024));
+        frame.extend_from_slice(br#""}}}"#);
+        assert!(crate::parse_unique(&frame).is_err()); // legacy full-Value path cannot even parse this frame.
+        let (message, oversized) = decode_frame(&frame, Some(&context)).unwrap();
+        assert_eq!(oversized, Some(5 * 1024 * 1024 + 2));
+        assert!(message["params"]["input"].get("value").is_none());
+        let mut wrong = message["params"].clone();
+        wrong["runId"] = json!("different-run");
+        assert_eq!(context.tool(&wrong, oversized).await["ok"], false);
+        assert_eq!(bridge.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            context.tool(&message["params"], oversized).await["ok"],
+            false
+        );
+        assert_eq!(bridge.0.load(Ordering::SeqCst), oversized.unwrap());
+    }
+    #[test]
+    fn raw_candidate_preflight_preserves_valid_values_and_rejects_duplicate_correlations() {
+        let context = bounded_context(Arc::new(BoundedBridge(AtomicU64::new(0))));
+        let frame = br#"{"jsonrpc":"2.0","id":1,"method":"tool.call","params":{"runId":"native-run","contextId":"context","callId":"call","name":"mapped_write","input":{"slot":"report","value":{"ok":true}}}}"#;
+        let (message, oversized) = decode_frame(frame, Some(&context)).unwrap();
+        assert_eq!(oversized, None);
+        assert_eq!(message["params"]["input"]["value"], json!({"ok":true}));
+        let duplicate = br#"{"jsonrpc":"2.0","id":1,"method":"tool.call","params":{"runId":"native-run","runId":"other","name":"mapped_write","input":{"value":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}}"#;
+        assert!(decode_frame(duplicate, Some(&context)).is_err());
+    }
     #[test]
     fn acknowledged_progress_cannot_skip_a_failed_event_or_invent_terminal_delivery() {
         let mut p = ObservationProgress {

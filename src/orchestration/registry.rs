@@ -336,6 +336,12 @@ impl OrchestrationRegistry {
                     "Goal requires managed execution and isolation",
                 ));
             }
+            if !executor.enforces_json_candidate_limit() {
+                return Err(invalid(
+                    "/executor",
+                    "Goal executor must bound external JSON candidates before decoding",
+                ));
+            }
             if p.max_model_iterations.is_some_and(|n| {
                 executor.budget_limits().model_iterations
                     != crate::ModelIterationSupport::RuntimeValidated
@@ -481,7 +487,7 @@ pub(crate) fn builtin_tool(id: &str) -> bool {
 }
 pub(crate) fn bindings_digest(b: &HostBindings) -> Result<String> {
     Ok(digest(&serde_json::to_vec(
-        &json!({"version":b.configuration_version,"grants":b.grants,"executors":b.executors.iter().map(|(k,e)|(k,e.identity(),{let c=e.capabilities();[c.bounded_entry,c.collect_artifacts,c.cancel,c.isolated_workspace,c.isolated_context]},e.budget_limits())).collect::<Vec<_>>(),"tools":b.tools.iter().map(|(k,t)|(k,t.spec())).collect::<Vec<_>>()}),
+        &json!({"version":b.configuration_version,"grants":b.grants,"executors":b.executors.iter().map(|(k,e)|(k,e.identity(),{let c=e.capabilities();[c.bounded_entry,c.collect_artifacts,c.cancel,c.isolated_workspace,c.isolated_context]},e.budget_limits(),e.enforces_json_candidate_limit())).collect::<Vec<_>>(),"tools":b.tools.iter().map(|(k,t)|(k,t.spec())).collect::<Vec<_>>()}),
     )?))
 }
 pub(crate) fn reference_id(id: &str) -> Result<()> {

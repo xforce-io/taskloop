@@ -222,6 +222,22 @@ pub trait ToolBridge: Send + Sync {
     fn goal_context(&self) -> Option<GoalRunContext> {
         None
     }
+    /// A dynamic upper bound for an external JSON candidate, before constructing its Value.
+    fn json_candidate_limit(&self) -> Option<usize> {
+        None
+    }
+    /// Reject the original correlated call without constructing or forwarding its candidate Value.
+    async fn reject_json_candidate(
+        &self,
+        _bytes: u64,
+        _metadata: crate::ToolCallMetadata,
+    ) -> Result<Value> {
+        Err(crate::Error::new(
+            "limit_reached",
+            "/candidate",
+            "external JSON candidate exceeds the admitted limit",
+        ))
+    }
     fn budget_hint(&self) -> Option<crate::BudgetHint> {
         None
     }
@@ -246,6 +262,11 @@ pub enum ObservationCleanup {
 }
 #[async_trait]
 pub trait Executor: Send + Sync {
+    /// External adapters must check ToolBridge::json_candidate_limit before decoding a candidate.
+    /// A trusted in-process executor may explicitly attest that it has no external decoding boundary.
+    fn enforces_json_candidate_limit(&self) -> bool {
+        false
+    }
     fn budget_limits(&self) -> crate::ExecutorBudgetLimits {
         crate::ExecutorBudgetLimits::default()
     }

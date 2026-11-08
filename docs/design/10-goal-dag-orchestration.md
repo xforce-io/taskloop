@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.6；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.7；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -251,6 +251,8 @@ Profile包含固定验收要求，Planner只能选择已注册实现和连接输
 DAG公共产物的兼容字段固定为state_id=`_tl.node.<node_id>`、slot=公共端口名、visit=1；每节点仅一次公共接纳，不能靠visit表示修订，修订用另一个前向节点。成员产物用`_tl.node.<node_id>.member.<member_id>`、slot=成员输出槽、visit=1，并标producer_kind=member_candidate或member_accepted，不得当作Plan公共输出。Planner系统产物state_id=_tl.planner、visit=提案尝试序号；独立检查用_tl.check.<check_id>、visit=1。完整node_id/member_id/plan_digest仍在公开元数据中，应用不必解析命名。ToolContext.artifacts/latest只在当前授权作用域内按这些精确字段工作，无跨节点“最新”猜测。
 
 摘要：Artifact用原始字节摘要；Spec/目录/计划使用TaskLoop `normalized-json-v1`：重复键拒绝、对象键递归排序、依赖集合排序、保留有语义的数组顺序、以固定serde_json序列化后SHA-256。数字表示不同可得到不同摘要，不宣称RFC8785规范化兼容；编码版本随协议锁定，规范化字节保存而非重开时重新计算猜测。
+
+Goal所用Executor须明确声明enforces_json_candidate_limit；默认false，仅对新Goal注册生效，旧Flow不增加该前置。外部适配器在构造候选JSON Value前读取ToolBridge.json_candidate_limit（宿主单值上限、Run剩余候选额度和4MiB硬上限的最小值），先检查借用的原始JSON片段长度；普通RPC/观测仍受各自帧限制。超限调用只走原Run/context/call身份核验、去重和拒绝计量，不把候选替换成null或送入正常写入。受信进程内Executor可明确声明没有外部解码边界；该声明纳入注册绑定摘要。
 
 ### 6.3 端口、连接与Schema
 
@@ -707,6 +709,8 @@ Run结算必须有停止事实；native_stop未知时保留槽位及未结算时
 GoalId由Runtime生成`goal-<UUIDv4>`，旧Flow ExecutionId保持`execution-<UUIDv4>`；创建时在同一Store事务核对两类ID均不存在，用户不能指定ID，因此整个Store共享不重叠执行身份空间。Trace可继续按execution_id聚合，不靠data.execution_kind弥补主键冲突。
 
 复用现有查询/导出/内容政策，新增事件的data归属：goal_id、plan_digest、node_id、member_id、role、evaluation_id可选；同一Goal共享trace根，Run/Agent/工具继续形成子Span。兼容现有TraceEvent必需execution_id字段，DAG模式其值为GoalId，并在data显式`execution_kind=goal`；state_id使用保留的`_tl.node.<id>`或`_tl.planner`等映射，公开Artifact元数据提供真实node_id，不要求应用解码state_id。
+
+Goal协调事件以保留的GoalId作为观测流标识（TraceEvent.run_id），data.scope=goal、role=coordinator；它不是业务Run，不创建RunRequest/物理槽位，也不计max_runs。其源清理为not_applicable。原生调用仍使用真实RunId及data.scope=run，并作为同一Goal根下的子Span；两类观测流均占既有TracePolicy的留存容量。Runtime覆盖所有原生事件的Goal/节点/成员/检查归属，不能由Harness回显伪造。TraceEvent原必填字段保持兼容。
 
 公开编排事件包括goal.admitted、plan.proposed/rejected/locked、node.ready/started/accepted/dependency_failed、check.accepted、goal.finished及stop.pending/confirmed。事件由已提交业务事实投影，丢失可查GoalSnapshot和检查记录；不能仅因有一条goal.finished Trace就提交Goal成功。Trace无法持久化显示degraded/complete=false，业务状态仍按真实接纳决定。业务历史保留Spec/计划/Run/检查/回执，不依赖Trace保留期，敏感内容按既有TracePolicy处理，不将原始材料全文强塞观测。
 

@@ -51,3 +51,11 @@
 - 进程内受控Executor已跑规划→业务节点→最终检查，区分achieved/not_met/error；公开Runtime自动推进正例及规划等待→pause拒绝signal→resume→signal幂等正例通过。此处不是实际Agent或CLI验收证据。
 - 替换Dispatcher后的完整常规回归176通过、5项既有环境用例ignored（`shared-dispatcher-regressions.log`）；之后补充输入等最新改动仍在聚焦验证，不把旧完整回归移挂为最新候选证据。
 - L2 v0.10.6补全业务revision与计量/诊断分离及附件Schema元数据；原18项验收保持不变。恢复/停止、并行/检查点/两业务等负路径仍需补全和取证；外部候选解码前限额、Goal Trace归属、CLI/客户端、真实业务与Agent、功能地图、独立review和release尚未完成。
+
+
+## 实现检查点四（2026-11-08）
+
+- `a115a10`是Goal协调/共享Dispatcher的本地检查点；尚未推送或作为最终验收候选。随后新增的解码限额与Trace接线独立验证。
+- Milkie对Goal JSON候选采用RawValue借用片段预检；5MiB反例经原Run关联核验后仅拒绝，无候选Value或正常工具调用。注册要求Executor明确支持该边界，旧Flow默认不变。
+- Goal协调事件与原生Run共用Goal trace_id及既有Trace政策；协调观测流无业务Run/槽位/次数。受控SDK测试验证完整事件归属、节点/检查事件和关闭Span；模型观察不可用时complete=false，同时业务仍可achieved。Goal源清理先查持久Run状态，不能删除仍可启动/未停止的源。
+- L2 v0.10.7明确上述契约；原18项验收不变。普通回归、真实Agent、应用集成、CLI/只读客户端、并发与恢复负例、项目verify及独立review/release仍需按最终候选完成。

@@ -8,8 +8,81 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 struct NeverExecute;
+struct UnboundedExecutor;
+#[async_trait]
+impl Executor for UnboundedExecutor {
+    fn capabilities(&self) -> ExecutorCapabilities {
+        ExecutorCapabilities::MANAGED
+    }
+    async fn execute(
+        &self,
+        _: Invocation,
+        _: Arc<dyn ToolBridge>,
+        _: CancellationToken,
+    ) -> ExecutionOutcome {
+        panic!("unsafe adapters must be rejected before execution")
+    }
+}
+struct CoreToolOverride;
+#[async_trait]
+impl crate::DomainTool for CoreToolOverride {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            id: "artifact.write".into(),
+            description: "forbidden override".into(),
+            input_schema: json!({}),
+        }
+    }
+    async fn call(&self, _: crate::ToolContext, _: Value) -> crate::Result<crate::ToolOutput> {
+        panic!("Core tool overrides must never run")
+    }
+}
+struct CoreGateOverride;
+#[async_trait]
+impl crate::DomainGate for CoreGateOverride {
+    async fn check(&self, _: crate::GateContext) -> crate::CheckResult {
+        panic!("Core gate overrides must never run")
+    }
+}
+#[test]
+fn registration_rejects_unbounded_adapters_and_core_tool_or_gate_overrides() {
+    let (registry, bindings) = fixture();
+    let mut unbounded = bindings.clone();
+    unbounded
+        .executors
+        .insert("milkie".into(), Arc::new(UnboundedExecutor));
+    assert!(
+        registry
+            .clone()
+            .validate_and_freeze(&unbounded)
+            .unwrap_err()
+            .message
+            .contains("before decoding")
+    );
+    let tools = bindings.clone().tool(Arc::new(CoreToolOverride));
+    assert!(
+        registry
+            .clone()
+            .validate_and_freeze(&tools)
+            .unwrap_err()
+            .message
+            .contains("cannot be overridden")
+    );
+    let gates = bindings.gate("_tl.schema@1", Arc::new(CoreGateOverride));
+    assert!(
+        registry
+            .clone()
+            .validate_and_freeze(&gates)
+            .unwrap_err()
+            .message
+            .contains("cannot be overridden")
+    );
+}
 #[async_trait]
 impl Executor for NeverExecute {
+    fn enforces_json_candidate_limit(&self) -> bool {
+        true
+    }
     fn capabilities(&self) -> ExecutorCapabilities {
         ExecutorCapabilities::MANAGED
     }
@@ -212,8 +285,8 @@ fn schema_scope_is_preserved_and_data_keys_are_not_interpreted() {
     let schemas = Schemas::compile(&sources).unwrap();
     assert!(!schemas.selector_matches("a", "/x", "b").unwrap());
     schemas.validate("data",&json!({"$id":"data-id","$ref":"https://must-not-be-fetched.invalid/","items":{"$dynamicRef":"not-a-schema"}})).unwrap();
-    assert!(schemas.selector("a", "/missing").is_err());
-    assert!(schemas.selector("a", "/x/v").is_err()); // v is optional
+    assert!(schemas.selected("a", "/missing").is_err());
+    assert!(schemas.selected("a", "/x/v").is_err()); // v is optional
     sources.insert(
         "unsafe".into(),
         SchemaSource::new(br#"{"$ref":"https://outside.invalid/schema"}"#).unwrap(),

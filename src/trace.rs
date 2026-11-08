@@ -276,6 +276,45 @@ impl TraceStore {
             visit,
             sequence: AtomicU64::new(0),
             observed_ms: crate::runtime::now_ms(),
+            goal_data: None,
+        })
+    }
+    pub(crate) fn goal_session(
+        self: &Arc<Self>,
+        run: &str,
+        context: &crate::GoalRunContext,
+    ) -> Arc<RunTrace> {
+        let (node, member) = match &context.role {
+            crate::GoalRunRole::NodeMember { node_id, member_id } => {
+                (Some(node_id), Some(member_id))
+            }
+            _ => (None, None),
+        };
+        Arc::new(RunTrace {
+            store: self.clone(),
+            execution: context.goal_id.clone(),
+            run: run.into(),
+            state: context.state_id(),
+            visit: context.visit(),
+            sequence: AtomicU64::new(0),
+            observed_ms: crate::runtime::now_ms(),
+            goal_data: Some(
+                json!({"execution_kind":"goal","scope":"run","goal_id":context.goal_id,"plan_digest":context.plan_digest,"role":context.role,"node_id":node,"member_id":member,"evaluation_id":context.evaluation_id}),
+            ),
+        })
+    }
+    pub(crate) fn goal_coordinator_session(self: &Arc<Self>, goal: &str) -> Arc<RunTrace> {
+        Arc::new(RunTrace {
+            store: self.clone(),
+            execution: goal.into(),
+            run: goal.into(),
+            state: "_tl.goal".into(),
+            visit: 1,
+            sequence: AtomicU64::new(0),
+            observed_ms: crate::runtime::now_ms(),
+            goal_data: Some(
+                json!({"execution_kind":"goal","scope":"goal","goal_id":goal,"role":"coordinator","plan_digest":null,"node_id":null,"member_id":null,"evaluation_id":null}),
+            ),
         })
     }
     pub fn read(&self, execution: &str, q: &TraceQuery) -> Result<TracePage> {
@@ -398,10 +437,16 @@ pub(crate) struct RunTrace {
     visit: u64,
     sequence: AtomicU64,
     observed_ms: u64,
+    goal_data: Option<Value>,
 }
 impl RunTrace {
     pub fn trace_id(&self) -> String {
-        crate::json::digest(self.run.as_bytes())[..32].to_owned()
+        crate::json::digest(if self.goal_data.is_some() {
+            self.execution.as_bytes()
+        } else {
+            self.run.as_bytes()
+        })[..32]
+            .to_owned()
     }
     pub fn phase_span(&self) -> String {
         crate::json::digest(format!("phase:{}", self.run).as_bytes())[..16].to_owned()
@@ -427,11 +472,30 @@ impl RunTrace {
             run_observed_at_ms: self.observed_ms,
             monotonic_ns: self.store.started.elapsed().as_nanos().to_string(),
             kind: kind.into(),
-            data,
+            data: self.attributed(data),
             milkie_run_id: None,
             milkie_context_id: None,
             native: Value::Null,
         });
+    }
+    fn attributed(&self, mut data: Value) -> Value {
+        if let Some(goal) = &self.goal_data {
+            if !data.is_object() {
+                data = json!({});
+            }
+            for (key, value) in goal.as_object().expect("host Goal context") {
+                if goal["scope"] == "goal" && value.is_null() && data.get(key).is_some() {
+                    continue;
+                }
+                data[key] = value.clone();
+            }
+        }
+        data
+    }
+    pub(crate) fn goal_parent(&self) -> Option<String> {
+        self.goal_data.as_ref().map(|_| {
+            crate::json::digest(format!("phase:{}", self.execution).as_bytes())[..16].to_owned()
+        })
     }
     fn reject(&self) {
         self.store
@@ -579,7 +643,7 @@ impl MilkieObserver for RunTrace {
                 run_observed_at_ms: self.observed_ms,
                 monotonic_ns: mono,
                 kind: kind.clone(),
-                data: source_data(&kind, &e["data"])?,
+                data: self.attributed(source_data(&kind, &e["data"])?),
                 milkie_run_id: Some(milkie_run),
                 milkie_context_id: Some(text(&e, "contextId", 128)?),
                 native: Value::Object(native),

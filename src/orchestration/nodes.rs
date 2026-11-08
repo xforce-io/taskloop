@@ -151,9 +151,7 @@ impl GoalCore {
         } else {
             GoalWriteGuard::Advance
         };
-        self.inner
-            .store
-            .goal_commit(&row, &next, guard, None, &effects, &self.clock)?;
+        self.commit_goal(&row, &next, guard, None, &effects, &self.clock)?;
         self.cancel_goal_handles(&next);
         Ok(true)
     }
@@ -597,7 +595,7 @@ impl GoalCore {
         )?;
         self.cleanup_terminal(&mut next)?;
         self.close_stopping(&mut next, observed.utc_ms)?;
-        match self.inner.store.goal_commit(
+        match self.commit_goal(
             &row,
             &next,
             GoalWriteGuard::NodeResult { node_id, nonce },
@@ -636,7 +634,7 @@ impl GoalCore {
                     });
                 }
                 self.cleanup_terminal(&mut cleanup)?;
-                self.inner.store.goal_commit(
+                self.commit_goal(
                     &latest,
                     &cleanup,
                     GoalWriteGuard::Cleanup,

@@ -63,6 +63,9 @@ impl ManagedRunOwner for GoalOwner {
     fn admit_candidate_bytes(&self, bytes: u64) -> Result<()> {
         self.charge(GoalBudgetCharge::CandidateBytes(bytes))
     }
+    fn reject_candidate_bytes(&self, bytes: u64) -> Result<()> {
+        self.charge(GoalBudgetCharge::RejectedBytes(bytes))
+    }
     fn persist_budget(&self, snapshot: &RunBudgetSnapshot) -> Result<()> {
         // Tool/byte charges are already durable. Only merge the cumulative local rejection count.
         if snapshot.calls_rejected != 0 {
@@ -139,6 +142,7 @@ pub(crate) struct GoalExecution {
     budget: Arc<BudgetState>,
     cancel: CancellationToken,
     preparation_ms: u64,
+    trace: Option<Arc<crate::trace::RunTrace>>,
 }
 impl GoalCore {
     /// R02. All resources are prepared before the single durable native-start admission.
@@ -264,6 +268,12 @@ impl GoalCore {
             executor.budget_limits(),
         )?);
         let cancel = self.inner.stop.child_token();
+        let trace = self.inner.trace.as_ref().and_then(|store| {
+            let trace = store.goal_session(run_id, &context);
+            trace
+                .reserve_executor(&run.executor, &executor.identity())
+                .then_some(trace)
+        });
         let bridge = Arc::new(ManagedBridge {
             inner: self.inner.clone(),
             execution_id: id.into(),
@@ -289,7 +299,8 @@ impl GoalCore {
             candidates: Mutex::new(BTreeMap::new()),
             budget: budget.clone(),
             storage_failure: Mutex::new(None),
-            trace: None,
+            trace: trace.clone(),
+            json_candidate_max: Some(self.options.max_json_candidate_bytes),
         });
         let invocation = Invocation {
             stage_input,
@@ -336,7 +347,7 @@ impl GoalCore {
         }
         // Holding the same handle lock as cancellation prevents a committed start with no stop handle.
         let mut handles = self.inner.goal_run_handles.lock().map_err(Error::io)?;
-        match self.inner.store.goal_commit(
+        match self.commit_goal(
             &row,
             &next,
             GoalWriteGuard::Advance,
@@ -348,6 +359,14 @@ impl GoalCore {
             GoalCommit::Replayed(_) => return Err(Error::io("native start cannot replay")),
         }
         handles.insert(run_id.into(), cancel.clone());
+        if let Some(trace) = &trace {
+            trace.emit(
+                "phase.started",
+                &trace.phase_span(),
+                trace.goal_parent(),
+                serde_json::json!({}),
+            );
+        }
         self.inner
             .live_budgets
             .lock()
@@ -365,6 +384,7 @@ impl GoalCore {
             budget,
             cancel,
             preparation_ms,
+            trace,
         }))
     }
 }
@@ -376,8 +396,8 @@ impl GoalExecution {
             self.bridge.clone(),
             self.budget.clone(),
             self.cancel,
-            None,
-            false,
+            self.trace.clone(),
+            self.trace.is_some(),
         )
         .await;
         // R10/R11: persist physical facts and actual consumption even after cancel, expiry, or epoch loss.
@@ -419,7 +439,7 @@ impl GoalExecution {
             false,
             &next.prepared.effective_limits,
         )?;
-        self.core.inner.store.goal_commit(
+        self.core.commit_goal(
             &row,
             &next,
             GoalWriteGuard::Settlement {
@@ -431,6 +451,14 @@ impl GoalExecution {
             &Default::default(),
             &self.core.clock,
         )?;
+        if let Some(trace) = &self.trace {
+            trace.emit(
+                "phase.finished",
+                &trace.phase_span(),
+                None,
+                serde_json::json!({"native_stop_confirmed":returned.native_stop_confirmed}),
+            );
+        }
         self.core
             .inner
             .goal_run_handles

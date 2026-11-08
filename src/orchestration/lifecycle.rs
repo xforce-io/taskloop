@@ -81,7 +81,7 @@ impl GoalCore {
         let changed = serde_json::to_value(&row.record)? != serde_json::to_value(&next)?
             || serde_json::to_value(&row.record.budget)? != serde_json::to_value(&next.budget)?;
         if changed {
-            self.inner.store.goal_commit(
+            self.commit_goal(
                 &row,
                 &next,
                 GoalWriteGuard::Cleanup,
@@ -176,7 +176,7 @@ impl GoalCore {
                     .get_or_insert(self.clock.observe()?.utc_ms);
             }
             self.cleanup_terminal(&mut next)?;
-            self.inner.store.goal_commit(
+            self.commit_goal(
                 &row,
                 &next,
                 GoalWriteGuard::Recovery,
@@ -209,7 +209,7 @@ impl GoalCore {
                 }
             }
             self.close_stopping(&mut next, self.clock.observe()?.utc_ms)?;
-            self.inner.store.goal_commit(
+            self.commit_goal(
                 &row,
                 &next,
                 GoalWriteGuard::Cleanup,
@@ -238,7 +238,7 @@ impl GoalCore {
         );
         next.error = Some(error);
         self.cleanup_terminal(&mut next)?;
-        self.inner.store.goal_commit(
+        self.commit_goal(
             &row,
             &next,
             GoalWriteGuard::Cleanup,
@@ -303,7 +303,7 @@ impl GoalCore {
         }
         self.cleanup_terminal(&mut next)?;
         self.close_stopping(&mut next, self.clock.observe()?.utc_ms)?;
-        self.inner.store.goal_commit(
+        self.commit_goal(
             &row,
             &next,
             GoalWriteGuard::Settlement {

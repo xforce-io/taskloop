@@ -9,6 +9,7 @@ mod driver;
 pub(crate) mod goal_budget;
 mod lifecycle;
 mod nodes;
+mod observation;
 mod plan;
 mod record;
 mod registry;

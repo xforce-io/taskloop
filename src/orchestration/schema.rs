@@ -281,9 +281,6 @@ impl Schemas {
         }
         self.resolve_with_base(&base, &schema)
     }
-    pub fn selector(&self, name: &str, pointer: &str) -> Result<Value> {
-        self.selected(name, pointer).map(|s| s.0)
-    }
     /// Compare a statically provable selector to a locked resource, retaining $ref scope.
     pub fn selector_matches(&self, name: &str, pointer: &str, target: &str) -> Result<bool> {
         let (selected, base) = self.selected(name, pointer)?;

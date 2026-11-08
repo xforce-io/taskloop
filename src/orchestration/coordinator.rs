@@ -35,7 +35,7 @@ impl GoalCore {
                 subject: run_id.into(),
             });
             next.status = GoalStatus::Blocked;
-            self.inner.store.goal_commit(
+            self.commit_goal(
                 &row,
                 &next,
                 GoalWriteGuard::Settlement {
@@ -59,7 +59,7 @@ impl GoalCore {
         }
         let mut next = row.record.clone();
         next.runs.get_mut(run_id).expect("returned Run").view.phase = GoalRunPhase::Checking;
-        let row = match self.inner.store.goal_commit(
+        let row = match self.commit_goal(
             &row,
             &next,
             GoalWriteGuard::Result {
@@ -156,7 +156,7 @@ impl GoalCore {
         }
         self.cleanup_terminal(&mut next)?;
         self.close_stopping(&mut next, observed.utc_ms)?;
-        let saved = self.inner.store.goal_commit(
+        let saved = self.commit_goal(
             &row,
             &next,
             GoalWriteGuard::Result {
@@ -761,7 +761,7 @@ impl GoalCore {
         settle_run(&mut next, run_id, elapsed)?;
         self.cleanup_terminal(&mut next)?;
         self.close_stopping(&mut next, now)?;
-        self.inner.store.goal_commit(
+        self.commit_goal(
             row,
             &next,
             GoalWriteGuard::Settlement {

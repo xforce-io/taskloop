@@ -25,6 +25,7 @@ pub(crate) struct GoalCore {
     pub clock: Arc<GoalClock>,
     pub binding: String,
     pub coordinator: Mutex<()>,
+    pub root_traces: Mutex<BTreeMap<String, Arc<crate::trace::RunTrace>>>,
 }
 #[derive(Clone)]
 pub struct Goals {
@@ -67,6 +68,7 @@ impl GoalCore {
             clock,
             binding,
             coordinator: Mutex::new(()),
+            root_traces: Mutex::new(BTreeMap::new()),
         }))
     }
     pub fn authorized(&self, id: &str, caller: &Caller) -> Result<GoalRow> {
@@ -172,6 +174,9 @@ impl GoalCore {
             self.options.max_admitted_goals,
             &self.clock,
         )?;
+        if created {
+            self.trace_admitted(&row);
+        }
         self.inner.notify.notify_one();
         Ok(GoalReceipt {
             protocol_version: 1,
@@ -416,7 +421,7 @@ impl GoalCore {
             GoalWriteGuard::Cleanup
         };
         let encoded = serde_json::to_value(&response)?;
-        let saved = self.inner.store.goal_commit(
+        let saved = self.commit_goal(
             &row,
             &next,
             guard,
@@ -752,6 +757,9 @@ mod tests {
     struct SubmitCandidate;
     #[async_trait::async_trait]
     impl Executor for SubmitCandidate {
+        fn enforces_json_candidate_limit(&self) -> bool {
+            true
+        }
         fn capabilities(&self) -> ExecutorCapabilities {
             ExecutorCapabilities::MANAGED
         }
@@ -778,6 +786,9 @@ mod tests {
     struct RequestPlanningInput;
     #[async_trait::async_trait]
     impl Executor for RequestPlanningInput {
+        fn enforces_json_candidate_limit(&self) -> bool {
+            true
+        }
         fn capabilities(&self) -> ExecutorCapabilities {
             ExecutorCapabilities::MANAGED
         }
@@ -888,6 +899,9 @@ mod tests {
     struct CompleteGoal(EvaluationVerdict);
     #[async_trait::async_trait]
     impl Executor for CompleteGoal {
+        fn enforces_json_candidate_limit(&self) -> bool {
+            true
+        }
         fn capabilities(&self) -> ExecutorCapabilities {
             ExecutorCapabilities::MANAGED
         }
@@ -973,6 +987,9 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Executor for SubmitPlan {
+        fn enforces_json_candidate_limit(&self) -> bool {
+            true
+        }
         fn capabilities(&self) -> ExecutorCapabilities {
             ExecutorCapabilities::MANAGED
         }
@@ -1095,6 +1112,37 @@ mod tests {
         setup_mode(executor, false).await
     }
     #[tokio::test]
+    async fn exhausted_transition_budget_closes_the_goal_without_starting_reserved_work() {
+        let (_directory, runtime, goals, caller, mut request) =
+            setup_mode(Some(Arc::new(CompleteGoal(EvaluationVerdict::Pass))), true).await;
+        request.spec.limits.max_transitions = 2;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let s = goals.get(&id, &caller).await.unwrap();
+                if s.status == GoalStatus::Finished {
+                    break s;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("budget refusal must become a durable failure rather than a scheduling loop");
+        assert_eq!(snapshot.outcome, Some(GoalOutcome::Failed));
+        assert_eq!(snapshot.error.unwrap().code, "budget_exhausted");
+        assert_eq!(snapshot.budget.transitions_used, 2);
+        assert!(snapshot.budget.cleanup_transitions > 0);
+        assert!(
+            snapshot
+                .runs
+                .values()
+                .all(|r| !r.started && r.phase == GoalRunPhase::Settled)
+        );
+        assert!(snapshot.artifacts.is_empty());
+        assert!(snapshot.budget.reserved.is_empty());
+        runtime.shutdown().await.unwrap();
+    }
+    #[tokio::test]
     async fn public_runtime_dispatches_a_goal_without_private_progress_calls() {
         let (_directory, runtime, goals, caller, request) =
             setup_mode(Some(Arc::new(CompleteGoal(EvaluationVerdict::Pass))), true).await;
@@ -1113,6 +1161,59 @@ mod tests {
         assert_eq!(snapshot.outcome, Some(GoalOutcome::Achieved));
         assert_eq!(snapshot.budget.runs_used, 3);
         assert!(snapshot.budget.reserved.is_empty());
+        let trace = goals
+            .trace(
+                &id,
+                TraceQuery {
+                    limit: 1000,
+                    ..Default::default()
+                },
+                &caller,
+            )
+            .unwrap();
+        assert!(trace.events.iter().any(|e| e.event.kind == "goal.admitted"));
+        assert!(trace.events.iter().any(|e| e.event.kind == "goal.finished"));
+        assert!(
+            trace
+                .events
+                .iter()
+                .any(|e| e.event.kind == "node.accepted" && e.event.data["node_id"] == "review")
+        );
+        let trace_id = crate::json::digest(id.as_bytes())[..32].to_owned();
+        assert!(trace.events.iter().all(|e| e.event.trace_id == trace_id
+            && e.event.data["goal_id"] == id
+            && e.event.data["execution_kind"] == "goal"));
+        assert_eq!(
+            trace
+                .events
+                .iter()
+                .filter(|e| e.event.kind == "phase.started" && e.event.data["scope"] == "run")
+                .count(),
+            3
+        );
+        assert!(
+            trace
+                .events
+                .iter()
+                .filter(|e| e.event.kind == "tool.started")
+                .all(|e| e.event.data["scope"] == "run" && e.event.data["role"].is_object())
+        );
+        assert!(trace.open_spans.is_empty());
+        assert!(!trace.complete); // This controlled executor provides no model/harness observation.
+        assert!(
+            trace
+                .issues
+                .iter()
+                .all(|issue| issue.starts_with("internal_unavailable:")),
+            "{:?}",
+            trace.issues
+        );
+        assert!(
+            trace
+                .source_cleanup
+                .iter()
+                .any(|c| c.run_id == id && c.executor.is_none() && c.state == "not_applicable")
+        );
         runtime.shutdown().await.unwrap();
     }
     async fn setup_mode(
@@ -1187,7 +1288,25 @@ mod tests {
                 bindings,
                 registry,
                 options,
-                None,
+                Some(TraceSetup {
+                    options: TraceOptions {
+                        max_events_per_run: 1000,
+                        max_bytes_per_run: 1_048_576,
+                        source_max_events: 1000,
+                        source_max_bytes: 1_048_576,
+                    },
+                    policy: TracePolicy {
+                        policy_id: "goal-tests".into(),
+                        max_total_events: 10_000,
+                        max_total_bytes: 10_485_760,
+                        max_runs: 100,
+                        retention_ms: 60_000,
+                        max_content_bytes: 0,
+                        content_tools: BTreeMap::new(),
+                        filter_version: None,
+                        filter: None,
+                    },
+                }),
             )
             .await
             .unwrap();
@@ -1467,7 +1586,7 @@ impl GoalCore {
             member.run_id = Some(run_id.clone());
             member.status = GoalMemberStatus::Reserved;
         }
-        match self.inner.store.goal_commit(
+        match self.commit_goal(
             &row,
             &next,
             GoalWriteGuard::Advance,
@@ -1497,7 +1616,7 @@ impl GoalCore {
             "no positive bounded execution/check allocation remains",
         ));
         self.cleanup_terminal(&mut next)?;
-        self.inner.store.goal_commit(
+        self.commit_goal(
             row,
             &next,
             GoalWriteGuard::Cleanup,
@@ -1659,7 +1778,7 @@ impl GoalCore {
             GoalWriteGuard::Cleanup
         };
         let encoded = serde_json::to_value(&response)?;
-        let saved = self.inner.store.goal_commit(
+        let saved = self.commit_goal(
             &row,
             &next,
             guard,

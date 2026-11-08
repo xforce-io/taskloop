@@ -311,11 +311,15 @@ impl Runtime {
             .as_ref()
             .map(|(_, o)| o.limits.max_concurrent_runs)
             .unwrap_or(1);
-        let store = Store::open_mode(
-            &options.store_dir,
-            orchestration.is_some(),
-            usize::try_from(slots).map_err(Error::io)?,
-        )?;
+        let store = if orchestration.is_some() {
+            Store::open_mode(
+                &options.store_dir,
+                true,
+                usize::try_from(slots).map_err(Error::io)?,
+            )?
+        } else {
+            Store::open(&options.store_dir)?
+        };
         for d in &definitions {
             store.save_definition(d)?;
         }
