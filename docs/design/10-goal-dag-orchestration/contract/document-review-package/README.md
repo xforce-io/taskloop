@@ -1,10 +1,10 @@
 # 文档审阅能力包示例
 
-这是可校验的注册材料示例，非已实现CLI或真实模型测试。宿主仍须提供可信的`milkie` Executor、Core内建Schema和授权；文件不会安装Skill、执行脚本或加载任意Rust代码。
+这是可校验的能力定义离线清单示例，不是首版运行时加载协议，也非已实现CLI或真实模型测试。应用代码应构造并注册同组Rust类型，复用已有Schema/Skill资源读取，不实现package.json加载器。宿主仍须提供可信的`milkie` Executor、Core内建Schema和授权；文件不会安装Skill、执行脚本或加载任意Rust代码。
 
 | 文件 | 含义 |
 |---|---|
-| package.json | 完整应用注册清单：公共端口、成员、入口、预算、领域规则、checker及Profile |
+| package.json | 应用类型定义的离线清单：公共端口、成员、入口、预算、领域规则、checker及Profile |
 | schemas/*.json | 应用输入输出Schema；摘要绑定实际文件字节 |
 | skills/document-review/SKILL.md | Worker方法；目录摘要沿用SkillPackage字节映射算法 |
 | rules/document-quality.json | 应用提供的领域判断标准，不是Runtime Gate代码 |
