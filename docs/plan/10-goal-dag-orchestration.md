@@ -193,3 +193,10 @@
 - 对照L2 §6.6/§11.1的panic要求发现，finish_node_check原有固定投影与Schema/评价接纳闭包没有catch_unwind边界；panic会越过节点失败处置并污染持有的协调锁。先在7a57bac基础仅加入cfg(test)线程局部故障钩子和实际checking入口回归，复现注入panic越界，日志projection-panic-before-fix.log为实际失败。未声称有自然业务输入可触发；问题依据为缺失明确要求的故障隔离边界与注入实测。
 - 修复仅在现有内建投影/检查及候选接纳计算外围捕获可展开panic，返回固定contract_error且不回显panic载荷；复用原失败分支重置待提交输出/Receipt、保留成员事实并结算/收束，协调锁在捕获边界之外，不新增应用回调或公共协议。OOM/abort仍按原宿主崩溃契约处理。
 - 同一故障注入入口复验通过（projection-panic-after-fix.log）：Goal failed、节点contract_error、成员产物可读、无公共输出/评价、只有原2个Run、无预留/占槽；重复finish/advance无新revision且协调器可用。该修复落实既有L2，不改产品行为、版本与原18项验收。冻结全套及对应CI继续保存新SHA证据；真实Agent复验和独立review仍待完成。
+
+## 实现检查点二十（2026-11-09）
+
+- 0e312d7冻结完整回归224通过、5 ignored，严格Clippy、独立旧Flow消费者和无模型注册预检通过；CI run 42508855694按原SHA单列。原7a57bac的macOS/Ubuntu CI均已确认success；不换挂到0e312d7。当前覆盖索引在target/verify-taskloop/10-acceptance/0e312d7，33个机制测试均从新跑原始日志核对。
+- 核对S5.A1时发现，原规划signal用例证明正常补充/暂停/重放，但没有直接覆盖“signal已持久化、后续调用请求尚未物化”的恢复窗口。本轮仅补该测试，不改生产代码：恢复保留1个pending请求/原输入摘要、1个SignalFact及原回执，零新Run/占槽；重复恢复和旧revision命令重放均不升revision，显式resume后仅为原请求首次创建第二个Planner Run并锁定计划。
+- 新测试最初误用不存在的GoalCommandReceipt.replayed字段导致编译失败（planning-signal-pending-recovery.log）；按实际公开协议改为整份回执逐值相等，未新增API或弱化幂等断言。聚焦复验通过（planning-signal-pending-recovery-retest.log）。该例使用实际Store持久化/恢复入口，不声称做了OS进程崩溃或真实模型调用。
+- 冻结套件、S5机制明细核对与新候选CI继续保存各自SHA；formal verify/preflight、独立代码review、合入及适用release仍未完成。历史接入选择未答复，本轮真实模型调用数仍为0。

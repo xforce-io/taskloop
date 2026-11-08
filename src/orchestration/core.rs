@@ -1371,6 +1371,111 @@ mod tests {
         assert_eq!(client.get(&id).unwrap().revision, revision);
         runtime.shutdown().await.unwrap();
     }
+    #[tokio::test]
+    async fn accepted_planning_signal_keeps_one_pending_request_across_recovery_and_replay() {
+        let (_directory, runtime, goals, caller, request) =
+            setup_custom(Some(Arc::new(RequestPlanningInput)), false, |registry| {
+                registry
+                    .profiles
+                    .get_mut("document-review@1")
+                    .unwrap()
+                    .planning_input_schemas = vec!["text".into()];
+            })
+            .await;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        let first = goals.core.materialize(&id).unwrap().unwrap();
+        goals
+            .core
+            .prepare_execution(&id, &first)
+            .unwrap()
+            .unwrap()
+            .execute()
+            .await
+            .unwrap();
+        goals.core.consume_return(&id, &first).unwrap();
+        let waiting = goals.get(&id, &caller).await.unwrap();
+        let signal = GoalSignalRequest {
+            protocol_version: 1,
+            wait_id: waiting.waiting[0].wait_id.clone(),
+            nonce: waiting.waiting[0].nonce.clone(),
+            payload: json!("Keep the original scope"),
+            request_key: "persist-before-materializing".into(),
+            expected_revision: waiting.revision,
+        };
+        let receipt = goals.signal(&id, signal.clone(), &caller).await.unwrap();
+        let accepted = goals.core.inner.store.goal_load(&id).unwrap();
+        assert_eq!(accepted.record.signals.len(), 1);
+        let pending = accepted
+            .record
+            .requests
+            .values()
+            .filter(|r| r.run_id.is_none() && !r.cancelled)
+            .collect::<Vec<_>>();
+        assert_eq!(pending.len(), 1);
+        let request_id = pending[0].request_id.clone();
+        let input_sha = pending[0].input_sha.clone();
+        assert_eq!(accepted.record.runs.len(), 1);
+        goals.core.recover().unwrap();
+        let recovered = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(recovered.status, GoalStatus::Stopped);
+        assert_eq!(recovered.budget.runs_used, 1);
+        assert_eq!(recovered.progress.goal_occupied_slots, 0);
+        assert_eq!(recovered.progress.pending_requests, 1);
+        goals.core.recover().unwrap();
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            recovered.revision
+        );
+        let replay = goals.signal(&id, signal.clone(), &caller).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&replay).unwrap(),
+            serde_json::to_value(&receipt).unwrap()
+        );
+        assert_eq!(replay.applied_revision, receipt.applied_revision);
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            recovered.revision
+        );
+        goals
+            .resume(&id, "resume-persisted-request", recovered.revision, &caller)
+            .await
+            .unwrap();
+        let next = goals.core.materialize(&id).unwrap().unwrap();
+        let started = goals.core.inner.store.goal_load(&id).unwrap();
+        assert_eq!(
+            started.record.requests[&request_id].run_id.as_deref(),
+            Some(next.as_str())
+        );
+        assert_eq!(started.record.requests[&request_id].input_sha, input_sha);
+        assert_eq!(started.record.signals.len(), 1);
+        goals
+            .core
+            .prepare_execution(&id, &next)
+            .unwrap()
+            .unwrap()
+            .execute()
+            .await
+            .unwrap();
+        goals.core.consume_return(&id, &next).unwrap();
+        goals.core.advance(&id).unwrap();
+        let planned = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(planned.stage, GoalStage::Executing);
+        assert_eq!(planned.budget.runs_used, 2);
+        assert!(planned.plan_digest.is_some());
+        assert_eq!(
+            goals
+                .signal(&id, signal, &caller)
+                .await
+                .unwrap()
+                .applied_revision,
+            receipt.applied_revision
+        );
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            planned.revision
+        );
+        runtime.shutdown().await.unwrap();
+    }
     struct CompleteGoal(EvaluationVerdict);
     #[async_trait::async_trait]
     impl Executor for CompleteGoal {

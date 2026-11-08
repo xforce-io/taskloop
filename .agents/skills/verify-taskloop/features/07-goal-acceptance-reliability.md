@@ -34,6 +34,8 @@ cargo clippy --locked --offline --all-targets -- -D warnings
 
 暂停中的Planner结果执行`paused_planner_results_preserve_valid_invalid_and_input_branches_until_explicit_resume`：在原生已返回、业务尚未接纳处暂停，分别保存合法计划、结构化非法原因或等待身份；重复消费不重算，stopped期间零后续请求/派发，resume后才锁定/补建修正请求/接受补充，Spec与已计Run不变。
 
+规划补充的持久请求窗口执行`accepted_planning_signal_keeps_one_pending_request_across_recovery_and_replay`：signal已接纳但后续Run尚未物化时运行持久化恢复，保留唯一请求及输入摘要、原回执和唯一SignalFact；重复恢复/重放不升revision、不消费第二次nonce，显式resume后仅为该请求首次创建第二个Planner Run并锁定计划。此例直接驱动同一Store的恢复入口，不冒称实际SIGKILL或真实Harness执行。
+
 进一步定位：
 
 - `a_previous_goals_passing_evaluation_cannot_approve_new_public_artifacts`：复用原通过候选的相同字节，因目标Artifact不同而拒绝；新Goal工作仍成功、公共产物保留，但无通过回执。
