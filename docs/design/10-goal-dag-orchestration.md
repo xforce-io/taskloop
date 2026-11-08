@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.5；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.6；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -27,7 +27,7 @@ L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/
 规范名见 [名词表](../glossary.md)。本次易混关系：
 
 - Goal Spec 是不可变输入，不是可被 Planner 修订的目标；PlanProposal 是候选，不是已锁定 PlanVersion。
-- 节点是 DAG 公共单元；Worker 是节点内部成员；Run 是一次受控执行。一个节点可以有多个 Run，但首版每个必需 Worker 只执行一次，不隐式重试。
+- 节点是DAG公共单元；Worker沿用名词表的L4执行组件。节点执行成员是该节点对某Worker的一次具名调用规格（member_id及EntryContract），一个成员最多产生一次Run；多个成员可调用同一或不同Executor绑定，但必须独立上下文/工作目录。产品所称单/多Worker节点对应单/多成员调用，不把成员等同于L4组件。
 - Task 沿用一等任务含义：目标任务包含节点任务，不为每个 Worker 再暴露一个用户必须操作的 FlowInstance。Run 不等于独立业务实例。
 - Evaluation 是评价内容；EvaluationReceipt 是受 Runtime 身份/版本检查接纳后的事实。评价 Worker 成功只表示产出有效评价，verdict=fail 可以与该 Worker 成功同时成立。
 - `stop_unknown` 是停止事实，不是“执行失败”的同义词；它必须影响容量，即使 Goal 的业务结果已经失败。
@@ -149,18 +149,18 @@ flowchart TD
 | Goal Spec | `goal`文本、`inputs`对象、`profile_ref`、`planning.mode`、`limits`；workflow模式还需template_ref | 原始字节与规范化摘要均保存，不能由Planner覆盖 |
 | GoalRequest | protocol_version、request_key、grant_ref、spec（Goal Spec） | 幂等及授权信封不混入Spec摘要；调用身份由宿主提供 |
 | Profile锁定记录 | 逻辑id/version、goal_input_schema、能力目录摘要、Planner入口、规划补充Schema、计划/节点检查点/最终检查要求、必需输出别名及Schema、可用模板、Skill/Schema/执行器配置摘要 | 宿主注册并授权；模型不能注册新Capability或Gate |
-| Capability/NodeContract | id/version/digest、kind、input/output端口、Worker成员、汇合器、确定性Gate、权限及预算策略 | work至少1个必需Worker；input类型无Worker；成员ID和公共端口固定 |
-| PlanProposal | `goal_spec_digest`、`profile_digest`、`nodes`映射、`outputs`映射、`checks`映射、`template_digest`（仅模板模式） | 不是已锁定计划，非法仍保存原文及错误 |
+| Capability/NodeContract | id/version/digest、kind、input/output端口、节点执行成员、汇合器、确定性Gate、权限及预算策略 | work至少1个必需执行成员；input类型无Worker；成员ID和公共端口固定 |
+| PlanProposal | `goal_spec_digest`、`profile_digest`、`planning_mode`、`nodes`映射、`outputs`映射、`checks`映射、`template_digest`（仅模板模式） | 不是已锁定计划，非法仍保存原文及错误 |
 | PlanVersion | proposal摘要、规范化计划字节、目标/目录/模板摘要、接纳检查引用、locked_at | 目标内仅1份接纳计划；锁定后不可变；plan_digest即规范化提案摘要，锁定时间与接纳回执不参与该摘要，避免循环引用 |
 | 节点任务 | GoalId、plan_digest、node_id、capability_digest、依赖、公共输入摘要、节点状态、输出引用、Worker状态集合 | 一个公共输出版本；内部Worker不成为跨节点连接对象 |
-| Run | 不透明run_id、GoalId、node_id或系统角色、worker_id、attempt=1、epoch、输入/能力摘要、预算、started/stop事实 | Planner修正是不同受控Run；业务成员不自动复跑 |
-| Artifact | 现有ArtifactRef加公开归属元数据：goal_id、node_id、worker_id可选、plan_digest、schema_digest | 内容SHA-256按实际字节计算；候选和公共接纳输出分离 |
+| Run | 不透明run_id、GoalId、node_id或系统角色、member_id、attempt=1、epoch、输入/能力摘要、预算、started/stop事实 | Planner修正是不同受控Run；业务成员不自动复跑 |
+| Artifact | 现有ArtifactRef加公开归属元数据：goal_id、node_id、member_id可选、plan_digest、schema_digest | 内容SHA-256按实际字节计算；候选和公共接纳输出分离 |
 | EvaluationReceipt | evaluation_id、checker_id、rules_digest、subject、producer_run_id可选、verdict、evidence_refs、violations、accepted_revision | subject必须与当前检查请求完全一致，不接纳模型自编对象身份 |
 | GoalSnapshot | GoalId、revision、spec/plan摘要、status、stage、outcome、terminal_intent、admitted_at_utc_ms、wall_deadline_utc_ms、nodes、waiting、artifacts、evaluations、stop、budget摘要、error | 生命周期、业务结果与停止事实独立，不靠一个completed字符串掩盖缺口 |
 
-Profile包含固定验收要求，Planner只能选择已注册实现和连接输出，不能删除/修改要求。`admitted_at_utc_ms`为首次受理时间，`wall_deadline_utc_ms=admitted_at_utc_ms+effective.max_wall_ms`采用溢出检查并一次写入，重开/补充/恢复不重置。宿主内以单调时钟映射剩余期限，避免本进程内系统钟调整延长预算；重开从固定UTC期限恢复，若系统钟早于持久化last_observed_utc_ms，blocked/clock_untrusted且不派发，不能将未可信的时差当作新增额度。新目标可带 `parent_goal_id` 与显式 `imports` 列表；导入在submit事务前逐项校验：Artifact必须已接纳、对当前Caller可见，默认仅同一owner；引用的sha256及schema_digest必须与保存元数据和实际字节一致，当前GoalGrant须允许读取。失败则整个submit拒绝、零Run。parent_goal_id若提供也须是可见的同owner目标；它仅作来源关联，不授予整目标读取权。imports可来自明确选择的多个同owner目标，不强制必须等于parent；没有parent仍须逐项授权。冻结后工具只获得列入imports的确切版本，不获得父目标其他产物。此操作必须是显式新提交，不由失败自动触发。
+Profile包含固定验收要求，Planner只能选择已注册实现和连接输出，不能删除/修改要求。`admitted_at_utc_ms`为首次受理时间，`wall_deadline_utc_ms=admitted_at_utc_ms+effective.max_wall_ms`采用溢出检查并一次写入；受理时所有期限加法或单调时钟映射不可表示均input_invalid/category=budget_acceptance，拒绝整个submit且不写Goal/不启动Run，不截断或饱和期限。规划期限先取生效规划时长与wall时长最小值再checked_add，重开/补充/恢复不重置。宿主内以单调时钟映射剩余期限，避免本进程内系统钟调整延长预算；last_observed_utc_ms是Store.meta里的时钟高水位，不属于Goal业务revision；刷新时钟观测不能使resume/signal的业务版本持续失效。重开从固定UTC期限恢复，若系统钟早于该持久高水位，blocked/clock_untrusted且不派发，不能将未可信的时差当作新增额度。新目标可带 `parent_goal_id` 与显式 `imports` 列表；导入在submit事务前逐项校验：Artifact必须已接纳、对当前Caller可见，首版严格仅同一owner，不支持跨owner例外，即使其他Grant允许读也拒绝跨owner导入；引用的sha256及schema_digest必须与保存元数据和实际字节一致，当前GoalGrant须允许读取。失败则整个submit拒绝、零Run。parent_goal_id若提供也须是可见的同owner目标；它仅作来源关联，不授予整目标读取权。imports可来自明确选择的多个同owner目标，不强制必须等于parent；没有parent仍须逐项授权。冻结后工具只获得列入imports的确切版本，不获得父目标其他产物。此操作必须是显式新提交，不由失败自动触发。
 
-DAG公共产物的兼容字段固定为state_id=`_tl.node.<node_id>`、slot=公共端口名、visit=1；每节点仅一次公共接纳，不能靠visit表示修订，修订用另一个前向节点。成员产物用`_tl.node.<node_id>.worker.<worker_id>`、slot=成员输出槽、visit=1，并标producer_kind=worker_candidate或worker_accepted，不得当作Plan公共输出。Planner系统产物state_id=_tl.planner、visit=提案尝试序号；独立检查用_tl.check.<check_id>、visit=1。完整node_id/worker_id/plan_digest仍在公开元数据中，应用不必解析命名。ToolContext.artifacts/latest只在当前授权作用域内按这些精确字段工作，无跨节点“最新”猜测。
+DAG公共产物的兼容字段固定为state_id=`_tl.node.<node_id>`、slot=公共端口名、visit=1；每节点仅一次公共接纳，不能靠visit表示修订，修订用另一个前向节点。成员产物用`_tl.node.<node_id>.member.<member_id>`、slot=成员输出槽、visit=1，并标producer_kind=member_candidate或member_accepted，不得当作Plan公共输出。Planner系统产物state_id=_tl.planner、visit=提案尝试序号；独立检查用_tl.check.<check_id>、visit=1。完整node_id/member_id/plan_digest仍在公开元数据中，应用不必解析命名。ToolContext.artifacts/latest只在当前授权作用域内按这些精确字段工作，无跨节点“最新”猜测。
 
 摘要：Artifact用原始字节摘要；Spec/目录/计划使用TaskLoop `normalized-json-v1`：重复键拒绝、对象键递归排序、依赖集合排序、保留有语义的数组顺序、以固定serde_json序列化后SHA-256。数字表示不同可得到不同摘要，不宣称RFC8785规范化兼容；编码版本随协议锁定，规范化字节保存而非重开时重新计算猜测。
 
@@ -190,6 +190,7 @@ PlanProposal示意，数值与业务端口仅作例子，不是执行默认值�
   "protocol_version": 1,
   "goal_spec_digest": "<sha256>",
   "profile_digest": "<sha256>",
+  "planning_mode": "autonomous",
   "nodes": {
     "analyze": {
       "capability_ref": "analysis@1",
@@ -203,7 +204,7 @@ PlanProposal示意，数值与业务端口仅作例子，不是执行默认值�
     }
   },
   "outputs": {"report": {"node_id":"write","port":"report"}},
-  "checks": {"report-quality": {"checker_ref":"quality@1","targets":["report"]}}
+  "checks": {"report-quality": {"phase":"goal_final","checker_ref":"quality@1","targets":["report"]}}
 }
 ```
 
@@ -218,9 +219,11 @@ nodes为映射，避免重复逻辑ID和位置歧义。depends_on可包含纯控
 | capability_permission | 目录外能力/Worker/工具、未授权资源、隔离/停止能力不足 | 能力path与拒绝原因，不输出凭据 |
 | budget_acceptance | 超预算、缺必需评价/输出、模板约束不符 | 对应limit/check/template位置 |
 
-HostConfig必须显式给出`max_spec_bytes`（库安全上限1MiB），限制规范化前原始Goal Spec字节；原始请求帧另受4MiB上限。在反序列化前按请求长度限制输入，解析后有界序列化spec以复核上限，超限input_invalid且不写Goal/不启动Run。SDK已有JSON值也用有界writer拒绝超限，不先无限分配序列化缓冲。大型材料以授权Artifact引用导入，不内联撑大goals行。
+HostConfig必须显式给出`max_spec_bytes`（库安全上限1MiB），限制规范化后Goal Spec的UTF-8字节；原始请求帧另受4MiB上限。在反序列化前按原始请求帧4MiB限制输入，解析后有界规范化序列化spec以复核1MiB上限，超限input_invalid且不写Goal/不启动Run。SDK已有JSON值也用有界writer拒绝超限，不先无限分配序列化缓冲。大型材料以授权Artifact引用导入，不内联撑大goals行。
 
 硬容量作为HostConfig显式上限：`max_plan_bytes`、`max_nodes`、`max_edges`、`max_workers_per_node`。库安全边界分别不超过4MiB/256/4096/32，宿主必须选不高于安全边界的值并公开生效来源；这不是业务运行额度。超出在解析或派发前拒绝。
+
+PlanProposal.planning_mode必须等于Goal Spec.planning.mode；workflow时template_digest必填且等于锁定模板摘要，autonomous禁止该字段。Schema先做本提案内条件校验，语义层再与外部冻结上下文比对，不将回显当成授权。
 
 workflow模板是冻结骨架：命名节点/能力允许集合、必需依赖、输入输出与检查连接、可填字段；模板只能缩小能力范围。首版不允许Planner增加/删除骨架节点或边；自主模式在目录与预算内建图。两者校验及执行完全相同。模板不是预先批准任何输出质量。
 
@@ -256,7 +259,7 @@ Goal三个维度分离：
 
 Run阶段：`reserved → started → execution_returned → checking → settled`；未启动而暂停时为`suspended`，resume只重新预留后回reserved，不是再次执行。`execution_returned`不等于可释放：仅在适配器确认无原生执行存活时才标`native_stop_confirmed`。结束事实包括ExecutionOutcome、候选摘要、Gate结果、预算及停止事实；这些字段分别保存。过期epoch的业务输出只记迟到处置，不改有效节点输出；同一Run的可信停止确认及消耗结算仍按§6.7处理。
 
-失败传播：某节点必需Worker失败或公共Gate失败，阻止其后继；所有后继原子或分批CAS标dependency_failed且列根因，永不挂成waiting。与其无依赖的分支已在途工作进入停止收束，仅保存候选并结算，不在终结意图之后接纳新业务输出；不再为已经不可能完成Goal而派发新业务工作。未知原生停止保持容量。第一决定性失败与后续收尾错误均保存，不能被后到成功覆盖。
+失败传播：某节点必需执行成员失败或公共Gate失败，阻止其后继；失败根事件的事务必须先设置terminal_intent并关闭该Goal派发，再原子或分批CAS将后继标dependency_failed。所有reserve和reserved→started事务都重新核对该意图；分批传播间隙也不得启动原先已ready/已reserved的后继。传播未完不能finished；崩溃恢复自动继续cleanup传播，不需要resume。与其无依赖的分支已在途工作进入停止收束，仅保存候选并结算，不在终结意图之后接纳新业务输出；不再为已经不可能完成Goal而派发新业务工作。未知原生停止保持容量。第一决定性失败与后续收尾错误均保存，不能被后到成功覆盖。
 
 ### 6.5.1 期限事件与停止意图矩阵
 
@@ -267,7 +270,7 @@ Run阶段：`reserved → started → execution_returned → checking → settle
 | 意图/事件 | epoch与派发 | 在途业务输出 | 收尾与目标状态 |
 |---|---|---|---|
 | 用户cancel，尚无终结意图 | epoch递增一次，禁新派发，nonce作废 | 旧输出拒绝，候选可留作诊断 | status=stopping；全部自身Run结算后finished/cancelled；未知超窗口blocked |
-| pause/显式stop/SIGINT | 不递增epoch，禁新派发，等待身份保留但暂不受理signal | 在原预算/期限内已干净完成的输出允许接纳；不能启动后继或新检查Run | 15秒窗口内收齐则stopped；到窗口请求停止，若出现未接纳的已启动工作则blocked/interrupted；停止未知继续占槽 |
+| pause/显式stop/SIGINT | 不递增epoch，禁新派发，等待身份保留但暂不受理signal | 在原预算/期限内已干净完成的输出允许接纳；不能启动后继或新检查Run | 15秒内Run与已进入checking节点均接纳/结算才stopped；到窗口请求停止，若出现未接纳的已启动工作则blocked/interrupted；停止未知继续占槽 |
 | 必需checkpoint fail | 事务设置not_met意图，递增epoch、作废nonce，禁新派发 | 意图前已接受输出保留；意图后的兄弟业务输出拒绝，仅留候选 | status=stopping，停所有自身在途Run；结算后finished/not_met |
 | 工作/检查error、规划耗尽或预算耗尽 | 设置failed及具体原因，递增epoch、作废nonce，禁新派发 | 不再接受业务输出，不覆盖已接受证据 | status=stopping；确认/结算后finished/failed |
 | wall/规划期限到达 | 分别failed/wall_timeout或planning_timeout，按失败行处理；已有终结意图只追加期限事实 | 期限之后不接纳业务输出；停止和消耗照常结算 | 同上；即使没有工作可派发也必须触发 |
@@ -293,15 +296,15 @@ Planner输出采用PlannerResult联合类型：`{protocol_version:1,kind:"propos
 
 共享持久化账本`run_leases`以全局唯一run_id为主键，包含owner_kind(flow|goal)、owner_id、executor绑定指纹、原始epoch、reserved/suspended/started/stop_unknown/settled、slot_held及预算预留引用。全局占用=所有slot_held=true的记录数；目标占用再按owner_kind/owner_id过滤。Flow仍用原definition/visit/epoch校验其业务状态，Goal用Spec/Plan/节点身份校验；共有的是物理Run准入与停止账本，不强行复用两种业务状态机。Flow.active和Goal记录仅引用该Run，必要兼容镜像与run_leases在同一事务更新，不能成为第二个准入来源。所有reserve/start/settle在IMMEDIATE事务中检查同一账本，settled重复回报不再释放。
 
-旧Flow保留全局legacy lane=1（包括该lane的未知停止），且每实例最多1个活动阶段；该lane还占一个宿主全局槽位。DAG可使用其余共享槽位，不另开不受控池。未启用编排时同一新二进制仍以legacy lane=1保持原串行行为。v1迁移在首次派发前将旧active Run按原ID导入账本：started=false导入reserved；started且未确认结束导入stop_unknown并占槽，不猜测已停止。不能证明旧执行器身份可恢复时保持blocked，不由新绑定清除占用。
+旧Flow保留全局legacy lane=1（包括该lane的未知停止），且每实例最多1个活动阶段；该lane还占一个宿主全局槽位。DAG可使用其余共享槽位，不另开不受控池。同一新二进制的所有写宿主构造函数都使用SharedDispatcher/run_leases；未启用编排时以legacy lane=1、Goal API关闭来保持纯Flow库的原串行行为。非编排构造函数遇到含Goal记录的v2库明确unsupported_store_mode并要求open_orchestrated，不能忽略这些记录或退回旧worker_loop。v1→v2迁移必须在更新user_version的**同一IMMEDIATE事务**中将全部旧active Run按原ID导入账本，禁止提交v2后延迟导入：started=false导入reserved；started且未确认结束导入stop_unknown并占槽，不猜测已停止。不能证明旧执行器身份可恢复时保持blocked，不由新绑定清除占用。
 
-一个宿主持有Store所有权锁，一个协调器串行处理命令与Run完成事件，异步执行体可并发。就绪选择按Goal队列轮转、同Goal按node_id/worker_id稳定排序；独立Goal不能被大量节点永久饿死。全局槽位与目标槽位都以**持久化的已预留/在途/停止未知Run**计数，内存Semaphore只作加速，不能成为唯一事实源。快照progress显示queue_reason和受未知停止占用的槽数；跨owner只展示计数和原因，不泄露其他实例ID/产物。
+一个宿主持有Store所有权锁，一个协调器串行处理命令与Run完成事件，异步执行体可并发。就绪选择按Goal队列轮转、同Goal按node_id/member_id稳定排序；独立Goal不能被大量节点永久饿死。全局槽位与目标槽位都以**持久化的已预留/在途/停止未知Run**计数，内存Semaphore只作加速，不能成为唯一事实源。快照progress显示queue_reason和受未知停止占用的槽数；跨owner只展示计数和原因，不泄露其他实例ID/产物。
 
 意图校验严格按§6.5.1矩阵：pause允许已启动Run在原期限内继续受控工具调用、完成内建Gate并接纳干净结果，不能启动后继/新检查Run；到停止窗口再取消Token。其他终结意图拒绝新业务接纳。业务派发/输出接纳在SQLite事务中核对：owner/grant、Goal revision与epoch、spec/plan/capability摘要、节点/Worker前态、依赖与输入摘要、cancel/stop意图、wall期限、预算/容量预留、命令或结果幂等标识。revision是提交时读取最新值并CAS，不要求异步Run出生时的Goal revision等于当前值；无关兄弟节点推进不能使正确结果过期。有效性由epoch、目标节点前态与确切输入/能力/计划摘要决定。字段匹配失败产生有限拒绝原因，不调用模型协商。模型Review仅在Profile声明的plan/checkpoint/final检查点发生。
 
 停止与消耗结算是不同的事件类别：依据持久化RunId、该Run原始epoch、Executor绑定指纹、唯一预留账目和可信适配器回报验证，不要求其epoch仍等于Goal当前epoch，也不受已到达的wall/active/transition预算拒绝。取消、故障、超时、终态后仍可接纳这些可信收尾事实，但不得借此接受业务输出、重新派发或改变已定质量结论。按Run及结算序号幂等更新停止/实际消耗、释放对应预留与槽位；相同确认不释放两次，陌生Run或错误适配器无权确认。业务输出与收尾同一消息返回时，分项验证：旧输出拒绝，合法停止/消耗仍结算。
 
-派发前同事务写RunId、started=false、输入/能力指纹、预算预留和占槽事实；执行体必须先CAS置started=true后才调用Executor。事务失败不启动。每个RunId最多1个本地执行体，重入事件不能再次spawn；跨宿主恢复遇started=true按§6.9处理，不靠outbox自动重发。
+派发前同事务写RunId、started=false、输入/能力指纹、预算预留和占槽事实；执行体必须先CAS置started=true后才调用Executor。事务失败不启动。reserved→started的CAS必须在同一事务复核owner的terminal/pause意图、期限和账本有效性，不能只依据此前已提交派发动作；意图已关闭派发则释放或挂起该预留。每个RunId最多1个本地执行体，重入事件不能再次spawn；跨宿主恢复遇started=true按§6.9处理，不靠outbox自动重发。
 
 Run完成消息只是候选通知。接纳事务分别执行业务和结算校验，将被允许的Gate结果/输出引用、可信结算、节点汇合资格及revision一并提交；没有业务接纳权不等于没有停止结算权。产物blob可在事务前按hash写入，未被引用的blob是孤立内容，不能作为已接纳业务证据。节点全部成员结果并发返回时只有一个CAS更新赢，其他按最新记录重新校验后提交；不能覆盖整份旧Goal JSON而丢失兄弟结果。
 
@@ -318,7 +321,7 @@ CheckRequest必需身份为goal_id、goal_spec_digest、plan_digest（plan检查
 node_checkpoint必须由**同一DAG里的显式评价节点**实现，不生成隐式屏障图。以下规则是接纳算法，不留待运行时猜测：
 
 1. Profile.outputs冻结所有公开输出别名、Schema摘要及允许的生产能力；final_outputs给出最终交付别名，checkpoint_target别名可指中间产物。Plan.outputs必须覆盖这些声明，映射到存在的node_id/port并符合Schema/生产能力约束。检查targets统一是这些别名，不是任意字符串或隐式节点路径。
-2. Plan.checks的键集合必须恰好等于Profile中phase为node_checkpoint或goal_final的CheckRequirement.id集合；plan阶段检查仅由Profile执行，不由Planner再次声明。每项checker_ref与targets集合必须与该requirement的冻结checker_ref/target_outputs完全相同，漏项/多项/替换均budget_acceptance拒绝。
+2. Plan.checks的键集合必须恰好等于Profile中phase为node_checkpoint或goal_final的CheckRequirement.id集合；每个可执行Profile必须至少有一个required goal_final检查，否则注册即拒绝（不能只检查计划便宣称Goal达标），故该集合非空；plan阶段检查仅由Profile执行，不由Planner再次声明。每项phase、checker_ref与targets集合必须与该requirement的冻结phase/checker_ref/target_outputs完全相同，漏项/多项/替换均budget_acceptance拒绝。
 3. node_checkpoint必须有evaluation_node_id，引用匹配checker能力的评价节点；该节点输入绑定每个target解析到的确切公共端口，depends_on必须显式包含所有生产节点。一个评价节点仅绑定一个CheckRequirement，避免重复接纳不同规则身份。
 4. node_checkpoint的Profile必须给出非空before_outputs：这些是**要求在检查通过后才允许生产的公开输出别名**。Runtime将其解析为受保护节点，要求每个节点depends_on显式包含该评价节点；缺边即input_connection/plan_invalid，绝不自动加边。目标生产节点/评价节点本身不能同时充当受保护节点，否则会形成环并拒绝。未被before_outputs声明保护的中间计算可在检查前发生，不错误地把所有target消费者都强迫依赖检查。
 5. 对上述已经显式存在的依赖和数据边做同一张图无环检查。比如A→B后统一检查A/B、保护最终report(D)，图为A→B、A/B→C(评价)、C→D。A/B中间消费者B不被反插C，D若漏C依赖则拒绝。
@@ -327,7 +330,7 @@ before_outputs只来自宿主冻结Profile，Planner无权缩小；模板亦须�
 
 评价节点的有效EvaluationReceipt与节点成功在同事务接纳；checkpoint verdict=fail时该事务同时设置terminal_intent=not_met并关闭新派发，因此后继即便依赖succeeded也不能起跑。error意图为failed/check_unavailable。其他已在途分支都进入停止收束，未知停止仍占容量，全部确认/结算后才提交最终outcome。普通“评价→修订”节点不绑定阻断checkpoint，verdict=fail作为有效数据继续既定前向修订；两种角色由冻结Profile和check映射明确区分，不在运行时切换。
 
-Plan检查与goal_final是固定阶段检查：分别在锁定前、所有DAG节点成功且无在途业务Run后运行，不产生中途隐藏的图依赖。plan检查不在Plan.checks出现，其subject直接为本次proposal；goal_final映射禁止evaluation_node_id，node_checkpoint映射必须有该字段。required/phase/before_outputs不能由Planner提供或更改。
+Plan检查与goal_final是固定阶段检查：分别在锁定前、所有DAG节点成功且无在途业务Run后运行，不产生中途隐藏的图依赖。plan检查不在Plan.checks出现，其subject直接为本次proposal；goal_final映射禁止evaluation_node_id，node_checkpoint映射必须有该字段。required/before_outputs不能由Planner提供；phase与planning_mode是必需的上下文回显，必须与冻结Profile/Goal Spec相等，不能借回显更改阶段或模式。形状不合法先以format拒绝；通过形状但模式不匹配以budget_acceptance、检查phase不匹配/缺evaluation_node_id/goal_final多带该字段以reference拒绝，均为plan_invalid且在业务启动前返回。
 
 最终判定：全部声明阶段的required receipt存在（plan绑定对应proposal，checkpoint/final绑定对应产物）、subject/规则匹配且verdict全pass，才可achieved。有效必需fail按§6.5.1设置not_met意图并停止收束；没有fail证据而只存在error或缺receipt时只能failed/check_unavailable，不能伪报质量通过或已证明质量失败。单个候选中fail与error共存时verdict=error，保留质量缺口但总体failed。fail-fast后其他未执行检查明确列not_run，不影响已经存在的必需fail证据，也不能被计为通过。
 
@@ -351,7 +354,7 @@ state.sqlite v2在同一库新增Goal相关存储，旧executions/commands/artif
 | 崩溃窗口 | 重开时的事实与动作 |
 |---|---|
 | 预留事务前 | 没有Run，不存在待重放工作 |
-| 已reserved但started=false | 确认无调用发生后，可在相同RunId/预算预留下继续首次启动；先检查指纹、取消和期限 |
+| 已reserved但started=false | 重开只对账，释放物理槽位/未用预留并标suspended、Goal stopped/host_interrupted；显式resume通过身份/期限校验后，同RunId重新预留并仅作首次启动 |
 | started=true，未持久化执行结束/停止确认 | 标interrupted+stop_unknown，epoch失效；调用原受信适配器stop_or_confirm；不重跑 |
 | 原生结束已确认，但候选/Gate结果未完整提交 | 不能猜测成功；标interrupted。已有内容保留，不重新执行模型/Gate来伪造旧成功；显式后续Goal处理 |
 | 节点/评价接纳事务已提交，响应未送达 | 按已提交事实和幂等回执返回，不再执行或推进两次 |
@@ -359,11 +362,25 @@ state.sqlite v2在同一库新增Goal相关存储，旧executions/commands/artif
 
 首次以cancel建立终结意图时使Goal epoch递增一次、持久化intent、阻止新派发，再取消在途Token并请求native stop。每个Run确认后分别释放容量/结算，不能等一个全局bool覆盖全部。收尾窗口沿用现有15秒上限，并对剩余工作明确pending；超过窗口返回停止未确认，原始槽位保留。取消后的旧Run停止回报按其原始执行身份结算，不因Goal新epoch或期限而丢弃。之后仅允许对同一未知Run进行有界stop_or_confirm探测，不是再执行；不清零预算或主动重放。
 
-前台stop/SIGINT的intent为pause，按§6.5.1允许原期限内的干净完成、禁止新派发。等待节点的wait_id/nonce/expires_at及补充事实原样持久化；暂停不延长期限、不重建nonce，暂停期间拒绝signal。pause事务同时释放所有started=false Run的槽位及未消费时间/字节预留，将其标suspended；任何start CAS看到pause意图必须拒绝。计量过的准备成本及已计入max_runs的次数不退款。resume为同一RunId重新取得预留/槽位，不再增加max_runs，随后仍只允许首次启动。15秒内全部已启动Run接纳并结算，或原本只有等待/未启动工作，则stopped；未接纳的已启动工作不能恢复成ready，确认停止后仍blocked/interrupted，需显式新Goal关联已接受产物。SIGKILL后同类处理；旧绑定缺失不能用新适配器清除未知。
+前台stop/SIGINT的intent为pause，按§6.5.1允许原期限内的干净完成、禁止新派发。等待节点的wait_id/nonce/expires_at及补充事实原样持久化；暂停不延长期限、不重建nonce，暂停期间拒绝signal。pause事务同时释放所有started=false Run的槽位及未消费时间/字节预留，将其标suspended；任何start CAS看到pause意图必须拒绝。计量过的准备成本及已计入max_runs的次数不退款。resume为同一RunId重新取得预留/槽位，不再增加max_runs，随后仍只允许首次启动。pause必须在15秒窗口内完成已进入checking的节点内建汇合/节点Gate并接纳公共输出；任何checking节点尚未接纳则blocked/interrupted，保留成员结果，resume不得重算该未提交汇合冒充成功。已齐员但尚未进入checking的节点可在显式resume后首次汇合。全部已启动Run结算且无未决checking节点，或原本只有等待/未启动工作，才stopped；未接纳的已启动工作不能恢复成ready，确认停止后仍blocked/interrupted，需显式新Goal关联已接受产物。SIGKILL后同类处理；旧绑定缺失不能用新适配器清除未知。
 
-resume的合法前置为stopped、无未结算的started Run、绑定一致且wall/规划/等待期限仍有效；恢复未启动节点和未过期waiting_input，保留既有成员成功结果及同一等待身份。finished、stopping、blocked/interrupted不能以resume变成running，明确返回not_resumable或stop_unknown；blocked只做可信停止对账，不能重放。suspended的Run不占物理槽位，started/stop_unknown仍占，取消/终结中从未启动的Run直接cleanup/settled。崩溃时没有started工作、只有reserved/等待的目标，重开恢复步骤将其标stopped/host_interrupted，先处理期限，再等显式resume；不隐式重启模型。
+resume的合法前置为stopped、无未结算的started Run、绑定一致且wall/规划/等待期限仍有效；恢复从未启动的成员、尚未进入checking的首次汇合及未过期waiting_input，保留既有成员成功结果及同一等待身份。finished、stopping、blocked/interrupted不能以resume变成running，明确返回not_resumable或stop_unknown；blocked只做可信停止对账，不能重放。suspended的Run不占物理槽位，started/stop_unknown仍占，取消/终结中从未启动的Run直接cleanup/settled。崩溃时没有started工作、只有reserved/等待的目标，重开恢复步骤将其标stopped/host_interrupted，先处理期限，再等显式resume；不隐式重启模型。
 
-CLI前台宿主只主动推进run/resume明确选择的Goal，不自动恢复同Store其他历史Goal；其他遗留未知执行只做停止/占槽对账。目标finished或stopped后，CliDriver执行有界shutdown、移除自己创建的Socket、关闭Store并释放所有权锁，然后退出。pause期间即使最后一份结果齐全也先stopped；显式resume可仅依已接纳事实归并最终状态，不重跑Worker/检查。SDK的Goals::stop只暂停所选Goal，不关闭仍承载其他实例的Runtime；Runtime.shutdown才停止整个宿主。目标因未知停止blocked时CLI在15秒收尾窗口后退出8，持久槽位仍保留，锁释放不等于原生停止确认。
+CLI前台宿主只主动推进run/resume明确选择的Goal，不自动恢复同Store其他历史Goal；同库其他目标仍执行全部到期事件和停止/占槽对账，只有新业务派发限于选定Goal。目标finished或stopped后，CliDriver执行有界shutdown、移除自己创建的Socket、关闭Store并释放所有权锁，然后退出。pause期间即使最后一份结果齐全也先stopped；显式resume可仅依已接纳事实归并最终状态，不重跑Worker/检查。SDK的Goals::stop只暂停所选Goal，不关闭仍承载其他实例的Runtime；Runtime.shutdown才停止整个宿主。目标因未知停止blocked时CLI在15秒收尾窗口后退出8，持久槽位仍保留，锁释放不等于原生停止确认。
+
+### 6.9.1 每次持锁打开的必经恢复顺序
+
+任何写宿主（CLI run/resume，包括同键run重放，以及嵌入式构造函数）都必须先执行本顺序；readonly GoalClient不取得锁、不执行停止或业务恢复。
+
+1. 取得Store所有权锁、检查版本和模式，在同一事务完成必要迁移与完整run_leases导入；在此之前禁止任何Executor启动或控制Socket服务。
+2. 对已有terminal_intent的目标只继续停止/失败传播/结算，不清除意图，不将其转stopped；即使传播分批中断也先恢复派发关闭状态。对started未结算Run先持久化stop_unknown、失效业务epoch（已失效不重复递增）和blocked/interrupted，保留槽位。
+3. 对可识别的原Executor绑定发起有界stop_or_confirm，处理结果按原Run身份结算；身份无法证明则保持stop_unknown/host_binding_changed，不换适配器确认。恢复动作不受业务预算、wall到期或Worker槽位阻挡，采用15秒有界收尾。不能在未保存未知事实/未发起可用原适配器对账时，仅返回旧创建回执退出9。
+4. 原目标存在未提交的节点checking时，即使Run都已settled也标blocked/interrupted，不重算该已开始汇合；否则没有started/未结算工作且无终结意图时，将reserved挂起并把此前running/waiting目标转stopped/host_interrupted，保留等待身份。对同库**全部**未终态目标检查时钟与期限：业务只推进所选Goal不豁免其他Goal的到期收束/清理。超期先建立失败意图再处理resume；等待与纯排队目标同样适用。
+恢复必须幂等：同一已知stop_unknown不反复递增epoch，已经stopped且无新增事实/过期事件的目标不重写状态或递增revision；时钟高水位的纯刷新不改业务revision。
+
+5. 最后开放Socket与业务命令。此时同键submit只返回原回执/当前快照，不隐式resume；若恢复得到blocked必须返回8并给pending原因，不能按普通非终态重放退出9。新Goal和显式resume只有通过各自准入后才派发。
+
+clock_untrusted是可解除的独立blocker：保存发生前的阶段/暂停事实和last_observed_utc_ms，不重置deadline。用户修正系统时间后重新打开宿主，或宿主周期复核发现now_utc_ms≥该持久值且时钟映射可表示，移除仅这一blocker；若无其他blocker/terminal_intent/未知Run，转stopped/clock_restored并等待显式resume；若已到固定期限，直接走到期失败收束。存在interrupted/stop_unknown时只移除时钟阻塞，不恢复业务；仍不可信则维持blocked并提示修正时间。不会因解阻重跑已启动Run或延长预算。
 
 ### 6.10 预算与并发一致性
 
@@ -385,7 +402,9 @@ Run结算必须有停止事实；native_stop未知时保留槽位及未结算时
 
 ### 6.11 Trace与公开诊断
 
-复用现有查询/导出/内容政策，新增事件的data归属：goal_id、plan_digest、node_id、worker_id、role、evaluation_id可选；同一Goal共享trace根，Run/Agent/工具继续形成子Span。兼容现有TraceEvent必需execution_id字段，DAG模式其值为GoalId，并在data显式`execution_kind=goal`；state_id使用保留的`_tl.node.<id>`或`_tl.planner`等映射，公开Artifact元数据提供真实node_id，不要求应用解码state_id。
+GoalId由Runtime生成`goal-<UUIDv4>`，旧Flow ExecutionId保持`execution-<UUIDv4>`；创建时在同一Store事务核对两类ID均不存在，用户不能指定ID，因此整个Store共享不重叠执行身份空间。Trace可继续按execution_id聚合，不靠data.execution_kind弥补主键冲突。
+
+复用现有查询/导出/内容政策，新增事件的data归属：goal_id、plan_digest、node_id、member_id、role、evaluation_id可选；同一Goal共享trace根，Run/Agent/工具继续形成子Span。兼容现有TraceEvent必需execution_id字段，DAG模式其值为GoalId，并在data显式`execution_kind=goal`；state_id使用保留的`_tl.node.<id>`或`_tl.planner`等映射，公开Artifact元数据提供真实node_id，不要求应用解码state_id。
 
 公开编排事件包括goal.admitted、plan.proposed/rejected/locked、node.ready/started/accepted/dependency_failed、check.accepted、goal.finished及stop.pending/confirmed。事件由已提交业务事实投影，丢失可查GoalSnapshot和检查记录；不能仅因有一条goal.finished Trace就提交Goal成功。Trace无法持久化显示degraded/complete=false，业务状态仍按真实接纳决定。业务历史保留Spec/计划/Run/检查/回执，不依赖Trace保留期，敏感内容按既有TracePolicy处理，不将原始材料全文强塞观测。
 
@@ -404,7 +423,7 @@ Run结算必须有停止事实；native_stop未知时保留槽位及未结算时
 | Trace/预算公开投影 | 复用现有查询导出治理，增加Goal关联与预留事实 | 作为成功或停止的唯一证明 |
 | Inquiry领域包 | 研究工具、方法、端口/Schema、写作与质量规则 | 重新实现通用调度或访问TaskLoop私有表 |
 
-旧Flow和新Goal共享底层Run服务及§6.7的唯一SharedDispatcher/run_leases，业务转移适配器有独立记录。legacy Flow仍每实例最多1个在途阶段、保持旧语义；DAG可以多个成员并发。全宿主共享容量，旧Flow活动也计入新协调器的全局槽位，不能用两套池各自突破宿主上限。未启用orchestration的旧构造函数保持旧串行行为。
+旧Flow和新Goal共享底层Run服务及§6.7的唯一SharedDispatcher/run_leases，业务转移适配器有独立记录。legacy Flow仍每实例最多1个在途阶段、保持旧语义；DAG可以多个成员并发。全宿主共享容量，旧Flow活动也计入新协调器的全局槽位，不能用两套池各自突破宿主上限。同一新二进制的旧构造函数按§6.7使用同一账本和legacy lane=1；遇到含Goal记录的库须拒绝，而不是另起旧worker_loop。旧二进制见v2仍按更高版本拒绝。
 
 ## 8 API/CLI
 
@@ -451,7 +470,7 @@ HOST.json指定store_dir、已打包Profile/能力工厂ID、Skill/Schema资源�
 
 客户端仅在同一OS用户的0700Store目录工作；GoalClient按本地UID映射可信身份，不能从请求JSON指定principal。嵌入应用继续由宿主提供Caller与授权；首版不承诺跨OS用户/远程客户端。持锁前台宿主创建`owner.sock`并处理在线命令；这是该进程内的本地控制入口，不是独立后台服务。客户端不打开可写数据库、不写收件表。宿主使用OS peer UID与Store所有者核对身份，并以宿主配置映射Caller/Grant，不接纳请求自报的授权。
 
-Socket采用长度前缀JSON请求/响应帧（单帧不超过4MiB），请求包含protocol_version、kind、goal_id、request_key、expected_revision与payload；不提供任意方法/SQL/路径调用。宿主提交命令回执后返回，响应丢失按同键重试。宿主离线或Socket不可连接返回host_not_running，**没有排队成功、延迟取消或自动启动**；遗留Socket不能作为存活证明，只有取得Store锁的宿主可清理/重建。readonly查询可通过公开GoalClient读取受支持版本的SQLite投影，不获得协调或写状态权。
+Socket采用4字节无符号大端长度前缀加UTF-8 JSON请求/响应帧（单帧不超过4MiB），请求包含protocol_version、kind、goal_id、request_key、expected_revision与payload；不提供任意方法/SQL/路径调用。宿主提交命令回执后返回，响应丢失按同键重试。宿主离线或Socket不可连接返回host_not_running，**没有排队成功、延迟取消或自动启动**；遗留Socket不能作为存活证明，只有取得Store锁的宿主可清理/重建。readonly查询可通过公开GoalClient读取受支持版本的SQLite投影，不获得协调或写状态权。
 
 幂等submit不恢复已经停止的目标：在存活宿主内同键重试，原已运行Goal照常推进但不产生第二次派发；宿主不存活时，同键goal run只返回replayed回执与当前快照，若目标未终态则退出9（blocked则8）并提示显式resume。CLI run拿不到Store锁则already_running，不以重试抢占宿主。这样重试旧创建请求不会撤销之后的显式stop意图。resume具有自己的request_key/expected_revision，经§6.9前置校验后才恢复。
 
@@ -459,7 +478,23 @@ Socket采用长度前缀JSON请求/响应帧（单帧不超过4MiB），请求�
 
 `--json`的run/resume输出NDJSON，每条含`protocol_version,type,goal_id,revision,data`，type为goal.admitted/progress/command.receipt/goal.snapshot/error；stdout只有机器记录，日志写stderr。其他命令输出单JSON响应。`ok`只表示API操作成功，不代表Goal成功；必须读取outcome/check结果。人工显示隐藏内部Worker实现细节，但允许按需展开Run诊断。
 
-run/resume结束码：0=achieved；2=输入/权限/配置/协议拒绝；3=规划或业务执行失败/预算耗尽；4=not_met；5=检查不可用；7=cancelled；8=blocked/stop_unknown；130=SIGINT且停止已确认。SIGINT后停止未知必须8，不能130暗示安全结束。waiting时前台继续，不自动退出；显式pause完成的stop命令自身返回0且receipt状态applied。显式Client stop使Goal干净stopped后，拥有该Goal的run/resume宿主退出9；SIGTERM干净停止退出143，SIGINT为130。SDK stop不退出Runtime。普通查询成功均返回0，即便所查Goal未达标，业务结论在内容中；查询失败非0。宿主离线的写命令返回6/host_not_running，明确未受理且无延迟生效。
+CLI退出码采用下表，API操作成功与Goal业务结果分开：
+
+| 码 | 适用结果 |
+|---|---|
+| 0 | run/resume为achieved；查询为读取成功；在线变更命令为意图已提交（不表示停止已完成） |
+| 2 | 输入、权限、配置、协议或不合法resume请求拒绝 |
+| 3 | 规划/业务失败、期限或预算耗尽 |
+| 4 | not_met |
+| 5 | check_unavailable |
+| 6 | 在线命令host_not_running，未受理且无延迟生效 |
+| 7 | cancelled |
+| 8 | blocked、stop_unknown或interrupted，需看具体原因 |
+| 9 | 干净stopped；或同键run只重放未终态回执、需显式resume |
+| 130 | SIGINT后干净stopped，未留下未接纳checking工作或未知停止 |
+| 143 | SIGTERM后干净stopped，条件同上 |
+
+waiting时前台继续，不自动退出。Client stop/cancel返回0只表示事务接受意图，输出必须带当前GoalSnapshot.status/pending_runs；不能宣称Goal已停止或锁已释放。拥有该Goal的CliDriver在§6.9收束后退出相应码并放锁；SDK stop不退出Runtime。SIGINT/SIGTERM导致blocked/interrupted或stop_unknown时返回8。普通查询即便读到失败Goal仍返回0，业务结论在内容中。
 
 产物导出按opaque引用校验，输出路径由用户明确指定；不接受模型提供的宿主路径。覆盖现有文件需显式`--overwrite`，避免“读产物”意外覆盖用户文件。相同内容可直接返回already_exported，不重复执行模型。
 
@@ -470,15 +505,18 @@ run/resume结束码：0=achieved；2=输入/权限/配置/协议拒绝；3=规�
 - [GoalRequest Schema](10-goal-dag-orchestration/contract/goal-request.schema.json)：请求信封与Goal Spec；profile_ref在受理时解析并冻结。max_revisions缺省时由Runtime规范化显式填2，Schema的default仅是注解，不能假设验证库自动填值。
 - [PlannerResult Schema](10-goal-dag-orchestration/contract/planner-result.schema.json)：Planner完整结果联合类型；proposal通过包内锁定的$ref使用下述唯一提案形状，needs_input只返回注册Schema引用和理由，不含可信等待身份。
 - [PlanProposal Schema](10-goal-dag-orchestration/contract/plan-proposal.schema.json)：节点、连接、输出及检查形状；重复JSON键、引用/无环/连接/权限/预算约束还必须经过§6.4的语义检查，不能只调用Schema库。
+- [CheckRequirements集合Schema](10-goal-dag-orchestration/contract/check-requirements.schema.json)：Profile的检查集合至少包含一个goal_final，单项身份唯一性仍由注册语义检查。
 - [CheckRequirement Schema](10-goal-dag-orchestration/contract/check-requirement.schema.json)：宿主固定检查阶段、规则、目标别名及受保护输出，Planner不能改写。
 - [Evaluation候选Schema](10-goal-dag-orchestration/contract/evaluation-candidate.schema.json)：模型只能返回评价内容，不能提供受信Receipt身份；结果项集合和整体verdict一致性由§6.8检查。
 - [非规范性请求示例](10-goal-dag-orchestration/contract/goal-request.example.json)：仅演示文档审阅业务；其中数值不是宿主默认值、真实运行授权或Inquiry研究配额。
+
+外部JSON候选在适配器从字节解码之前有界读取/长度拒绝，生效上限为HostConfig.max_json_candidate_bytes（安全上限4MiB）、Run剩余候选容量、Goal预留容量及适配器帧上限的最小值；超限拒绝并计相应受理事实，不能先无限反序列化后补预算检查。能力注册必须证明外部帧路径有此限制，无法提供则Goal路径不启用。文件型JSON候选也按同一上限有界读取；原始非JSON附件仍按自己的受限字节策略处理。评价项和violations的message各最多4000字符，完整候选仍受字节上限，不因单字段合法而绕过。
 
 Schema中的正整数上限为2^63−1以匹配SQLite安全计数，实际时长还需检查单调时钟可表示范围、容量和授权上限。所有包含引用的Schema资源由注册包内锁定解析，不在验证时请求网络。
 
 ### 8.4 错误与版本
 
-错误结构复用`code/subject/message`，新增`category,path,expected_revision,actual_revision,retryable`可选字段；path是本请求JSON Pointer，不是文件系统敏感路径。稳定类别：input_invalid、capability_denied、plan_invalid、planning_exhausted、schema_mismatch、dependency_failed、check_unavailable、goal_not_met、budget_exhausted、revision_conflict、request_conflict、signal_expired、stale_result、stop_unknown、host_not_running、storage_incompatible、host_binding_changed。
+错误结构复用`code/subject/message`，新增`category,path,expected_revision,actual_revision,retryable`可选字段；path是本请求JSON Pointer，不是文件系统敏感路径。稳定类别：input_invalid、capability_denied、plan_invalid、planning_exhausted、schema_mismatch、dependency_failed、check_unavailable、goal_not_met、budget_exhausted、revision_conflict、request_conflict、signal_expired、stale_result、stop_unknown、host_not_running、storage_incompatible、host_binding_changed、unsupported_store_mode、clock_untrusted、not_resumable；终结reason另含wall_timeout、planning_timeout、input_timeout。
 
 retryable只表示同一只读/幂等命令可重读或安全重提，不授权自动重跑业务。未知协议/更高storage版本直接拒绝；不尽力猜字段。CLI与SDK持有同一校验与错误定义，退出码映射只在CLI，核心不依赖进程退出码推进。
 
@@ -493,7 +531,7 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 ### 9.2 状态与并发不变量
 
 1. 每Goal最多一个accepted PlanVersion，只有它可派发业务。
-2. 同一节点/Worker至多一个started Run；重复完成消息不会重复接纳。
+2. 同一节点执行成员至多一个started Run；重复完成消息不会重复接纳。
 3. 公共输出仅来自所有必需成员已接受且节点Gate通过的版本。
 4. 业务转移和command receipt同事务；Trace非事务外补丁，不构成权威。
 5. 任何新准入必须满足used+reserved+新预留不超上限；真实尾部结算超额必须保留actual_used/overrun并停止新准入，不能裁剪事实；停止未知时禁止声称硬终止。
@@ -508,7 +546,7 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 ## 10 迁移/兼容/回滚
 
 - 公共接口增量：旧Runtime构造函数和Flow API保留；不为支持Goal给现有必填结构体偷偷加字段。新API显式启用，旧Playbook不自动变成DAG；旧ready/completed不重新解释为新Goal achieved。
-- 存储版本：state.sqlite由v1原子升级v2，仅加Goal表/索引与版本，不重写旧业务记录。打开前先检查版本和Schema一致性，BEGIN IMMEDIATE迁移失败整体回滚。旧二进制见v2按现有“更高版本拒绝”规则停止，不能当成向后可写兼容。
+- 存储版本：state.sqlite由v1原子升级v2，仅增量加表/索引与物理运行账本，不重解释旧Flow业务结果。创建表、完整active导入和user_version=2在同一事务原子完成；任一步失败全部回滚，任何派发/Socket服务均在迁移成功后启动。打开前先检查版本和Schema一致性，BEGIN IMMEDIATE迁移失败整体回滚。旧二进制见v2按现有“更高版本拒绝”规则停止，不能当成向后可写兼容。
 - 共享Run管线保持旧Flow协议、授权、预算/240秒legacy回退、Trace字段及停止语义；新Goal使用显式策略。并发扩大只在open_orchestrated显式配置后生效。
 - 配置/能力/Skill/Schema/执行器身份变更改变绑定摘要：有在途/未知Run时禁止直接接管；不能用新绑定确认旧Run已停止。首版不提供rebind或在线热升级：已有Store恢复须匹配冻结绑定；要使用新配置，确认旧执行全部停止后显式创建新Store/Goal并导入授权产物，保留旧Store供读取。
 - 回滚：已在v2运行的Store不能交给旧二进制猜写。需要回到旧版时，先停止并确认所有执行，保留当前Store；恢复**升级前一致备份**到另一目录再启动旧版，明确升级后的新Goal不会在旧版恢复。若需保留新Goal则使用支持v2的修正版前进，不伪称无损降级。
@@ -549,7 +587,7 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 | 对应验收 | 机制与必须覆盖的反例 | 层级与取证 |
 |---|---|---|
 | S1.A1/A2 | 同一Goal人工/JSON输出比对；空配置/非法输入零Run；读取错误与无产物分离 | E2E：CLI原始stdout/stderr、退出码、公开快照 |
-| S1.A3、S5.A2 | 前台等待，另一客户端补充/取消；pause释放锁/槽位、nonce保留但暂停时拒绝signal、恢复不重跑；离线命令拒绝；SIGINT/SIGKILL与期限先处理 | E2E/Integration：实际进程PID/适配器停止事实、所有Run列表 |
+| S1.A3、S5.A2 | 前台等待，另一客户端补充/取消；pause释放锁/槽位、nonce保留但暂停时拒绝signal、未决checking阻断恢复；clock_untrusted解除与恢复幂等；离线命令拒绝；SIGINT/SIGKILL与期限先处理 | E2E/Integration：实际进程PID/适配器停止事实、所有Run列表 |
 | S2.A1 | 真实Planner自主/模板；模板拒绝增删骨架和扩权；固定输入包摘要 | E2E：真实Agent日志、提案原文及锁定计划；夹具结果单列 |
 | S2.A2 | 重复JSON键、未知字段、超容量、环/自环、未知端口、孤立节点、非法selector、Schema不匹配、权限及验收缺失 | Unit/Integration：分类/path/expected/actual及业务派发计数0 |
 | S2.A3 | 初次错→修正合法；needs_input联合结果/补充后耗尽；3次均错；时间/工具/Run先耗尽；plan check fail与error不同 | Integration：每次提案/检查及全预算，不通过换Run重置上限 |
@@ -558,9 +596,9 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 | S3.A3 | 一支input等待，另一支推进；等待到期与signal并发及离线跨期限；上游失败后相关后继dependency_failed，无永久pending | Integration：公开ready/waiting/依赖状态和容量 |
 | S4.A1/A2 | pass/fail/error组合、缺必需receipt、跨Goal证据、旧规则/旧摘要/错producer_run拒绝 | Integration：CheckRequest/EvaluationReceipt和最终状态 |
 | S4.A2/A3 | checkpoint keys/targets/checker精确覆盖；before_outputs保护D漏依赖拒绝、A→B后联合检查A/B无反插环；checkpoint fail停并行分支后收束；评价Worker成功但verdict fail；初稿pass不能接纳最终稿；取消与结果同刻竞争 | Integration/E2E：worker outcome、quality verdict、revision各自证据 |
-| S5.A1 | 同键同参、同键异参；响应丢失后重试；完成事件重复/迟到/乱序 | Integration：命令回执唯一性、Run/接纳计数不增加 |
+| S5.A1 | 同键同参、同键异参；崩溃后的同键run必须先恢复对账；响应丢失后重试；完成事件重复/迟到/乱序 | Integration：命令回执唯一性、Run/接纳计数不增加 |
 | S5.A2 | 在§6.9每个崩溃窗口注入；取消递增epoch后旧Run停止/消耗仍可结算；wall/transition耗尽仍可收尾；stop确认/未知/旧绑定缺失；数据库写失败 | Integration：停止/epoch/持久化对照，不仅内存断言 |
-| S5.A3 | Flow与Goal同时争唯一宿主槽位及v1 active迁移；两Run同时争最后工具调用/时间/候选额度；业务状态边/失败传播cleanup的transition精确计数；准备与规则check也消耗；未知停止不归还reserved | Integration：used/reserved/available不变量及拒绝原因 |
+| S5.A3 | Flow与Goal同时争唯一宿主槽位及v1 active原子迁移，旧构造函数不得绕账本；两Run同时争最后工具调用/时间/候选额度；业务状态边/失败传播cleanup的transition精确计数；准备与规则check也消耗；未知停止不归还reserved | Integration：used/reserved/available不变量及拒绝原因 |
 | S5.A3 | 两Goal同能力不同输入；owner越权；一个Goal未知停止占槽时另一排队Goal仍按自身墙钟到期收束，不伪成功 | Integration：隔离产物和授权；全局容量确实受占用 |
 | S6.A1/A2 | Inquiry真实Agent规划执行、产物/引用和未达标；公开接口读取，不读内部表 | E2E：应用侧运行、最终产物/评价、来源定位；最终文章质量另属Inquiry #7 |
 | S6.A3 | 随包文档审阅Profile，用相同Goals核心完成另一最小业务 | E2E/Integration：替换目录/Schema，不修改研究专用Runtime分支 |

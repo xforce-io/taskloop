@@ -97,3 +97,4 @@
 | 状态转移器 | 根据当前快照、已验证事件与转移规则计算状态变更和待执行动作，并由事务接纳后生效的Runtime组件。 | — |
 | PlannerResult | Planner一次调用返回的计划提案或结构化补充输入请求，不授予状态提交权。 | — |
 | terminal_intent | 首个决定性事件持久化的待终结业务结果与原因，在停止结算完成后提交为最终outcome。 | — |
+| 节点执行成员 | 节点内部对某Worker的一次具名调用规格，具有member_id和EntryContract，最多产生一次Run，不等同于L4 Worker组件。 | — |
