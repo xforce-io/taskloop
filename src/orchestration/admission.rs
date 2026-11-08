@@ -10,6 +10,7 @@ pub(crate) struct PreparedGoal {
     pub spec_digest: String,
     pub profile_digest: String,
     pub effective_limits: GoalLimits,
+    pub limit_sources: GoalLimitSources,
     pub admitted_at_utc_ms: u64,
     pub wall_deadline_utc_ms: u64,
     pub planning_deadline_utc_ms: u64,
@@ -55,6 +56,16 @@ impl FrozenRegistry {
                     "host tool grant not authorized",
                 )
             })?;
+        if !request.spec.imports.is_empty()
+            && (!grant.tools.iter().any(|t| t == "artifact.read")
+                || !tool_grant.tools.iter().any(|t| t == "artifact.read"))
+        {
+            return Err(Error::new(
+                "capability_denied",
+                "/spec/imports",
+                "artifact.read must be explicitly granted to import artifacts",
+            ));
+        }
         let profile = self
             .profiles
             .get(&request.spec.profile_ref)
@@ -143,6 +154,12 @@ impl FrozenRegistry {
             spec_digest: digest(&spec_bytes),
             profile_digest: profile_digest.clone(),
             effective_limits: limits,
+            limit_sources: GoalLimitSources {
+                requested: request.spec.limits.clone(),
+                goal_grant: grant.limits.clone(),
+                host: options.limits.clone(),
+                tool_grant: tool_grant.limits.clone(),
+            },
             admitted_at_utc_ms: now,
             wall_deadline_utc_ms: wall,
             planning_deadline_utc_ms: planning,

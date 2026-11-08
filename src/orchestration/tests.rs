@@ -22,7 +22,7 @@ impl Executor for NeverExecute {
         panic!("registration/validation must never execute business work")
     }
 }
-pub(super) fn fixture() -> (OrchestrationRegistry, HostBindings) {
+pub(crate) fn fixture() -> (OrchestrationRegistry, HostBindings) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("docs/design/10-goal-dag-orchestration/contract/document-review-package");
     let package: Value =
@@ -756,4 +756,47 @@ fn file_resource_registration_reuses_no_escape_and_no_symlink_reads() {
             .register_schema_file("link", dir.path(), "link.json")
             .is_err()
     );
+}
+
+pub(crate) fn prepared_fixture() -> super::admission::PreparedGoal {
+    let (mut registry, mut bindings) = fixture();
+    bindings.grants.insert(
+        "test".into(),
+        crate::Grant {
+            definitions: vec![],
+            tools: vec!["artifact.write".into()],
+            limits: crate::ResourceLimits {
+                max_active_ms: 5_000_000,
+                max_wall_ms: 1_000_000,
+                max_runs: 20,
+                max_transitions: 1000,
+            },
+        },
+    );
+    registry.validate_and_freeze(&bindings).unwrap();
+    let mut options = options();
+    options.grants.insert(
+        "test".into(),
+        GoalGrant {
+            profile_digests: vec![registry.profile_digest("document-review@1").unwrap()],
+            capabilities: vec!["review@1".into()],
+            tools: vec!["artifact.write".into()],
+            limits: options.limits.clone(),
+        },
+    );
+    let raw = json!({"protocol_version":1,"request_key":"new-goal","grant_ref":"test","spec":{"goal":"Review","inputs":{"document_text":"Document"},"profile_ref":"document-review@1","planning":{"mode":"autonomous","max_planning_ms":100_000},"limits":options.limits}});
+    registry
+        .frozen()
+        .unwrap()
+        .prepare_goal(
+            &serde_json::to_vec(&raw).unwrap(),
+            &crate::Caller {
+                principal: "alice".into(),
+                grants: vec!["test".into()],
+            },
+            &bindings,
+            &options,
+            crate::runtime::now_ms(),
+        )
+        .unwrap()
 }

@@ -150,7 +150,7 @@ impl PlanValidationFailure {
         self.issues.push(PlanIssue {
             category,
             path: path.into(),
-            message: message.into(),
+            message: message.into().chars().take(4000).collect(),
             expected: None,
             actual: None,
         });
@@ -172,7 +172,12 @@ impl PlanValidationFailure {
     }
     fn from_error(category: PlanIssueCategory, error: Error) -> Self {
         let mut failure = Self::new();
-        failure.push(category, error.path, error.message);
+        let path = if error.path.starts_with('/') {
+            error.path
+        } else {
+            "/".into()
+        };
+        failure.push(category, path, error.message);
         failure
     }
 }

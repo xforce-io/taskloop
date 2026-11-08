@@ -34,3 +34,11 @@
 - 新增21项Unit，覆盖注册、计划、检查、许可、迁移及占槽；本轮 `cargo test --locked --offline` 155通过、5项原有真实环境用例ignored。仅常规套件证据，不计真实Agent/E2E达标。
 - L2 v0.10.4具体化原有产物字段selector的登记位置（可选artifact_selectors），节点成员形状上限对齐既有32安全边界；原18项验收不变。
 - 尚待：Goal事务/预算与协调器、共享Managed Run/Dispatcher完整接线、CLI/客户端、两个业务/真实Agent、功能地图、独立review及发布。当前dead_code警告来自尚未接线部分，不以此候选进入最终Clippy/review门。
+
+## 实现检查点二（2026-11-08）
+
+- Goal专用状态/CAS/回执/预算表已落地，工具和字节准入独立事务同时更新Run剩余预留与Goal总额；取消后仍按原Run身份接受停止/消耗事实。新增12项Unit（预算4、时钟2、Goal事务6）。
+- `ManagedBridge/ManagedRunOwner/execute_managed`已从旧Flow抽出并由Flow实际复用；Schema、工具、候选、附件、Trace及原生超时/停止不复制。停止查询有15秒超时及panic边界。
+- 常规完整套件167通过、5项原有环境用例ignored；原始日志：`target/verify-taskloop/10-dev/foundation-tests.log`。此处仍不是Goal执行E2E或独立review结论。
+- L2 v0.10.5补全Planner固定planning_feedback输入；资源示例及字节摘要同步，既有离线语义例8项反例仍通过。EvaluationReceipt仅复制目标身份摘要，目标正文保留在有界CheckInput/内容寻址blob中。
+- Goal记录/检查输入/预算类型已定义，但Goal协调器、共享Dispatcher完整接线和外部候选解码前限额尚未完成；CLI/两个真实业务/真实Agent/最终review与release继续保持待办。

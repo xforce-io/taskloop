@@ -33,6 +33,8 @@ pub struct GoalBlocker {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalTerminalIntent {
+    pub revision: u64,
+    pub at_utc_ms: u64,
     pub outcome: GoalOutcome,
     pub reason: String,
     pub subject: String,

@@ -21,7 +21,7 @@
     },
     "planner-input": {
       "path": "schemas/planner-input.json",
-      "sha256": "cc72396fb9a6575c5b77ae1302e0e0a130990f5c0199a3c7f01f4b3d44dc6f29"
+      "sha256": "c34ceb7266b0140d84a75f4989c3bcdd54a5b33cc3b622696851732c9aaaef9e"
     },
     "goal-text": {
       "path": "schemas/goal-text.json",

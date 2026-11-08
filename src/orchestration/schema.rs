@@ -94,7 +94,11 @@ pub(crate) struct Schemas {
     contracts: BTreeMap<String, Arc<jsonschema::Validator>>,
 }
 pub(crate) fn invalid(path: &str, message: impl Into<String>) -> Error {
-    Error::new("input_invalid", path, message)
+    Error::new(
+        "input_invalid",
+        path,
+        message.into().chars().take(4000).collect::<String>(),
+    )
 }
 impl Schemas {
     pub fn compile(application: &BTreeMap<String, SchemaSource>) -> Result<Self> {

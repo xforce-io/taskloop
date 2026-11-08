@@ -108,3 +108,4 @@
 | CheckInput | Runtime以冻结检查请求、规则和授权目标构造的只读checker执行输入。 | — |
 | RuleSet | 应用声明的版本化领域检查项、通过条件及证据要求集合。 | — |
 | RegistrationReceipt | 类型注册目录完成验证并封存后返回的锁定摘要和已注册引用回执。 | — |
+| EvaluationSubject | 评价回执绑定的提案摘要或确切产物引用集合，不重复保存目标正文。 | — |

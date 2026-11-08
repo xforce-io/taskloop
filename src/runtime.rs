@@ -801,7 +801,7 @@ impl Inner {
         let Some(executor) = self.bindings.executors.get(&active.executor) else {
             return StopState::Unknown;
         };
-        executor.stop_or_confirm(&active.id).await
+        crate::managed::confirm_stop(executor, &active.id).await
     }
     pub fn authorized(&self, id: &str, caller: &Caller) -> Result<Row> {
         let row = self.store.load(id)?;

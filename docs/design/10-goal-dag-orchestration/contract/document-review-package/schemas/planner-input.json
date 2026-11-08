@@ -28,6 +28,44 @@
     },
     "profile": {
       "$ref": "taskloop:orchestration-profile:v1"
+    },
+    "planning_feedback": {
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "previous_candidate_sha": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "errors": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object"
+          }
+        },
+        "check_results": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "required": [
+        "attempt",
+        "previous_candidate_sha",
+        "errors",
+        "check_results"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -37,7 +75,8 @@
     "profile_digest",
     "planning_mode",
     "capability_catalog",
-    "profile"
+    "profile",
+    "planning_feedback"
   ],
   "additionalProperties": false
 }

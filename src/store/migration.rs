@@ -15,6 +15,7 @@ CREATE TABLE run_leases(run_id TEXT PRIMARY KEY,owner_kind TEXT NOT NULL CHECK(o
 CREATE INDEX held_run_leases ON run_leases(owner_kind,owner_id) WHERE slot_held=1;
 CREATE TABLE goals(id TEXT PRIMARY KEY,owner TEXT NOT NULL,request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,revision INTEGER NOT NULL,queue_order INTEGER NOT NULL,body TEXT NOT NULL,UNIQUE(owner,request_key));
 CREATE INDEX active_goals ON goals(queue_order,id) WHERE json_extract(body,'$.status')!='finished';
+CREATE TABLE goal_budget(goal_id TEXT PRIMARY KEY,body TEXT NOT NULL);
 CREATE TABLE goal_plans(goal_id TEXT NOT NULL,digest TEXT NOT NULL,bytes BLOB NOT NULL,accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),metadata TEXT NOT NULL,PRIMARY KEY(goal_id,digest));
 CREATE UNIQUE INDEX one_locked_goal_plan ON goal_plans(goal_id) WHERE accepted=1;
 CREATE TABLE goal_command_receipts(owner TEXT NOT NULL,goal_id TEXT NOT NULL,kind TEXT NOT NULL,request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL,applied_revision INTEGER NOT NULL,PRIMARY KEY(owner,goal_id,kind,request_key));
@@ -79,6 +80,7 @@ const GOAL_COLUMNS: &[(&str, &[&str])] = &[
             "body",
         ],
     ),
+    ("goal_budget", &["goal_id", "body"]),
     (
         "goal_plans",
         &["goal_id", "digest", "bytes", "accepted", "metadata"],

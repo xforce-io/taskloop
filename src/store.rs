@@ -8,6 +8,7 @@ use std::{
     sync::Mutex,
 };
 
+pub(crate) mod goals;
 mod leases;
 mod migration;
 

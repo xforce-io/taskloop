@@ -325,6 +325,13 @@ impl BudgetState {
         Ok(())
     }
     pub fn admit_tool(&self, id: &str) -> Result<()> {
+        self.admit_tool_with(id, || Ok(()))
+    }
+    pub(crate) fn admit_tool_with(
+        &self,
+        id: &str,
+        admit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         let mut d = self.data.lock().map_err(Error::io)?;
         self.update(&mut d);
         let limit = if d.hint.remaining_ms == 0 {
@@ -351,11 +358,30 @@ impl BudgetState {
                 "tool refused by execution budget; use admitted submission path while budget remains",
             ));
         }
+        if d.execution_outcome.is_some() {
+            return Err(Error::new(
+                "stale_attempt",
+                "/budget",
+                "executor invocation already ended",
+            ));
+        }
+        if let Err(error) = admit() {
+            d.calls_rejected = d.calls_rejected.saturating_add(1);
+            return Err(error);
+        }
         d.calls_used += 1;
         self.update(&mut d);
         Ok(())
     }
     pub fn admit_bytes(&self, bytes: u64, retained: u64) -> Result<()> {
+        self.admit_bytes_with(bytes, retained, || Ok(()))
+    }
+    pub(crate) fn admit_bytes_with(
+        &self,
+        bytes: u64,
+        retained: u64,
+        admit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         self.guard_time()?;
         let mut d = self.data.lock().map_err(Error::io)?;
         if retained > d.effective_candidate_bytes
@@ -368,6 +394,14 @@ impl BudgetState {
                 "candidate retained or cumulative byte limit reached",
             ));
         }
+        if d.execution_outcome.is_some() {
+            return Err(Error::new(
+                "stale_attempt",
+                "/budget",
+                "executor invocation already ended",
+            ));
+        }
+        admit()?;
         d.candidate_bytes_used += bytes;
         Ok(())
     }

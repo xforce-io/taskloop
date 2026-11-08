@@ -105,5 +105,11 @@
       "/goal": "goal-text",
       "/inputs/document_text": "text"
     }
+  },
+  "planning_feedback": {
+    "attempt": 1,
+    "previous_candidate_sha": null,
+    "errors": [],
+    "check_results": []
   }
 }

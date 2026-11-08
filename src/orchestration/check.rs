@@ -42,6 +42,53 @@ pub enum CheckSubject {
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EvaluationSubject {
+    Proposal {
+        proposal_digest: String,
+    },
+    Artifacts {
+        plan_digest: String,
+        targets: BTreeMap<String, CheckTargetIdentity>,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckTargetIdentity {
+    pub artifact_id: String,
+    pub sha256: String,
+    pub schema_digest: String,
+}
+impl CheckSubject {
+    fn identity(&self) -> EvaluationSubject {
+        match self {
+            Self::Proposal {
+                proposal_digest, ..
+            } => EvaluationSubject::Proposal {
+                proposal_digest: proposal_digest.clone(),
+            },
+            Self::Artifacts {
+                plan_digest,
+                targets,
+            } => EvaluationSubject::Artifacts {
+                plan_digest: plan_digest.clone(),
+                targets: targets
+                    .iter()
+                    .map(|(alias, target)| {
+                        (
+                            alias.clone(),
+                            CheckTargetIdentity {
+                                artifact_id: target.artifact_id.clone(),
+                                sha256: target.sha256.clone(),
+                                schema_digest: target.schema_digest.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckInput {
     pub protocol_version: u32,
@@ -68,7 +115,7 @@ pub struct EvaluationReceipt {
     pub phase: CheckInputPhase,
     pub checker_id: String,
     pub rules_digest: String,
-    pub subject: CheckSubject,
+    pub subject: EvaluationSubject,
     pub input_digest: String,
     pub candidate_digest: String,
     pub producer_run_id: Option<String>,
@@ -245,7 +292,7 @@ impl IssuedCheck {
             phase: self.input.phase,
             checker_id: self.checker_ref.clone(),
             rules_digest: self.input.rules_digest.clone(),
-            subject: self.input.subject.clone(),
+            subject: self.input.subject.identity(),
             input_digest: self.input_digest.clone(),
             candidate_digest: checked.candidate_digest,
             producer_run_id: self.producer_run_id.clone(),
