@@ -162,3 +162,9 @@
 - 未来高水位注入证明clock_untrusted阻断准入/resume，重复recover无新事实幂等；恢复可信后仍stopped并保留原期限，只有显式resume才恢复运行资格，未产生Run。最初测试把被拒命令的持久化回执revision误算成recover变更，已按实际契约分开核对拒绝回执重放和恢复幂等，未改生产逻辑；复验通过（`clock-trust-recovery-retest.log`），严格Clippy通过。
 - 复验准备工具首次接入探针如实保留29次原生调用尝试（含启动前失败），可确认原生耗时累计1528.395秒；不是所有开发命令耗时或模型上游请求数。尚无独立代码review，不能导入旧设计review冒充。`keel reverify --adopt-history`实测BLOCKED：requires existing review history；`--initial`仅接受空历史。探针不是完整复验计划或产品验收。已向用户询问本次是否允许留存原始记录、手工核算后继续，或先修工具；回答前不新增依赖该选择的模型调用。
 - 本次仅补验收测试与功能地图，L2 v0.10.16和原18项验收不变。正式verify/独立review/CI与合入仍待完成，真实Workflow旧失败不改判。
+
+
+## 实现检查点十六（2026-11-09）
+
+- 补齐§11.1明确要求的pause中Planner合法/非法/needs_input三分支：在原生已返回但未业务接纳窗口发出pause，三类结果各自持久化，重复consume不重算，暂停期间不锁定/补建/派发后续工作；resume后分别锁定计划、补建有界修正请求或保留nonce/期限并接受补充，始终只计原1个Run且冻结Spec不变。用例通过（`paused-planner-three-branches.log`），未改生产逻辑。
+- 98b6323开发套件运行期间补入该测试，旧日志不移挂最终候选；提交后重新冻结并执行必要套件。真实模型复验仍等待已发出的流程选择，未清空历史或把旧设计审查冒充独立代码review。

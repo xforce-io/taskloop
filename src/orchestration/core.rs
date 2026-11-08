@@ -1484,6 +1484,149 @@ mod tests {
             ExecutionOutcome::Completed { usage: json!({}) }
         }
     }
+    struct PausedPlanner(&'static str);
+    #[async_trait::async_trait]
+    impl Executor for PausedPlanner {
+        fn capabilities(&self) -> ExecutorCapabilities {
+            ExecutorCapabilities::MANAGED
+        }
+        fn enforces_json_candidate_limit(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            invocation: Invocation,
+            tools: Arc<dyn ToolBridge>,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> ExecutionOutcome {
+            if self.0 == "needs_input" {
+                return RequestPlanningInput
+                    .execute(invocation, tools, cancel)
+                    .await;
+            }
+            if self.0 == "valid" {
+                return SubmitPlan.execute(invocation, tools, cancel).await;
+            }
+            let mut plan: Value = serde_json::from_str(include_str!("../../docs/design/10-goal-dag-orchestration/contract/document-review-package/plan.example.json")).unwrap();
+            plan["goal_spec_digest"] = invocation.stage_input["goal_spec_digest"].clone();
+            plan["profile_digest"] = invocation.stage_input["profile_digest"].clone();
+            plan["nodes"]["review"]["depends_on"] = json!(["review"]);
+            tools.call("artifact.write", json!({"slot":"proposal","value":{"protocol_version":1,"kind":"proposal","proposal":plan}})).await.unwrap();
+            ExecutionOutcome::Completed {
+                usage: json!({"controlled":true}),
+            }
+        }
+    }
+    #[tokio::test]
+    async fn paused_planner_results_preserve_valid_invalid_and_input_branches_until_explicit_resume()
+     {
+        for branch in ["valid", "invalid", "needs_input"] {
+            let (_directory, runtime, goals, caller, request) =
+                setup_custom(Some(Arc::new(PausedPlanner(branch))), false, |registry| {
+                    registry
+                        .profiles
+                        .get_mut("document-review@1")
+                        .unwrap()
+                        .planning_input_schemas = vec!["text".into()];
+                })
+                .await;
+            let spec = request.spec.clone();
+            let id = goals.submit(request, &caller).await.unwrap().goal_id;
+            let run_id = goals.core.materialize(&id).unwrap().unwrap();
+            goals
+                .core
+                .prepare_execution(&id, &run_id)
+                .unwrap()
+                .unwrap()
+                .execute()
+                .await
+                .unwrap();
+            let returned = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(
+                returned.runs[&run_id].phase,
+                GoalRunPhase::ExecutionReturned
+            );
+            goals
+                .stop(&id, "pause-planner-result", returned.revision, &caller)
+                .await
+                .unwrap();
+            assert!(goals.core.consume_return(&id, &run_id).unwrap());
+            assert!(!goals.core.consume_return(&id, &run_id).unwrap());
+            let paused = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(paused.status, GoalStatus::Stopped, "{branch}: {paused:?}");
+            assert_eq!(paused.budget.runs_used, 1);
+            assert_eq!(paused.progress.pending_requests, 0);
+            assert!(paused.nodes.is_empty());
+            assert!(paused.budget.reserved.is_empty());
+            assert!(goals.core.materialize(&id).unwrap().is_none());
+            assert!(goals.plan(&id, &caller).await.is_err());
+            if branch == "invalid" {
+                assert!(paused.runs[&run_id].plan_validation_failure.is_some());
+            }
+            let wait = paused.waiting.first().cloned();
+            assert_eq!(wait.is_some(), branch == "needs_input");
+            goals
+                .resume(&id, "resume-planner-result", paused.revision, &caller)
+                .await
+                .unwrap();
+            goals.core.advance(&id).unwrap();
+            let resumed = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(resumed.budget.runs_used, 1);
+            assert_eq!(
+                serde_json::to_value(&resumed.spec).unwrap(),
+                serde_json::to_value(&spec).unwrap()
+            );
+            match branch {
+                "valid" => {
+                    assert_eq!(resumed.stage, GoalStage::Executing);
+                    assert!(goals.plan(&id, &caller).await.is_ok());
+                    assert_eq!(resumed.nodes.len(), 1);
+                }
+                "invalid" => {
+                    assert_eq!(resumed.stage, GoalStage::Planning);
+                    assert_eq!(resumed.progress.pending_requests, 1);
+                }
+                "needs_input" => {
+                    let wait = wait.unwrap();
+                    assert_eq!(resumed.status, GoalStatus::Waiting);
+                    assert_eq!(resumed.waiting[0].nonce, wait.nonce);
+                    assert_eq!(resumed.waiting[0].expires_at_utc_ms, wait.expires_at_utc_ms);
+                    goals
+                        .signal(
+                            &id,
+                            GoalSignalRequest {
+                                protocol_version: 1,
+                                wait_id: wait.wait_id,
+                                nonce: wait.nonce,
+                                payload: json!("Clarified without changing the frozen scope"),
+                                request_key: "clarify-paused-planner".into(),
+                                expected_revision: resumed.revision,
+                            },
+                            &caller,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        goals
+                            .get(&id, &caller)
+                            .await
+                            .unwrap()
+                            .progress
+                            .pending_requests,
+                        1
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let final_view = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(final_view.budget.runs_used, 1);
+            goals
+                .cancel(&id, "close-planner-branch", final_view.revision, &caller)
+                .await
+                .unwrap();
+            runtime.shutdown().await.unwrap();
+        }
+    }
     #[tokio::test]
     async fn planner_locks_one_valid_plan_and_preserves_the_original_candidate_identity() {
         let (_directory, runtime, goals, caller, request) = setup(Some(Arc::new(SubmitPlan))).await;
