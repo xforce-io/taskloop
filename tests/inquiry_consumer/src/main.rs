@@ -154,6 +154,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let node = env_path("MILKIE_NODE")?;
     let cli = env_path("MILKIE_CLI")?;
     let milkie_cli_sha = format!("{:x}", Sha256::digest(std::fs::read(&cli)?));
+    let milkie_revision = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(cli.parent().ok_or("Milkie CLI parent missing")?)
+        .output()?;
+    if !milkie_revision.status.success() {
+        return Err("cannot identify Milkie source candidate".into());
+    }
+    let milkie_sha = String::from_utf8(milkie_revision.stdout)?.trim().to_owned();
     let taskloop_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let taskloop_rev = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -198,7 +206,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     let bounds = registry::limits();
     let bindings = HostBindings::default()
-        .configuration_version("inquiry-goal-integration-v1")
+        .configuration_version(format!("inquiry-goal-v1-milkie-{milkie_sha}"))
         .executor("agent", Arc::new(MilkieExecutor::new(config)?))
         .executor("select", Arc::new(domain::Native::Select))
         .executor("fetch", Arc::new(domain::Native::Fetch))
@@ -231,7 +239,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     save(
         &root,
         "environment.json",
-        &json!({"inquiry_sha":INQUIRY_SHA,"taskloop_sha":taskloop_sha,"milkie_cli_sha256":milkie_cli_sha,"profile_digests":options.grants["integration"].profile_digests,"native":"grok-cli","model":model,"mode":args[1],"limits":bounds,"rules":"compiled and frozen before any model call"}),
+        &json!({"inquiry_sha":INQUIRY_SHA,"taskloop_sha":taskloop_sha,"milkie_sha":milkie_sha,"milkie_cli_sha256":milkie_cli_sha,"profile_digests":options.grants["integration"].profile_digests,"native":"grok-cli","model":model,"mode":args[1],"limits":bounds,"rules":"compiled and frozen before any model call"}),
     )?;
     if args[1] == "check" {
         registry::document(&bindings)?;

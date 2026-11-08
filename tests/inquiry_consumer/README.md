@@ -2,6 +2,8 @@
 
 本 crate 只用公开 TaskLoop API，固定 Inquiry `d4b05750a60b2158b325b468d51b53d0c2dca3ca`，通过 Cargo patch 将其 TaskLoop 依赖统一指向本仓库候选。它是 #10 S6 的可运行应用消费者，不是 Inquiry Web 迁移，也不代替 Inquiry #7 深度文章质量验收。
 
+Milkie必须提供`execution-sidecar`协议；仅有`agent`/`serve`的旧CLI不兼容。验证环境使用Milkie `98b5ec1c02abbc9612356387d982d6e96b272a21`重新构建，并记录源提交与CLI摘要；先执行现有`milkie_actual_sidecar`受控协议用例，再运行真实模型。
+
 执行前显式提供：
 
 ```sh
