@@ -21,7 +21,10 @@ S1–S3的主要功能文件。事实源为 `docs/design/10-goal-dag-orchestrati
 ```sh
 cargo test --locked --offline --test goal_cli
 cargo test --locked --offline --test goal_sdk
+cargo test --locked --offline --test goal_graphs
 cargo test --locked --offline orchestration::tests
 ```
 
 `goal_cli`运行真实CLI进程配合受控Milkie协议对端；`goal_sdk`为外部crate使用公开SDK及受控Executor。两者不启动真实模型，不能替代08的应用/Agent证据。上述命令没有覆盖到的表内路径须另取证，不能按整套命令成功自动汇总S行pass。
+
+S2.A1真实模板入口：按`tests/inquiry_consumer/README.md`配置固定Milkie及真实Harness，执行消费者workflow模式；核对模板摘要由Runtime提供、提案严格匹配骨架及连接、独立质量检查通过。该路径与受控SDK模板测试分别记录，不以夹具替代真实Planner。

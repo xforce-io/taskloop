@@ -135,3 +135,12 @@
 - 消费者export模式通过只读GoalClient导出公开快照、锁定Plan与Trace，无Runtime/模型/恢复；保留原执行证据，新增只读导出文件单列。
 - 源码版本准备为0.2.0（尚非发布）：核心完整回归201通过、5项环境用例ignored，日志v020-candidate-full-regression.log；核心与Inquiry消费者严格Clippy通过，消费者域契约1通过/1需显式留存数据的工具用例ignored（该用例已另在正/负留存目录执行）。旧外部Flow消费者锁文件补入新增的5项依赖、未升级原依赖，--locked --offline实际运行通过。
 - 下一步在冻结0.2.0候选上重新执行真实正例、未达标例及第二业务；仍需其余图形/可靠性验收核对、最终keel-verify、独立review及release。S6整体未标pass，端到端未完成。
+
+
+## 实现检查点十三（2026-11-09）
+
+- 公开SDK新增节点级顺序、分叉和全部汇合的实际调度测试，核对公共输入、上游结束/下游启动顺序与并发峰值；等待节点不占槽且独立分支继续，上游失败阻断汇合并保留已接纳兄弟产物。非法自环计划先返回精确错误与候选摘要、业务执行数为0，随后在同一Goal内有限修正成功。四项受控Executor测试通过，日志`dag-repair-branches-retest.log`，不冒称真实Agent。
+- Workflow生产者/消费者回归复现：Runtime原先只传模板，而协议要求Planner回显模板摘要；旧fixture自己计算摘要掩盖了缺口。保留失败日志`workflow-digest-producer-regression.log`；Runtime现同步提供冻结模板的`template_digest`，fixture只回显并校验其来源，复验通过。L2 v0.10.15细化已有字段，原18项验收不变。
+- 隔离消费者新增固定Workflow模式，真实Planner必须按Runtime模板及摘要提交提案，复用原document-review Worker与质量检查。三注册目录预检、消费者与核心严格Clippy通过；真实Workflow尚待执行。
+- 上一冻结候选110b35c的S6开发结果：positive-7-v020 achieved（12条引用全部回溯）；negative-2-v020 not_met（保留文章、3项缺口，无自动返工）；document-2-v020 achieved。研究Trace对Rust内置执行保留complete=false，第二业务Trace完整。原证据位于`target/verify-taskloop/10-real-inquiry/`且不换绑新SHA。
+- 最终候选验收表、keel-verify、独立代码review与release仍待完成；开发测试通过不代表端到端完成。

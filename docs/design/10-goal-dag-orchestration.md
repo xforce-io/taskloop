@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.14；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.15；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 产品基线：[L1概要及归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)，以及提交`16a68d48abb829dc14f13d0e0f4d3ed8c754558c`的v0.2用户路径与验收。复用§4行为和§11原18项Sx.Ax，不改变产品范围。本文件按用户指定十三节格式保存唯一L2事实源，L1留在Issue评论。
 
@@ -318,7 +318,7 @@ checkpoint节点须由Plan.checks中的唯一node_checkpoint项绑定，checker_
 
 data用途用于既定前向“评价→修订”，不满足或替代任何必需checkpoint。Runtime同样在N02创建只读请求，phase=node_evaluation（仅CheckInput新增的非阻断执行角色，不扩展CheckRequirement.phase）；check_id为`eval.`加node_id的SHA-256前32位并与本Goal绑定，注册计划时碰撞拒绝，不与Profile必需检查混同。N05调用§6.8统一检查接纳流程，data的fail为有效数据；error不产生公共成功。请求角色、Plan节点和purpose由Runtime冻结验证，模型不能用phase回显改变阻断性质。两种节点材料见checkpoint-node.example.json及evaluation-node.example.json，示例不替代带真实产物身份的Plan校验。
 
-**规划入口的绑定：**Profile.planner_entry_ref必须解析到恰有proposal必需输出槽、Schema为Core PlannerResult的入口；这个槽的内容仍是proposal/needs_input联合类型。Runtime给规划入口构造目标视图、goal_spec_digest/profile_digest、planning_mode、冻结Profile和本Profile能力目录，以及已受理的effective_limits、imports（仅确切ID/内容与Schema摘要），以及固定`planning_feedback={attempt,previous_candidate_sha,errors,check_results}`；首次errors/check_results为空、previous_candidate_sha为null，后续最多100项结构化错误及相关检查摘要；合法规划补充事实由Invocation.signal_facts提供，不改写冻结Spec。反馈与目录同样属于stage_input、须被入口Schema接受，不能只留在前一会话日志中；Profile包含输出别名和完整检查要求，不能让Planner在看不到checks时猜测Plan.checks。入口Schema必须接受该固定字段集合并通过实际值验证；workflow另携宿主冻结的template视图，由其入口Schema及既有模板校验约束，模板缺失即拒绝。示例planner-input.json只接受autonomous，与示例Profile.templates为空一致；它包含完整Profile而非只给能力名。入口Schema不匹配、缺结果槽或工具/隔离能力不支持时在Planner启动前拒绝。
+**规划入口的绑定：**Profile.planner_entry_ref必须解析到恰有proposal必需输出槽、Schema为Core PlannerResult的入口；这个槽的内容仍是proposal/needs_input联合类型。Runtime给规划入口构造目标视图、goal_spec_digest/profile_digest、planning_mode、冻结Profile和本Profile能力目录，以及已受理的effective_limits、imports（仅确切ID/内容与Schema摘要），以及固定`planning_feedback={attempt,previous_candidate_sha,errors,check_results}`；首次errors/check_results为空、previous_candidate_sha为null，后续最多100项结构化错误及相关检查摘要；合法规划补充事实由Invocation.signal_facts提供，不改写冻结Spec。反馈与目录同样属于stage_input、须被入口Schema接受，不能只留在前一会话日志中；Profile包含输出别名和完整检查要求，不能让Planner在看不到checks时猜测Plan.checks。入口Schema必须接受该固定字段集合并通过实际值验证；workflow另携宿主冻结的template视图和template_digest，Planner直接回显该摘要；入口Schema须接受两字段，既有模板校验复核摘要和骨架，模板缺失即拒绝。示例planner-input.json只接受autonomous，与示例Profile.templates为空一致；它包含完整Profile而非只给能力名。入口Schema不匹配、缺结果槽或工具/隔离能力不支持时在Planner启动前拒绝。
 
 **checker执行上下文投影：**对于plan/final及两种节点评价，限制不只在stage_input。Invocation.inputs与ToolContext.inputs都只含本CheckRequest允许的goal_inputs字段；Invocation.artifacts及ToolContext.accepted只含本请求的确切target Artifact，signal_facts默认空，不自动带入规划补充、其他节点或兄弟Run事实。只有显式成为请求target的输入产物才能读取其内容。stage_input为完整CheckInput；Skill及工作目录仅含本入口锁定资源和上述材料，不写入完整Goal输入副本。工具桥按同一只读作用域解析引用，受信DomainTool不得从全局Store补查隐藏材料；普通Worker/旧Flow的上下文语义不变。具备完整Goal读取权限的宿主不能把该权限自动传递给checker Run。
 

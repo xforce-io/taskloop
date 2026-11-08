@@ -114,10 +114,16 @@ impl Executor for ExecutorFixture {
                     let template: WorkflowTemplate =
                         serde_json::from_value(invocation.stage_input["template"].clone()).unwrap();
                     value["proposal"]["planning_mode"] = json!("workflow");
-                    value["proposal"]["template_digest"] = json!(format!(
+                    let expected_digest = format!(
                         "{:x}",
                         Sha256::digest(serde_json::to_vec(&template).unwrap())
-                    ));
+                    );
+                    assert_eq!(
+                        invocation.stage_input["template_digest"], expected_digest,
+                        "Runtime must supply the frozen digest for the Planner to echo"
+                    );
+                    value["proposal"]["template_digest"] =
+                        invocation.stage_input["template_digest"].clone();
                     assert_eq!(template.nodes["combine"].capabilities, vec!["pair@1"]);
                 }
                 if self.3 {

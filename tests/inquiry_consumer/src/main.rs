@@ -123,10 +123,13 @@ async fn collect(goals: &Goals, id: &str, caller: &Caller, root: &Path) -> Resul
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 3
-        || !["check", "positive", "negative", "document", "export"].contains(&args[1].as_str())
+        || ![
+            "check", "positive", "negative", "document", "workflow", "export",
+        ]
+        .contains(&args[1].as_str())
     {
         return Err(
-            "usage: taskloop-inquiry-consumer check|positive|negative|document|export ABSOLUTE_OUTPUT_DIR"
+            "usage: taskloop-inquiry-consumer check|positive|negative|document|workflow|export ABSOLUTE_OUTPUT_DIR"
                 .into(),
         );
     }
@@ -304,6 +307,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         );
     let (registry, options) = if args[1] == "document" {
         registry::document(&bindings)?
+    } else if args[1] == "workflow" {
+        registry::workflow(&bindings)?
     } else {
         registry::build(&resources, &bindings)?
     };
@@ -314,12 +319,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     )?;
     if args[1] == "check" {
         registry::document(&bindings)?;
+        registry::workflow(&bindings)?;
         println!(
             "Registration and dependency check passed; no model or network research executed."
         );
         return Ok(());
     }
-    let question = if args[1] == "document" {
+    let question = if matches!(args[1].as_str(), "document" | "workflow") {
         "请概括项目周报，并仅列出有原文依据的进度、风险与下一步，不补充外部事实。"
     } else if args[1] == "positive" {
         "基于SQLite官方FTS5与WAL文档，写一篇有依据的中文技术分析：FTS5 external-content的原文在哪里，应用如何维护新增/更新/删除与既有记录的索引一致性，delete命令与触发器old值的顺序有什么边界；WAL模式下备份或恢复要保留哪些文件，checkpoint、最后连接关闭、-shm和崩溃恢复各有什么限制？给出具体失败情形和可执行检查步骤，明确文档不能支持的推断。"
@@ -332,21 +338,27 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         grant_ref: "integration".into(),
         spec: GoalSpec {
             goal: question.into(),
-            inputs: if args[1] == "document" {
+            inputs: if matches!(args[1].as_str(), "document" | "workflow") {
                 json!({"document_text":"项目周报：本周完成数据库只读查询和导出接口；权限检查已在本地验证。风险：备份恢复演练尚未执行，不能宣称已具备生产恢复能力。下一步：周三由维护人员执行恢复演练，记录恢复耗时和数据核对结果，再决定是否开放试用。"})
             } else {
                 json!({"question":question,"seed_urls":["https://www.sqlite.org/fts5.html","https://www.sqlite.org/wal.html"]})
             },
-            profile_ref: if args[1] == "document" {
+            profile_ref: if args[1] == "workflow" {
+                "document-workflow@1".into()
+            } else if args[1] == "document" {
                 "document-review@1".into()
             } else {
                 "inquiry@1".into()
             },
             planning: GoalPlanning {
-                mode: PlanningMode::Autonomous,
+                mode: if args[1] == "workflow" {
+                    PlanningMode::Workflow
+                } else {
+                    PlanningMode::Autonomous
+                },
                 max_revisions: 1,
                 max_planning_ms: 240_000,
-                template_ref: None,
+                template_ref: (args[1] == "workflow").then(|| "document-fixed@1".into()),
             },
             limits: bounds,
             parent_goal_id: None,

@@ -273,7 +273,9 @@ impl GoalCore {
             .collect::<Vec<_>>();
         let mut input = json!({"goal":spec.goal,"inputs":spec.inputs,"goal_spec_digest":record.prepared.spec_digest,"profile_digest":record.prepared.profile_digest,"planning_mode":spec.planning.mode,"effective_limits":record.prepared.effective_limits,"imports":spec.imports,"capability_catalog":catalog,"profile":profile,"planning_feedback":{"attempt":attempt,"previous_candidate_sha":previous.map(|p|&p.candidate_sha),"errors":errors,"check_results":check_results}});
         if let Some(id) = &spec.planning.template_ref {
-            input["template"] = serde_json::to_value(&self.registry.templates[id])?;
+            let template = &self.registry.templates[id];
+            input["template"] = serde_json::to_value(template)?;
+            input["template_digest"] = digest(&serde_json::to_vec(template)?).into();
         }
         let entry = &self.registry.entries[&profile.planner_entry_ref];
         self.registry

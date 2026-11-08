@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
 use taskloop::*;
 
@@ -342,6 +343,15 @@ pub fn build(
 }
 
 pub fn document(bindings: &HostBindings) -> Result<(OrchestrationRegistry, OrchestrationOptions)> {
+    document_mode(bindings, false)
+}
+pub fn workflow(bindings: &HostBindings) -> Result<(OrchestrationRegistry, OrchestrationOptions)> {
+    document_mode(bindings, true)
+}
+fn document_mode(
+    bindings: &HostBindings,
+    workflow: bool,
+) -> Result<(OrchestrationRegistry, OrchestrationOptions)> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/design/10-goal-dag-orchestration/contract/document-review-package");
     let budgets = BTreeMap::from([
@@ -350,12 +360,31 @@ pub fn document(bindings: &HostBindings) -> Result<(OrchestrationRegistry, Orche
         ("quality@1".into(), policy("document-quality", 180_000, 4)),
     ]);
     let mut registry = document_review_registry(&root, "agent", &budgets)?;
+    let profile = if workflow {
+        registry.register_schema(
+            "workflow-planner-input",
+            &serde_json::to_vec(&json!({"type":"object"}))?,
+        )?;
+        registry.register_entry("workflow-planner@1", entry("agent", "Generate a PlannerResult proposal for this fixed Workflow. Copy task_input.template nodes, depends_on, input bindings, outputs and checks exactly. Select capability_ref from each template node's allowed capabilities; omit template-only capabilities/fillable_inputs properties. Echo goal_spec_digest, profile_digest, planning_mode=workflow and EXACT task_input.template_digest (do not recompute it). Submit the envelope to proposal via artifact.write; only Runtime executes the nodes.", "workflow-planner-input", &["artifact.write"], &[("proposal","_tl.planner-result@1")], false), policy("workflow-planner",180_000,8))?;
+        let template: WorkflowTemplate = serde_json::from_value(
+            json!({"id":"document-fixed","version":"1","nodes":{"review":{"capabilities":["review@1"],"depends_on":[],"inputs":{"question":{"kind":"goal","pointer":"/goal"},"document":{"kind":"goal","pointer":"/inputs/document_text"}},"fillable_inputs":[]}},"outputs":{"report":{"node_id":"review","port":"report"}},"checks":{"quality":{"phase":"goal_final","checker_ref":"quality@1","targets":["report"]}}}),
+        )?;
+        registry.register_template(template)?;
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(root.join("rules/document-quality.json"))?)
+        );
+        registry.register_profile(serde_json::from_value(json!({"id":"document-workflow","version":"1","goal_input_schema":"goal-input","goal_selectors":{"/goal":"goal-text","/inputs/document_text":"text"},"planner_entry_ref":"workflow-planner@1","capabilities":["review@1"],"planning_input_schemas":[],"templates":["document-fixed@1"],"outputs":{"report":{"schema_ref":"report","allowed_capabilities":["review@1"]}},"final_outputs":["report"],"checks":[{"id":"quality","phase":"goal_final","checker_ref":"quality@1","rules_digest":digest,"target_outputs":["report"],"required":true}],"allowed_tools":["artifact.write"]}))?)?;
+        "document-workflow@1"
+    } else {
+        "document-review@1"
+    };
     let receipt = registry.validate_and_freeze(bindings)?;
     let options = OrchestrationOptions {
         grants: BTreeMap::from([(
             "integration".into(),
             GoalGrant {
-                profile_digests: vec![receipt.profiles["document-review@1"].clone()],
+                profile_digests: vec![receipt.profiles[profile].clone()],
                 capabilities: vec!["review@1".into()],
                 tools: vec!["artifact.write".into()],
                 limits: limits(),

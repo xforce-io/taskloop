@@ -27,6 +27,7 @@ cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -
 cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- positive /absolute/output/positive
 cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- negative /absolute/output/negative
 cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- document /absolute/output/document
+cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- workflow /absolute/output/workflow
 cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- export /absolute/output/positive
 ```
 
@@ -35,6 +36,7 @@ cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -
 - positive：真实Planner生成受检DAG，应用使用用户明确指定的两份SQLite官方URL，经原Inquiry Fetch取得原文/快照，真实Agent分析、写作及独立语义评价。Rust checker调用原Inquiry分析/报告域校验，检查精确引用、分析血缘与引文上限。要求achieved。
 - negative：相同资料无法支持特定Palantir业务数值。原规则不变，要求not_met；必须保留文章和缺口，不自动返工。
 - document：替换为核心随包编译的document-review工厂，真实Planner、审阅Worker和质量检查Run；要求achieved，无Inquiry研究节点。
+- workflow：复用相同审阅能力和规则，注册固定模板及独立规划入口；真实Planner回显Runtime提供的template_digest，锁定后执行并要求achieved。用于S2.A1模板路径，不由消费者程序生成提案。
 
 候选保存来源选择为`user-input`，不冒充搜索。应用适配器仅为已授权Artifact提供旧领域代码所需的state/slot视图，ID、SHA及内容不改；不访问私表、不补查隐藏证据。原始网页以base64 JSON包装通过公共端口传递，导出时校验原文SHA并还原HTML；规范化快照仍是原Fetch输出，引用只指向其确切公共产物版本。
 
