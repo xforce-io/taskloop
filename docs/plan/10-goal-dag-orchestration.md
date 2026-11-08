@@ -108,3 +108,11 @@
 - 第一次真实正例在原生启动前失败：默认Milkie工作树缺execution-sidecar。改用干净98b5ec1c重新构建，现有真实Sidecar+受控Pi协议用例通过（`milkie-278-protocol-preflight.log`），此用例仍不是真实模型证据。
 - 第二次真实正例进入固定Sidecar，但专用Grok环境auth_failed，未取得有效模型输出；第三次显式选机器已有Codex环境，因默认0.167.0不符合Milkie锁定0.166.0而拒绝。三个失败目录positive-1/positive-2/positive-3-codex原样保留，未提高配额/放宽领域规则，也未修改默认Harness配置或复制登录材料。
 - 消费者增加显式Harness/模型选择、Milkie源提交及CLI摘要、原生版本记录与创建Goal前的Codex版本核对。正在从官方release下载0.166.0至本任务隔离目录，完成后校验官方SHA并显式加入仅本进程PATH；不替换系统Codex。真实S6仍待完成，Goal/独立review/release不标完成。
+
+
+## 实现检查点十（2026-11-08）
+
+- 三个持久化恢复窗口新增聚焦用例：reserved且未started保持RunId/已计次数、释放槽位后只在resume首次启动；原生已结束但未业务接纳保持诊断且禁止重放；节点checking中断保留成员结果但不重算公共成功。它们验证恢复逻辑，不冒称三种实际SIGKILL进程用例。
+- 原反例`recovery-window-core-tests.log`复现两处重复recover无新事实仍升revision：首轮已将Run/节点归类interrupted，次轮走无在途Run分支时错误补pause时间。修复仅在无blocker且安全stopped时记录恢复暂停；blocked保持原事实。三个用例重跑通过（`recovery-window-core-retest.log`），严格Clippy通过（`recovery-window-clippy.log`）。
+- 原固定Codex下载进程确认后，因实测代理线路更快而停止旧进程并切换路线；新下载完成，107610108字节、官方asset SHA256 c48824462fc57681eafb0925d97b11b589010475613904f570b42fea53e240d5匹配，隔离二进制自报codex-cli 0.166.0。`verified-download.json`保存官方来源及二进制摘要；未替换系统默认Codex。
+- 准备在该固定环境继续真实S6。此前失败不改判；完整常规回归、真实正/负例/第二业务、最终verify与独立review/release继续待完成。

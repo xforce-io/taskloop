@@ -1966,4 +1966,135 @@ mod tests {
         );
         runtime.shutdown().await.unwrap();
     }
+    #[tokio::test]
+    async fn recovery_of_reserved_unstarted_work_reuses_its_run_and_charges_no_second_attempt() {
+        let (_directory, runtime, goals, caller, request) =
+            setup(Some(Arc::new(CompleteGoal(EvaluationVerdict::Pass)))).await;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        let run = goals.core.materialize(&id).unwrap().unwrap();
+        let before = goals.get(&id, &caller).await.unwrap();
+        assert!(!before.runs[&run].started);
+        assert_eq!(before.progress.goal_occupied_slots, 1);
+        goals.core.recover().unwrap();
+        let recovered = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(recovered.status, GoalStatus::Stopped);
+        assert_eq!(recovered.runs[&run].phase, GoalRunPhase::Suspended);
+        assert_eq!(recovered.progress.goal_occupied_slots, 0);
+        assert!(!recovered.budget.reserved.contains_key(&run));
+        goals.core.recover().unwrap();
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            recovered.revision
+        );
+        goals
+            .resume(&id, "resume-first-start", recovered.revision, &caller)
+            .await
+            .unwrap();
+        assert_eq!(goals.core.materialize(&id).unwrap(), Some(run.clone()));
+        let resumed = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(resumed.budget.runs_used, before.budget.runs_used);
+        goals
+            .core
+            .prepare_execution(&id, &run)
+            .unwrap()
+            .unwrap()
+            .execute()
+            .await
+            .unwrap();
+        goals.core.consume_return(&id, &run).unwrap();
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().stage,
+            GoalStage::Executing
+        );
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_cannot_accept_completed_uncommitted_candidates_and_is_idempotent() {
+        let (_directory, runtime, goals, caller, request) =
+            setup(Some(Arc::new(CompleteGoal(EvaluationVerdict::Pass)))).await;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        let run = goals.core.materialize(&id).unwrap().unwrap();
+        goals
+            .core
+            .prepare_execution(&id, &run)
+            .unwrap()
+            .unwrap()
+            .execute()
+            .await
+            .unwrap();
+        let before = goals.get(&id, &caller).await.unwrap();
+        assert!(before.runs[&run].native_stop_confirmed);
+        assert_eq!(before.runs[&run].phase, GoalRunPhase::ExecutionReturned);
+        goals.core.recover().unwrap();
+        let recovered = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(recovered.status, GoalStatus::Blocked);
+        assert!(recovered.blockers.iter().any(|b| b.reason == "interrupted"));
+        assert!(recovered.artifacts.iter().all(|a| !a.accepted));
+        assert_eq!(recovered.artifacts.len(), before.artifacts.len());
+        assert_eq!(recovered.progress.goal_occupied_slots, 0);
+        assert!(goals.core.materialize(&id).unwrap().is_none());
+        assert!(
+            goals
+                .resume(&id, "unsafe-replay", recovered.revision, &caller)
+                .await
+                .is_err()
+        );
+        let revision = goals.get(&id, &caller).await.unwrap().revision;
+        goals.core.recover().unwrap();
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            revision,
+            "recovery without new facts must not invent a pause or another revision"
+        );
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_of_node_checking_preserves_members_but_never_recomputes_public_success() {
+        let (_directory, runtime, goals, caller, request) =
+            setup(Some(Arc::new(CompleteGoal(EvaluationVerdict::Pass)))).await;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        for _ in 0..2 {
+            goals.core.advance(&id).unwrap();
+            let run = goals.core.materialize(&id).unwrap().unwrap();
+            goals
+                .core
+                .prepare_execution(&id, &run)
+                .unwrap()
+                .unwrap()
+                .execute()
+                .await
+                .unwrap();
+            goals.core.consume_return(&id, &run).unwrap();
+        }
+        let before = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(before.nodes["review"].status, GoalNodeStatus::Checking);
+        let member = before.nodes["review"].members["reviewer"].outputs.clone();
+        assert!(!member.is_empty());
+        assert!(before.nodes["review"].outputs.is_empty());
+        goals.core.recover().unwrap();
+        let recovered = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(recovered.status, GoalStatus::Blocked);
+        assert_eq!(
+            recovered.nodes["review"].status,
+            GoalNodeStatus::Interrupted
+        );
+        assert_eq!(
+            serde_json::to_value(&recovered.nodes["review"].members["reviewer"].outputs).unwrap(),
+            serde_json::to_value(member).unwrap()
+        );
+        assert!(!recovered.budget.incomplete_active_subjects.is_empty());
+        assert!(!goals.core.finish_node_check(&id, "review").unwrap());
+        assert!(!goals.core.advance(&id).unwrap());
+        assert!(
+            goals.get(&id, &caller).await.unwrap().nodes["review"]
+                .outputs
+                .is_empty()
+        );
+        let revision = recovered.revision;
+        goals.core.recover().unwrap();
+        assert_eq!(goals.get(&id, &caller).await.unwrap().revision, revision);
+        runtime.shutdown().await.unwrap();
+    }
 }

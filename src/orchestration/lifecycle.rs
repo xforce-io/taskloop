@@ -172,13 +172,13 @@ impl GoalCore {
                 }
                 next.status = GoalStatus::Blocked;
             } else if next.terminal_intent.is_none() {
-                next.status = if next.blockers.is_empty() {
-                    GoalStatus::Stopped
+                if next.blockers.is_empty() {
+                    next.status = GoalStatus::Stopped;
+                    next.pause_at_utc_ms
+                        .get_or_insert(self.clock.observe()?.utc_ms);
                 } else {
-                    GoalStatus::Blocked
-                };
-                next.pause_at_utc_ms
-                    .get_or_insert(self.clock.observe()?.utc_ms);
+                    next.status = GoalStatus::Blocked;
+                }
             }
             self.cleanup_terminal(&mut next)?;
             if serde_json::to_value(&row.record)? != serde_json::to_value(&next)?
