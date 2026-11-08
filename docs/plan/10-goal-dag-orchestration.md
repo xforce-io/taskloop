@@ -98,3 +98,13 @@
 - 新建功能地图06/07/08，逐项映射S1–S6和原18项细验收，保留真实Agent/应用、故障窗口及尚未覆盖路径的取证要求，不将测试命令成功等同于整条S通过。
 - 完整常规回归197通过、5项既有环境用例ignored（`goal-nodes-recovery-full-regression.log`），随后完善CLI人工进度/产物引用及NDJSON节点/progress投影，按受影响CLI套件复验（`goal-human-progress-cli-retest.log`）；严格Clippy见`goal-human-progress-clippy.log`。这些均为开发证据，最终干净候选仍按verify重新取证。
 - L2 v0.10.13补全已承诺的progress字段，原18项验收逐字不变。下一阶段继续补齐其余可靠性边界并构建固定Inquiry领域库的隔离消费者；真实服务、最终verify、独立review、CI及release尚未完成。
+
+
+## 实现检查点九（2026-11-08）
+
+- 新建隔离的`tests/inquiry_consumer` crate，Cargo固定Inquiry d4b05750并以公开TaskLoop路径依赖统一其核心；资源目录在运行前核对同SHA且工作树干净。未改用户Inquiry源码/HEAD。
+- 应用复用Inquiry Fetch、ReadSource、check_domain、verify_citation。旧state/slot仅在授权材料视图适配，Artifact ID/SHA/内容不变；原始HTML无损base64包装经固定公共JSON端口传递，导出还原并核对原文SHA。Planner、分析、写作、语义检查走真实Milkie，领域引用检查走显式受控Executor，无私表访问或程序生成假Plan。
+- 两类注册（Inquiry与内置document-review）已通过无模型预检，消费者严格Clippy通过。功能地图08登记positive/negative/document公开命令和逐条引用回溯证据要求；尚不能据注册/编译记S6通过。
+- 第一次真实正例在原生启动前失败：默认Milkie工作树缺execution-sidecar。改用干净98b5ec1c重新构建，现有真实Sidecar+受控Pi协议用例通过（`milkie-278-protocol-preflight.log`），此用例仍不是真实模型证据。
+- 第二次真实正例进入固定Sidecar，但专用Grok环境auth_failed，未取得有效模型输出；第三次显式选机器已有Codex环境，因默认0.167.0不符合Milkie锁定0.166.0而拒绝。三个失败目录positive-1/positive-2/positive-3-codex原样保留，未提高配额/放宽领域规则，也未修改默认Harness配置或复制登录材料。
+- 消费者增加显式Harness/模型选择、Milkie源提交及CLI摘要、原生版本记录与创建Goal前的Codex版本核对。正在从官方release下载0.166.0至本任务隔离目录，完成后校验官方SHA并显式加入仅本进程PATH；不替换系统Codex。真实S6仍待完成，Goal/独立review/release不标完成。

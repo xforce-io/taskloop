@@ -180,6 +180,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Err("runtime must be grok-cli or codex".into());
     }
     let model = std::env::var("INTEGRATION_MODEL")?;
+    let native_program = if native == "codex" { "codex" } else { "grok" };
+    let native_version = std::process::Command::new(native_program)
+        .arg("--version")
+        .output()?;
+    if !native_version.status.success() {
+        return Err("native CLI version query failed".into());
+    }
+    let native_version = String::from_utf8(native_version.stdout)?.trim().to_owned();
+    if native == "codex" && native_version != "codex-cli 0.166.0" {
+        return Err("this fixed Milkie candidate requires codex-cli 0.166.0; select it explicitly in PATH before creating a Goal".into());
+    }
     save(
         &root,
         "connection.json",
@@ -243,7 +254,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     save(
         &root,
         "environment.json",
-        &json!({"inquiry_sha":INQUIRY_SHA,"taskloop_sha":taskloop_sha,"milkie_sha":milkie_sha,"milkie_cli_sha256":milkie_cli_sha,"profile_digests":options.grants["integration"].profile_digests,"native":native,"model":model,"mode":args[1],"limits":bounds,"rules":"compiled and frozen before any model call"}),
+        &json!({"inquiry_sha":INQUIRY_SHA,"taskloop_sha":taskloop_sha,"milkie_sha":milkie_sha,"milkie_cli_sha256":milkie_cli_sha,"profile_digests":options.grants["integration"].profile_digests,"native":native,"native_version":native_version,"model":model,"mode":args[1],"limits":bounds,"rules":"compiled and frozen before any model call"}),
     )?;
     if args[1] == "check" {
         registry::document(&bindings)?;
