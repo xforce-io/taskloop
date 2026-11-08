@@ -172,14 +172,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     let taskloop_sha = String::from_utf8(taskloop_rev.stdout)?.trim().to_owned();
     let storage = MilkieStorage {
-        config_dir: env_path("GROK_CONFIG_DIR")?,
-        session_dir: env_path("GROK_SESSION_DIR")?,
+        config_dir: env_path("AGENT_CONFIG_DIR")?,
+        session_dir: env_path("AGENT_SESSION_DIR")?,
     };
-    let model = std::env::var("INTEGRATION_MODEL").unwrap_or_else(|_| "grok-4.6".into());
+    let native = std::env::var("INTEGRATION_RUNTIME")?;
+    if !["grok-cli", "codex"].contains(&native.as_str()) {
+        return Err("runtime must be grok-cli or codex".into());
+    }
+    let model = std::env::var("INTEGRATION_MODEL")?;
     save(
         &root,
         "connection.json",
-        &json!({"contractVersion":1,"fields":{"transport":"agent-cli","runtime":"grok-cli","model":model}}),
+        &json!({"contractVersion":1,"fields":{"transport":"agent-cli","runtime":native,"model":model}}),
     )?;
     let mut config = MilkieConfig::new(
         node,
@@ -239,7 +243,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     save(
         &root,
         "environment.json",
-        &json!({"inquiry_sha":INQUIRY_SHA,"taskloop_sha":taskloop_sha,"milkie_sha":milkie_sha,"milkie_cli_sha256":milkie_cli_sha,"profile_digests":options.grants["integration"].profile_digests,"native":"grok-cli","model":model,"mode":args[1],"limits":bounds,"rules":"compiled and frozen before any model call"}),
+        &json!({"inquiry_sha":INQUIRY_SHA,"taskloop_sha":taskloop_sha,"milkie_sha":milkie_sha,"milkie_cli_sha256":milkie_cli_sha,"profile_digests":options.grants["integration"].profile_digests,"native":native,"model":model,"mode":args[1],"limits":bounds,"rules":"compiled and frozen before any model call"}),
     )?;
     if args[1] == "check" {
         registry::document(&bindings)?;

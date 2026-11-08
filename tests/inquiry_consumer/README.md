@@ -10,12 +10,15 @@ Milkie必须提供`execution-sidecar`协议；仅有`agent`/`serve`的旧CLI不�
 export INQUIRY_SOURCE_ROOT=/absolute/path/to/clean/pinned/inquiry
 export MILKIE_NODE=/absolute/path/to/node
 export MILKIE_CLI=/absolute/path/to/pinned/milkie/dist/cli/index.js
-export GROK_CONFIG_DIR=/absolute/path/to/logged-in/grok/config
-export GROK_SESSION_DIR=/absolute/path/to/the/same/config/sessions
+export AGENT_CONFIG_DIR=/absolute/path/to/logged-in/grok/config
+export AGENT_SESSION_DIR=/absolute/path/to/the/same/config/sessions
+export INTEGRATION_RUNTIME=grok-cli
 export INTEGRATION_MODEL=grok-4.6
 ```
 
-不复制或输出凭据。Grok配置和会话目录由宿主指定，Milkie负责原生会话；只对本消费者创建的Run操作。按环境需要给子进程设置代理。不能在未登录或使用协议夹具时宣称真实模型通过。
+INTEGRATION_RUNTIME也可显式选择codex，模型名、配置和会话目录须对应该已登录环境；不自动在Harness间回退。协议和领域规则保持不变。
+
+不复制或输出凭据。配置和会话目录由宿主指定，Milkie负责原生会话；只对本消费者创建的Run操作。按环境需要给子进程设置代理。不能在未登录或使用协议夹具时宣称真实模型通过。
 
 在仓库根目录执行：
 
