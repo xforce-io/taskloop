@@ -98,7 +98,9 @@
         "required": true
       }
     ],
-    "allowed_tools": [],
+    "allowed_tools": [
+      "artifact.write"
+    ],
     "goal_selectors": {
       "/goal": "goal-text",
       "/inputs/document_text": "text"

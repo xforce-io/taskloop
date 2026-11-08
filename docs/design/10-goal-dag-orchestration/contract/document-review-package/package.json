@@ -45,7 +45,9 @@
       "instruction": "根据冻结目录与目标生成符合PlanProposal的计划，不增加目录外能力、权限或检查。",
       "executor": "milkie",
       "skills": [],
-      "tools": [],
+      "tools": [
+        "artifact.write"
+      ],
       "input_schema": "planner-input",
       "requires": [],
       "outputs": {
@@ -65,7 +67,9 @@
       "skills": [
         "document-review"
       ],
-      "tools": [],
+      "tools": [
+        "artifact.write"
+      ],
       "input_schema": "review-input",
       "requires": [],
       "outputs": {
@@ -83,7 +87,9 @@
       "instruction": "严格按只读CheckInput中的规则核对目标报告。仅返回Evaluation候选；不要生成或修改请求身份。",
       "executor": "milkie",
       "skills": [],
-      "tools": [],
+      "tools": [
+        "artifact.write"
+      ],
       "input_schema": "_tl.check-input@1",
       "requires": [],
       "outputs": {
@@ -234,7 +240,9 @@
           "required": true
         }
       ],
-      "allowed_tools": [],
+      "allowed_tools": [
+        "artifact.write"
+      ],
       "goal_selectors": {
         "/goal": "goal-text",
         "/inputs/document_text": "text"

@@ -19,3 +19,5 @@
 quality checker能看到的`goal_inputs.document_text`由注册的goal_input_fields显式允许；它不是从report推测原文。例子的产物/目标摘要及nonce不代表真实接纳事实，仅证明结构；注册校验使用真实资源摘要，运行时输入仍需按冻结事实重建和授权。
 
 checkpoint-node.example.json和evaluation-node.example.json分别演示阻断与非阻断评价能力：只有目标产物来自公共端口，整个CheckInput身份由Runtime建立，不能通过普通input_bindings注入。它们是独立NodeContract示意，未声称包含在本例单节点计划中。
+
+所有执行入口显式允许artifact.write，Profile也允许该工具；它是受预算与Grant约束的候选提交通道，最终聊天不能替代提交。Core提供工具实现，不要求应用注入同名DomainTool。

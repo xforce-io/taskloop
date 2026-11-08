@@ -112,7 +112,11 @@
       },
       "minItems": 0,
       "maxItems": 64,
-      "uniqueItems": true
+      "uniqueItems": true,
+      "contains": {
+        "const": "artifact.write"
+      },
+      "minContains": 1
     },
     "goal_selectors": {
       "type": "object",

@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.2；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.3；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -293,7 +293,7 @@ NodeContract每个input端口含schema_ref、required、source_policy；可选de
 
 work的members以member_id为键。普通成员input_mode=node_ports，每项含entry_ref及input_bindings；评价成员input_mode=check_request，禁止input_bindings，按下节由Runtime生成整个CheckInput。目标字段名映射为`{port,pointer}`，构造该EntryContract的stage_input顶层对象；只允许从本节点公共输入选取固定required字段，不支持表达式/脚本/隐式常量。注册时要求目标入口Schema为固定对象，必需属性恰有一个绑定，未知属性、重复/缺少必需绑定拒绝；每个源selector与目标字段的Schema摘要相等。可选端口缺失且无default时省略相应可选目标字段，不以null冒充；非空selector不可跨可选属性/数组。派发前对实际stage_input完整验证。
 
-成员候选按EntryContract.outputs校验，首版DAG输出槽均required。内建`_tl.schema@1`只判断结构、必需产物及固定一致性，成功outcome固定completed；它不决定文章质量。DAG entry.requires必须为空，不能混入旧Flow历史依赖；可选附件沿用既有受限附件契约，但不能自动变成未声明公共端口。
+成员候选按EntryContract.outputs校验，首版DAG输出槽均required。现有Executor通过artifact.write提交候选（最终聊天不是提交），因此DAG入口tools及Profile.allowed_tools必须显式包含artifact.write，并取得相应Grant；不得因Schema声明输出就隐式授予提交权限。Core的artifact.read/write属于宿主固定工具目录，无需注册为DomainTool，但同样受显式授权及预算约束。内建`_tl.schema@1`只判断结构、必需产物及固定一致性，成功outcome固定completed；它不决定文章质量。DAG entry.requires必须为空，不能混入旧Flow历史依赖；可选附件沿用既有受限附件契约，但不能自动变成未声明公共端口。
 
 join.kind固定object-by-worker，先按member_id收集全部成功成员的具名输出，再按join.outputs为每个公共端口做**固定投影**：`kind=member`选确切member_id/slot（单成员也适用），`kind=members`按slots中的member_id→slot构造对象。仅这两种投影，不是新的表达式或用户代码汇合器；无隐藏I/O/模型。join.outputs键恰好覆盖公共outputs，每个引用必须存在且为必需槽。member投影要求目标公共Schema摘要等于该成员输出Schema摘要；members投影的公共Schema必须是固定required对象，属性集合恰等于所列member_id、各属性Schema与所选槽相同、additionalProperties=false，注册时逐项证明。所有必需成员仍须成功，即使某端口只投影其中一个；实际公共值再做完整Schema/Gate校验。自定义综合计算继续用显式受控能力节点，不借投影执行。
 
@@ -310,7 +310,7 @@ input节点不允许members/join；signal_schema_ref及max_wait_ms必需，公�
 
 身份/epoch/授权/停止/预算检查始终由Runtime强制，不能通过选择gate ID关闭。`max_rule_check_ms`及入口max_check_ms按适用最小值计量，不承诺强杀同步代码。新Goal绝不调用任意DomainGate闭包；HostBindings.gates仅保留旧Flow兼容。自定义确定性领域逻辑也使用可停止的已注册Executor/checker Run，不能把Rust回调伪装为“纯Gate”。
 
-包内checkers每项含entry_ref、rules_ref、result_slot、fresh_context=true和goal_input_fields。checker入口input_schema必须解析到Core CheckInput的精确摘要，result_slot必须是必需Evaluation候选槽，结果规则/证据校验统一见§6.8，不在入口另实现一套。fresh_context要求独立会话/工作目录及受限Artifact视图，适配器无法证明则注册拒绝。EntryContract.tools显式声明，仍取Profile/Grant/宿主交集；空工具列表不意味着可读工作目录中的其他Run文件。
+包内checkers每项含entry_ref、rules_ref、result_slot、fresh_context=true和goal_input_fields。checker入口input_schema必须解析到Core CheckInput的精确摘要，result_slot必须是必需Evaluation候选槽，结果规则/证据校验统一见§6.8，不在入口另实现一套。fresh_context要求独立会话/工作目录及受限Artifact视图，适配器无法证明则注册拒绝。EntryContract.tools显式声明，仍取Profile/Grant/宿主交集；仅有artifact.write也不意味着可读工作目录中的其他Run文件；不需要读取工具的checker可只声明提交工具。
 
 CheckInput是CheckRequest的只读执行封装，phase为plan/node_checkpoint/goal_final及非阻断node_evaluation：身份、phase、epoch、nonce、规则和目标都由Runtime生成；subject.kind=proposal时携proposal_digest及提案，kind=artifacts时携plan_digest及确切target别名→Artifact身份/内容。顶层goal及goal_spec_digest绑定冻结目标，goal_inputs仅包含checker.goal_input_fields允许的必需顶层输入字段，注册时须能在Profile.goal_input_schema证明其存在；没有字段则为空对象。evidence_refs只包含目标Artifact ID和显式允许的`goal-input:<field>`，后者绑定本Goal Spec摘要，不能借字段名读取任意Goal。读取输入仍受当前Caller/Grant的材料范围约束；不授权的字段/产物拒绝检查，不能悄悄补上下文。所有实际目标值、规则字节及摘要在构造时复核，总执行输入受宿主/适配器上限约束，超限报check_unavailable，不截断证据后宣称通过。
 
@@ -567,7 +567,7 @@ Run详细phase与物理账本的准入处置分开：详细phase为reserved/susp
 | R07 终结未启动Run | reserved/suspended且started=false；有效终结意图 | cleanup/settled，释放仍持有的预留/槽位，保留准备消耗 | 不调用Executor、不制造停止未知；不退款已消耗/已计max_runs | O1；started=true不得用本规则，转R08 |
 | R08 请求停止/窗口到达 | 已启动且未可信确认停止；原绑定存在 | 持久化停止请求事实；无响应/未知则stop_unknown，保槽；原有phase及候选不当成功 | 提交后取消Token/stop_or_confirm；只对原Run探测，不新建Run；重复探测有界且不释放两次 | O1；已确认无动作；绑定未知保槽，不换绑定 |
 | R09 崩溃恢复 | 持锁按§6.9.1核对每个owner/Run | started未完整接纳为interrupted，原生未知则stop_unknown；未启动Goal Run挂起；Flow依原协议 | 不重新执行已started Run；恢复可对账/结算，不猜测业务成功或替换绑定 | O1；不得盲重放；Flow交旧协议 |
-| R10 重复/失效结果 | 原结果已接纳、旧业务epoch或错误身份 | 已接纳同结果为幂等无变更；旧业务结果仅迟到诊断；伪造来源拒绝 | 可信停止/消耗仍单独R05；不生成新Run/公共输出；同身份不一致内容作为异常诊断，不覆盖原接纳 | O1/O2；可信结算独立R05 |
+| R10 重复/失效结果 | 已接纳同结果，或原来源合法但result_allowed不成立（含旧epoch、pause窗后/stopped/blocker）；伪造来源另拒绝 | 同结果O1无变更；其余只存有界候选摘要和拒绝诊断，不生成Receipt/公共输出 | 可信停止/消耗独立R05；diagnostic_reason区分stale_epoch/pause_window/terminal/blocker，不改变§6.8终结处置状态 | O1/O2；无epoch变化也可失效；不重开业务、不修改既有结论 |
 
 R01可用于Planner、plan/final checker和业务成员；角色上下文决定回到哪条G/N规则。任何Run成功不直接使Goal achieved；任何Run settled也不自动表示业务成功。可信停止已确认而业务检查仍在进行时，可以释放物理槽位，但保留详细checking及待结算/接纳事实；Goal成功、暂停和恢复仍必须检查这些未决事实，不以slot_held=false代替完成证明。
 
@@ -893,7 +893,7 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 | S1.A1/A2 | 同一Goal人工/JSON输出比对；空配置/非法输入零Run；读取错误与无产物分离 | E2E：CLI原始stdout/stderr、退出码、公开快照 |
 | S1.A3、S5.A2 | 前台等待，另一客户端补充/取消；pause释放锁/槽位、nonce保留但暂停时拒绝signal、未决checking阻断恢复；clock_untrusted解除与恢复幂等；离线命令拒绝；SIGINT/SIGKILL与期限先处理 | E2E/Integration：实际进程PID/适配器停止事实、所有Run列表 |
 | S2.A1 | 真实Planner自主/模板；模板拒绝增删骨架和扩权；固定输入包摘要 | E2E：真实Agent日志、提案原文及锁定计划；夹具结果单列 |
-| S2.A2 | 类型注册及既有资源读取的Schema/摘要/路径逃逸/符号链接/重复定义、缺执行器/预算、selector与成员/公共投影不匹配、checkpoint请求身份从端口注入、data节点冒充必需检查、未绑定checkpoint/重复评价映射、伪自定义Gate、checker读未授权原文均拒绝；重复JSON键、未知字段、超容量、环/自环、未知端口、孤立节点、非法selector、Schema不匹配、权限及验收缺失 | Unit/Integration：分类/path/expected/actual及业务派发计数0 |
+| S2.A2 | 类型注册及既有资源读取的Schema/摘要/路径逃逸/符号链接/重复定义、缺执行器/预算、入口/Profile缺artifact.write提交权限、selector与成员/公共投影不匹配、checkpoint请求身份从端口注入、data节点冒充必需检查、未绑定checkpoint/重复评价映射、伪自定义Gate、checker读未授权原文均拒绝；重复JSON键、未知字段、超容量、环/自环、未知端口、孤立节点、非法selector、Schema不匹配、权限及验收缺失 | Unit/Integration：分类/path/expected/actual及业务派发计数0 |
 | S2.A3 | 初次错→修正合法；needs_input联合结果/补充后耗尽；3次均错；时间/工具/Run先耗尽；plan check fail与error不同 | Integration：每次提案/检查及全预算，不通过换Run重置上限 |
 | S3.A1 | 三图形；不同延迟完成序列；实际最大并发不超过配置 | Integration/E2E：带身份的开始/结束与持久化槽位，不能仅看输出顺序 |
 | S3.A2 | 多成员乱序返回仍确定性汇合；同Executor绑定的成员具备不同Run/工作目录及精确输入、Skill/工具约束；一员失败不公共接纳；汇合非法Schema/panic/停止未知 | Integration：成员产物/候选、汇合摘要和节点结果 |
