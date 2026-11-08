@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.9.0；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.9.1；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -288,13 +288,13 @@ pointer采用[RFC6901](https://www.rfc-editor.org/rfc/rfc6901)字符串形式：
 
 清单上限1MiB；每份JSON资源1MiB，Skill及全部资源合计16MiB，所有读取在反序列化前有界限制，宿主可进一步收紧。路径必须是包根内普通文件（Skill为目录），禁止绝对路径、空路径段、`.`/`..`、反斜杠、符号链接及逃逸；不执行安装脚本、不联网取资源。JSON资源sha256按文件实际字节；Skill sha256沿用现有SkillPackage对排序相对路径→字节数组映射的紧凑JSON摘要。验证与使用必须是同一份读取后不可变字节快照，不能校验后在运行时重读可变路径。包锁摘要按normalized-json-v1的清单及已验证资源摘要计算；NodeContract/Profile的锁定摘要再绑定其引用闭包，不把自有digest字段纳入自身哈希。一次注册全成功或全拒绝，错误携带清单JSON Pointer或资源相对路径，失败注册不开放Goal、不启动模型。
 
-注册至少验证：12份规范Schema可解析、所有资源摘要及引用闭包合法；Schema与Skill符合既有受限规则；entry_budgets键恰好覆盖entries，每个显式RunBudgetPolicy通过§6.10与宿主能力校验；所有工具/执行器绑定存在，工具不超Profile及Grant交集；Profile至少一个最终检查，outputs/final_outputs/check targets/allowed_capabilities全部存在；checker规则、入口和输出吻合；work/input变体及下节每条映射可证明。不把JSON Schema形状通过当这些语义证明。
+注册至少验证：全部12份规范Schema可解析、所有资源摘要及引用闭包合法；Schema与Skill符合既有受限规则；entry_budgets键恰好覆盖entries，每个显式RunBudgetPolicy通过§6.10与宿主能力校验；所有工具/执行器绑定存在，工具不超Profile及Grant交集；Profile至少一个最终检查，outputs/final_outputs/check targets/allowed_capabilities全部存在；checker规则、入口和输出吻合；work/input变体及下节每条映射可证明。不把JSON Schema形状通过当这些语义证明。
 
 ### 6.3.2 公共端口如何映射到Worker
 
 NodeContract每个input端口含schema_ref、required、source_policy；可选default仅允许constant来源且必须通过对应Schema。Profile.goal_selectors显式声明固定Goal输入视图的pointer→schema_ref；注册时证明是required字段路径，解析出的Schema与所声明资源规范化内容一致，运行时使用该资源的冻结摘要。`/goal`必须吻合GoalRequest的goal字段Schema，不能自改长度；`/inputs/...`从goal_input_schema解析。端口连接继续要求摘要相等，不做一般Schema兼容推理。
 
-work的members以member_id为键，每项含entry_ref及input_bindings。目标字段名映射为`{port,pointer}`，构造该EntryContract的stage_input顶层对象；只允许从本节点公共输入选取固定required字段，不支持表达式/脚本/隐式常量。注册时要求目标入口Schema为固定对象，必需属性恰有一个绑定，未知属性、重复/缺少必需绑定拒绝；每个源selector与目标字段的Schema摘要相等。可选端口缺失且无default时省略相应可选目标字段，不以null冒充；非空selector不可跨可选属性/数组。派发前对实际stage_input完整验证。
+work的members以member_id为键。普通成员input_mode=node_ports，每项含entry_ref及input_bindings；评价成员input_mode=check_request，禁止input_bindings，按下节由Runtime生成整个CheckInput。目标字段名映射为`{port,pointer}`，构造该EntryContract的stage_input顶层对象；只允许从本节点公共输入选取固定required字段，不支持表达式/脚本/隐式常量。注册时要求目标入口Schema为固定对象，必需属性恰有一个绑定，未知属性、重复/缺少必需绑定拒绝；每个源selector与目标字段的Schema摘要相等。可选端口缺失且无default时省略相应可选目标字段，不以null冒充；非空selector不可跨可选属性/数组。派发前对实际stage_input完整验证。
 
 成员候选按EntryContract.outputs校验，首版DAG输出槽均required。内建`_tl.schema@1`只判断结构、必需产物及固定一致性，成功outcome固定completed；它不决定文章质量。DAG entry.requires必须为空，不能混入旧Flow历史依赖；可选附件沿用既有受限附件契约，但不能自动变成未声明公共端口。
 
@@ -315,7 +315,15 @@ input节点不允许members/join；signal_schema_ref及max_wait_ms必需，公�
 
 包内checkers每项含entry_ref、rules_ref、result_slot、fresh_context=true和goal_input_fields。checker入口input_schema必须解析到Core CheckInput的精确摘要，result_slot必须是必需Evaluation候选槽，规则ID唯一且逐项结果必须恰好覆盖；evidence_required=true的每项结果必须至少有一个允许且存在的证据引用，否则check error，不能仅靠overall evidence_refs补足。fresh_context要求独立会话/工作目录及受限Artifact视图，适配器无法证明则注册拒绝。EntryContract.tools显式声明，仍取Profile/Grant/宿主交集；空工具列表不意味着可读工作目录中的其他Run文件。
 
-CheckInput是CheckRequest的只读执行封装：身份、phase、epoch、nonce、规则和目标都由Runtime生成；subject.kind=proposal时携proposal_digest及提案，kind=artifacts时携plan_digest及确切target别名→Artifact身份/内容。顶层goal及goal_spec_digest绑定冻结目标，goal_inputs仅包含checker.goal_input_fields允许的必需顶层输入字段，注册时须能在Profile.goal_input_schema证明其存在；没有字段则为空对象。evidence_refs只包含目标Artifact ID和显式允许的`goal-input:<field>`，后者绑定本Goal Spec摘要，不能借字段名读取任意Goal。读取输入仍受当前Caller/Grant的材料范围约束；不授权的字段/产物拒绝检查，不能悄悄补上下文。所有实际目标值、规则字节及摘要在构造时复核，总执行输入受宿主/适配器上限约束，超限报check_unavailable，不截断证据后宣称通过。
+CheckInput是CheckRequest的只读执行封装，phase为plan/node_checkpoint/goal_final及非阻断node_evaluation：身份、phase、epoch、nonce、规则和目标都由Runtime生成；subject.kind=proposal时携proposal_digest及提案，kind=artifacts时携plan_digest及确切target别名→Artifact身份/内容。顶层goal及goal_spec_digest绑定冻结目标，goal_inputs仅包含checker.goal_input_fields允许的必需顶层输入字段，注册时须能在Profile.goal_input_schema证明其存在；没有字段则为空对象。evidence_refs只包含目标Artifact ID和显式允许的`goal-input:<field>`，后者绑定本Goal Spec摘要，不能借字段名读取任意Goal。读取输入仍受当前Caller/Grant的材料范围约束；不授权的字段/产物拒绝检查，不能悄悄补上下文。所有实际目标值、规则字节及摘要在构造时复核，总执行输入受宿主/适配器上限约束，超限报check_unavailable，不截断证据后宣称通过。
+
+**显式评价节点的输入例外：**NodeContract仍为kind=work，附evaluation={purpose,checker_ref,target_ports}，purpose仅checkpoint或data。首版恰有一个成员，input_mode=check_request且entry_ref精确等于checker登记入口，不能有input_bindings；整个stage_input由Runtime构造，绝不把nonce/epoch/rules等身份字段当公共输入让Planner绑定。普通node_ports入口不能引用Core CheckInput来伪造这个模式。评价节点公共inputs恰好覆盖target_ports所列端口，全部required、source_policy=artifact，alias→port一一对应；每个alias必须存在于本Profile.outputs，实际Plan绑定须等于该别名解析到的确切公共产物。outputs恰为evaluation，Schema为Core Evaluation候选；join只允许从这个成员的result_slot作member投影。
+
+checkpoint节点须由Plan.checks中的唯一node_checkpoint项绑定，checker_ref及target别名集合与NodeContract.evaluation和冻结CheckRequirement完全相等，purpose必须checkpoint；检查依赖和before_outputs仍按§6.8验证。N02首次ready事务在输入Artifact已接纳后创建并持久化CheckRequest（epoch/nonce/subject/rules/目标摘要），登记角色及唯一成员的RunRequest，成员输入摘要取完整只读CheckInput；容量不足保留请求。N03/R01/R02只能使用这份请求，重算/排队/兄弟节点更新不重建nonce；启动及接纳仍复核当前epoch/意图/期限。pause下N02禁止首次创建请求；已启动检查允许的干净结果沿既有N04/N05/N11接纳，R04仍只处理plan/final。节点公共evaluation、EvaluationReceipt及阻断意图在N05/N11同事务，不能在成员候选阶段提前给后继通行。冻结请求绑定subject，但issued_revision仅审计，不因兄弟推进误拒。
+
+data用途用于既定前向“评价→修订”，不满足或替代任何必需checkpoint。Runtime同样在N02创建只读请求，phase=node_evaluation（仅CheckInput新增的非阻断执行角色，不扩展CheckRequirement.phase）；check_id为`eval.`加node_id的SHA-256前32位并与本Goal绑定，注册计划时碰撞拒绝，不与Profile必需检查混同。N05生成该角色的评价记录但fail只作为有效数据，不触发not_met；error仍为节点检查失败。请求角色、Plan节点和purpose由Runtime冻结验证，模型不能用phase回显改变阻断性质。两种节点材料见checkpoint-node.example.json及evaluation-node.example.json，示例不替代带真实产物身份的Plan校验。
+
+**规划入口的绑定：**Profile.planner_entry_ref必须解析到恰有proposal必需输出槽、Schema为Core PlannerResult的入口；这个槽的内容仍是proposal/needs_input联合类型。Runtime给规划入口构造目标视图、goal_spec_digest/profile_digest、planning_mode、冻结Profile和本Profile能力目录；Profile包含输出别名和完整检查要求，不能让Planner在看不到checks时猜测Plan.checks。入口Schema必须接受该固定字段集合并通过实际值验证；workflow另携宿主冻结的template视图，由其入口Schema及既有模板校验约束，模板缺失即拒绝。示例planner-input.json只接受autonomous，与示例Profile.templates为空一致；它包含完整Profile而非只给能力名。入口Schema不匹配、缺结果槽或工具/隔离能力不支持时在Planner启动前拒绝。
 
 模型只返回Evaluation候选，不返回受信身份；Runtime按冻结request重新检查规则集合、verdict一致性、证据引用允许集合，再生成EvaluationReceipt。同名证据不跨Goal授权。CheckInput示例内的nonce/摘要占位不作为真实请求接纳；执行时只能由Runtime据持久事实构造。
 
@@ -517,7 +525,7 @@ G06/G08/G13/G14是当前接纳事务末尾的状态归并规则，不依赖一�
 | ID / 事件 | kind / 前态与条件 | writes / 新状态 | actions与原子边界 | otherwise |
 |---|---|---|---|---|
 | N01 计划锁定 | work/input；节点不存在 | 创建pending；根节点亦先按同一规则检查依赖/输入 | 同事务初始化；成员尚无Run | O1；重复初始化不重置；计划不符O2 |
-| N02 上游公共输出接纳/初次就绪检查 | work/pending；Goal为running/waiting且无pause/terminal/blocker，全部必需依赖成功、端口合法 | ready；冻结此次公共输入及成员输入摘要 | 输入错误按N07；输入引用/摘要与ready共同提交；不因依赖候选返回而ready | O1/O2；pause/blocker或依赖未齐O3，不写ready/不派发，保留事实；terminal按cleanup；实际输入非法N07 |
+| N02 上游公共输出接纳/初次就绪检查 | work/pending；Goal为running/waiting且无pause/terminal/blocker，全部必需依赖成功、端口合法 | ready；冻结此次公共输入及成员输入摘要 | 输入错误按N07；输入引用/摘要与ready共同提交；评价节点同事务创建§6.3.3的CheckRequest/成员RunRequest及CheckInput摘要；不因依赖候选返回而ready | O1/O2；pause/blocker或依赖未齐O3，不写ready/不派发，保留事实；terminal按cleanup；实际输入非法N07 |
 | N03 成员预留或首次启动 | work/ready或running；成员未启动、无终结/pause | 预留可仍ready；首次Run started时节点running；其他成员可逐个准入 | Run/账本及节点变化同事务；不等待同时拿齐全部槽位 | O1/O2；槽位不足O3；意图关闭O4 |
 | N04 成员结果接纳 | work/running；确切成员、当前epoch、Schema及内建Gate合法 | 保存成员成功与候选/接纳引用；未齐员保持running；齐员且允许首次汇合则checking；pause期间尚未进入checking的齐员节点保留成员成功事实，等待resume首次汇合 | 最后一员接纳与checking资格同事务；内建汇合在提交后执行一次，产生绑定成员集合摘要的结果事实 | O1/O2；未齐或pause禁止首次汇合O3；无效输出N07 |
 | N05 汇合/节点Gate结果接纳 | work/checking；输入成员集合、规则摘要匹配，输出合法 | succeeded及唯一公共Artifact引用；重算后继 | 公共输出、节点状态、相关receipt/意图同事务；已接纳重复结果不再汇合/写第二版本 | O1/O2；无效Schema/Gate N07；终结关闭O4 |
@@ -863,7 +871,7 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 | S1.A1/A2 | 同一Goal人工/JSON输出比对；空配置/非法输入零Run；读取错误与无产物分离 | E2E：CLI原始stdout/stderr、退出码、公开快照 |
 | S1.A3、S5.A2 | 前台等待，另一客户端补充/取消；pause释放锁/槽位、nonce保留但暂停时拒绝signal、未决checking阻断恢复；clock_untrusted解除与恢复幂等；离线命令拒绝；SIGINT/SIGKILL与期限先处理 | E2E/Integration：实际进程PID/适配器停止事实、所有Run列表 |
 | S2.A1 | 真实Planner自主/模板；模板拒绝增删骨架和扩权；固定输入包摘要 | E2E：真实Agent日志、提案原文及锁定计划；夹具结果单列 |
-| S2.A2 | 注册包Schema/资源摘要/路径逃逸/符号链接/重复注册、缺执行器/预算、selector与成员/公共投影不匹配、伪自定义Gate、checker读未授权原文均拒绝；重复JSON键、未知字段、超容量、环/自环、未知端口、孤立节点、非法selector、Schema不匹配、权限及验收缺失 | Unit/Integration：分类/path/expected/actual及业务派发计数0 |
+| S2.A2 | 注册包Schema/资源摘要/路径逃逸/符号链接/重复注册、缺执行器/预算、selector与成员/公共投影不匹配、checkpoint请求身份从端口注入、data节点冒充必需检查、伪自定义Gate、checker读未授权原文均拒绝；重复JSON键、未知字段、超容量、环/自环、未知端口、孤立节点、非法selector、Schema不匹配、权限及验收缺失 | Unit/Integration：分类/path/expected/actual及业务派发计数0 |
 | S2.A3 | 初次错→修正合法；needs_input联合结果/补充后耗尽；3次均错；时间/工具/Run先耗尽；plan check fail与error不同 | Integration：每次提案/检查及全预算，不通过换Run重置上限 |
 | S3.A1 | 三图形；不同延迟完成序列；实际最大并发不超过配置 | Integration/E2E：带身份的开始/结束与持久化槽位，不能仅看输出顺序 |
 | S3.A2 | 多成员乱序返回仍确定性汇合；同Executor绑定的成员具备不同Run/工作目录及精确输入、Skill/工具约束；一员失败不公共接纳；汇合非法Schema/panic/停止未知 | Integration：成员产物/候选、汇合摘要和节点结果 |

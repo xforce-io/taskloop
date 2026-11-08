@@ -156,47 +156,73 @@
       "minProperties": 1,
       "maxProperties": 16,
       "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "entry_ref": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 160
-          },
-          "input_bindings": {
+        "oneOf": [
+          {
             "type": "object",
-            "propertyNames": {
-              "type": "string",
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
-            },
-            "minProperties": 0,
-            "maxProperties": 256,
-            "additionalProperties": {
-              "type": "object",
-              "properties": {
-                "port": {
+            "properties": {
+              "entry_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "input_bindings": {
+                "type": "object",
+                "propertyNames": {
                   "type": "string",
                   "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
                 },
-                "pointer": {
-                  "type": "string",
-                  "maxLength": 512,
-                  "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                "minProperties": 0,
+                "maxProperties": 256,
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "port": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                    },
+                    "pointer": {
+                      "type": "string",
+                      "maxLength": 512,
+                      "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                    }
+                  },
+                  "required": [
+                    "port",
+                    "pointer"
+                  ],
+                  "additionalProperties": false
                 }
               },
-              "required": [
-                "port",
-                "pointer"
-              ],
-              "additionalProperties": false
-            }
+              "input_mode": {
+                "const": "node_ports"
+              }
+            },
+            "required": [
+              "entry_ref",
+              "input_bindings",
+              "input_mode"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "entry_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "input_mode": {
+                "const": "check_request"
+              }
+            },
+            "required": [
+              "entry_ref",
+              "input_mode"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "entry_ref",
-          "input_bindings"
-        ],
-        "additionalProperties": false
+        ]
       }
     },
     "join": {
@@ -282,6 +308,41 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 9223372036854775807
+    },
+    "evaluation": {
+      "type": "object",
+      "properties": {
+        "purpose": {
+          "enum": [
+            "checkpoint",
+            "data"
+          ]
+        },
+        "checker_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "target_ports": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "minProperties": 1,
+          "maxProperties": 256,
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          }
+        }
+      },
+      "required": [
+        "purpose",
+        "checker_ref",
+        "target_ports"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -340,8 +401,73 @@
               "required": [
                 "join"
               ]
+            },
+            {
+              "required": [
+                "evaluation"
+              ]
             }
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "evaluation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "kind": {
+            "const": "work"
+          },
+          "members": {
+            "maxProperties": 1,
+            "additionalProperties": {
+              "properties": {
+                "input_mode": {
+                  "const": "check_request"
+                }
+              }
+            }
+          },
+          "outputs": {
+            "maxProperties": 1,
+            "propertyNames": {
+              "const": "evaluation"
+            }
+          },
+          "join": {
+            "properties": {
+              "outputs": {
+                "maxProperties": 1,
+                "propertyNames": {
+                  "const": "evaluation"
+                },
+                "additionalProperties": {
+                  "properties": {
+                    "kind": {
+                      "const": "member"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "members": {
+            "additionalProperties": {
+              "properties": {
+                "input_mode": {
+                  "const": "node_ports"
+                }
+              }
+            }
+          }
         }
       }
     }

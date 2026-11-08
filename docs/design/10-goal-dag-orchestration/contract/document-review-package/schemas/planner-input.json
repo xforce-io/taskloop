@@ -17,10 +17,7 @@
       "pattern": "^[a-f0-9]{64}$"
     },
     "planning_mode": {
-      "enum": [
-        "autonomous",
-        "workflow"
-      ]
+      "const": "autonomous"
     },
     "capability_catalog": {
       "type": "array",
@@ -28,6 +25,9 @@
         "$ref": "taskloop:node-contract:v1"
       },
       "maxItems": 256
+    },
+    "profile": {
+      "$ref": "taskloop:orchestration-profile:v1"
     }
   },
   "required": [
@@ -36,7 +36,8 @@
     "goal_spec_digest",
     "profile_digest",
     "planning_mode",
-    "capability_catalog"
+    "capability_catalog",
+    "profile"
   ],
   "additionalProperties": false
 }

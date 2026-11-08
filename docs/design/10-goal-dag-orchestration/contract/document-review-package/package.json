@@ -21,7 +21,7 @@
     },
     "planner-input": {
       "path": "schemas/planner-input.json",
-      "sha256": "505634fbb2cf14dbaf84944b34e2d5d379a4d9c2d168c80434f7105723aa95b5"
+      "sha256": "cc72396fb9a6575c5b77ae1302e0e0a130990f5c0199a3c7f01f4b3d44dc6f29"
     },
     "goal-text": {
       "path": "schemas/goal-text.json",
@@ -173,7 +173,8 @@
               "port": "document",
               "pointer": ""
             }
-          }
+          },
+          "input_mode": "node_ports"
         }
       },
       "join": {

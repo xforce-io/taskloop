@@ -32,7 +32,8 @@
       "enum": [
         "plan",
         "node_checkpoint",
-        "goal_final"
+        "goal_final",
+        "node_evaluation"
       ]
     },
     "epoch": {
