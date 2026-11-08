@@ -2013,6 +2013,76 @@ mod tests {
         runtime.shutdown().await.unwrap();
     }
     #[tokio::test]
+    async fn clock_blocking_is_idempotent_and_requires_explicit_resume_after_trust_returns() {
+        let (_directory, runtime, mut goals, caller, request) = setup(None).await;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        let original = goals.get(&id, &caller).await.unwrap();
+        Arc::get_mut(&mut goals.core).unwrap().clock =
+            Arc::new(GoalClock::new(crate::runtime::now_ms() + 400));
+        assert!(goals.core.maintain(&id).unwrap());
+        let blocked = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(blocked.status, GoalStatus::Blocked);
+        assert!(
+            blocked
+                .blockers
+                .iter()
+                .any(|b| b.reason == "clock_untrusted")
+        );
+        assert!(goals.core.materialize(&id).unwrap().is_none());
+        let rejected = goals
+            .resume(&id, "early-resume", blocked.revision, &caller)
+            .await
+            .unwrap_err();
+        assert!(["clock_untrusted", "not_resumable"].contains(&rejected.code.as_str()));
+        // A rejected command has its own durable idempotency receipt/revision.
+        let after_rejection = goals.get(&id, &caller).await.unwrap();
+        let replay = goals
+            .resume(&id, "early-resume", blocked.revision, &caller)
+            .await
+            .unwrap_err();
+        assert_eq!(replay.code, rejected.code);
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            after_rejection.revision
+        );
+        goals.core.recover().unwrap();
+        goals.core.recover().unwrap();
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            after_rejection.revision
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        assert!(goals.core.maintain(&id).unwrap());
+        let stopped = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(stopped.status, GoalStatus::Stopped);
+        assert!(stopped.blockers.is_empty());
+        assert_eq!(stopped.budget.runs_used, 0);
+        assert_eq!(stopped.progress.pending_requests, 1);
+        assert_eq!(stopped.wall_deadline_utc_ms, original.wall_deadline_utc_ms);
+        assert_eq!(
+            stopped.planning_deadline_utc_ms,
+            original.planning_deadline_utc_ms
+        );
+        goals.core.recover().unwrap();
+        let recovered = goals.get(&id, &caller).await.unwrap();
+        let revision = recovered.revision;
+        goals.core.recover().unwrap();
+        assert_eq!(goals.get(&id, &caller).await.unwrap().revision, revision);
+        goals
+            .resume(&id, "trusted-resume", revision, &caller)
+            .await
+            .unwrap();
+        let resumed = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(resumed.status, GoalStatus::Running);
+        assert_eq!(resumed.budget.runs_used, 0);
+        assert_eq!(resumed.progress.pending_requests, 1);
+        goals
+            .cancel(&id, "finish-clock-test", resumed.revision, &caller)
+            .await
+            .unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+    #[tokio::test]
     async fn recovery_of_reserved_unstarted_work_reuses_its_run_and_charges_no_second_attempt() {
         let (_directory, runtime, goals, caller, request) =
             setup(Some(Arc::new(CompleteGoal(EvaluationVerdict::Pass)))).await;

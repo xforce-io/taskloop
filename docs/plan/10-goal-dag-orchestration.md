@@ -154,3 +154,11 @@
 - 补齐规划时限、Run与工具预算耗尽测试；修正不能重置原期限或上限。非法成员值在artifact.write被Schema拒绝，调用计费但候选字节0，节点失败且不产生公共汇合或最终检查。Flow和Goal在同一Runtime争唯一物理槽位，Flow在执行时Goal零Run/公开排队，确认停止后Goal才执行，实测峰值1。
 - 公开查询原先只返回最终planning_exhausted，单次结构化失败仅在内部候选记录。GoalRunSnapshot现以plan_validation_failure只读投影对应提案的原始错误，无新增存储表或状态；在线/只读SDK一致，CLI人工及JSON均展示原错误位置。L2 v0.10.16细化此既有诊断承诺，原18项验收逐字保留。
 - 聚焦计划检查/预算/非法成员/共享槽位/CLI诊断测试均通过；旧d332075完整套件205通过、5项环境用例ignored。新候选完整回归及严格Clippy继续核对，真实Workflow整条验收仍为blocked，最终keel-verify、独立review、CI与release尚未完成。
+
+
+## 实现检查点十五（2026-11-09）
+
+- 六类非法图由公开Goals实际提交：格式/容量、环、引用、连接、能力授权和预算/验收身份均有对应PlanValidationFailure及JSON Pointer，单Planner Run且零业务派发/零公共输出，预留和槽位释放；5项graph测试全部通过（`graph-all-rejection-categories-retest.log`）。不只调用纯验证器，不把Schema合法等同计划合法。
+- 未来高水位注入证明clock_untrusted阻断准入/resume，重复recover无新事实幂等；恢复可信后仍stopped并保留原期限，只有显式resume才恢复运行资格，未产生Run。最初测试把被拒命令的持久化回执revision误算成recover变更，已按实际契约分开核对拒绝回执重放和恢复幂等，未改生产逻辑；复验通过（`clock-trust-recovery-retest.log`），严格Clippy通过。
+- 复验准备工具首次接入探针如实保留29次原生调用尝试（含启动前失败），可确认原生耗时累计1528.395秒；不是所有开发命令耗时或模型上游请求数。尚无独立代码review，不能导入旧设计review冒充。`keel reverify --adopt-history`实测BLOCKED：requires existing review history；`--initial`仅接受空历史。探针不是完整复验计划或产品验收。已向用户询问本次是否允许留存原始记录、手工核算后继续，或先修工具；回答前不新增依赖该选择的模型调用。
+- 本次仅补验收测试与功能地图，L2 v0.10.16和原18项验收不变。正式verify/独立review/CI与合入仍待完成，真实Workflow旧失败不改判。

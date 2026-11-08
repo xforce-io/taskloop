@@ -19,6 +19,7 @@ enum Shape {
     Wait,
     FailureFork,
     Repair,
+    Rejected(&'static str),
 }
 #[derive(Default)]
 struct Observed {
@@ -48,7 +49,7 @@ fn nodes(shape: Shape) -> Value {
         Shape::Sequence => {
             json!({"seed":seed(),"relay":relay("seed"),"pack":{"capability_ref":"pack@1","depends_on":["relay"],"inputs":{"a":source("relay"),"b":source("relay")}}})
         }
-        Shape::Fork | Shape::FailureFork | Shape::Repair => {
+        Shape::Fork | Shape::FailureFork | Shape::Repair | Shape::Rejected(_) => {
             json!({"left":seed(),"right":seed(),"pack":{"capability_ref":"pack@1","depends_on":["left","right"],"inputs":{"a":source("left"),"b":source("right")}}})
         }
         Shape::Join => {
@@ -62,7 +63,9 @@ fn nodes(shape: Shape) -> Value {
 fn expected(shape: Shape) -> Value {
     match shape {
         Shape::Sequence => json!({"a":"x:S:B","b":"x:S:B"}),
-        Shape::Fork | Shape::FailureFork | Shape::Repair => json!({"a":"x:L","b":"x:R"}),
+        Shape::Fork | Shape::FailureFork | Shape::Repair | Shape::Rejected(_) => {
+            json!({"a":"x:L","b":"x:R"})
+        }
         Shape::Wait => json!({"a":"x:L","b":"provided"}),
         Shape::Join => json!({"a":"x:S:L","b":"x:S:R"}),
     }
@@ -181,6 +184,27 @@ impl Executor for GraphExecutor {
                     self.observed.events.lock().unwrap().is_empty(),
                     "invalid proposal must not dispatch business work"
                 );
+            }
+        }
+        if let Shape::Rejected(kind) = self.shape {
+            let plan = &mut value["proposal"];
+            match kind {
+                "format" => {
+                    for i in 0..14 {
+                        plan["nodes"][format!("extra{i}")] = seed();
+                    }
+                }
+                "cycle" => plan["nodes"]["left"]["depends_on"] = json!(["left"]),
+                "reference" => plan["outputs"]["result"]["port"] = json!("absent"),
+                "connection" => {
+                    plan["nodes"]["left"]["inputs"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("source");
+                }
+                "permission" => (), // Host grant excludes seed@1 while the frozen Profile still permits it.
+                "acceptance" => plan["goal_spec_digest"] = json!("0".repeat(64)),
+                _ => panic!("unknown rejection fixture"),
             }
         }
         let receipt = tools
@@ -305,12 +329,16 @@ async fn open(root: &std::path::Path, shape: Shape, observed: Arc<Observed>) -> 
             "local".into(),
             GoalGrant {
                 profile_digests: vec![receipt.profiles["graphs@1"].clone()],
-                capabilities: vec![
-                    "seed@1".into(),
-                    "relay@1".into(),
-                    "pack@1".into(),
-                    "input@1".into(),
-                ],
+                capabilities: if matches!(shape, Shape::Rejected("permission")) {
+                    vec!["relay@1".into(), "pack@1".into(), "input@1".into()]
+                } else {
+                    vec![
+                        "seed@1".into(),
+                        "relay@1".into(),
+                        "pack@1".into(),
+                        "input@1".into(),
+                    ]
+                },
                 tools: vec!["artifact.write".into()],
                 limits: limits(),
             },
@@ -634,4 +662,59 @@ async fn an_invalid_plan_is_corrected_once_with_exact_feedback_before_business_d
         2
     );
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn six_invalid_plan_categories_have_public_locations_and_zero_business_dispatch() {
+    for (kind, category) in [
+        ("format", PlanIssueCategory::Format),
+        ("cycle", PlanIssueCategory::Cycle),
+        ("reference", PlanIssueCategory::Reference),
+        ("connection", PlanIssueCategory::InputConnection),
+        ("permission", PlanIssueCategory::CapabilityPermission),
+        ("acceptance", PlanIssueCategory::BudgetAcceptance),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let observed = Arc::new(Observed::default());
+        let (runtime, caller) = open(
+            &root.path().join("store"),
+            Shape::Rejected(kind),
+            observed.clone(),
+        )
+        .await;
+        let goals = runtime.goals().unwrap();
+        let id = goals.submit(request(), &caller).await.unwrap().goal_id;
+        let snapshot = finished(&goals, &id, &caller).await;
+        assert_eq!(
+            snapshot.outcome,
+            Some(GoalOutcome::Failed),
+            "{kind}: {snapshot:?}"
+        );
+        assert_eq!(snapshot.budget.runs_used, 1);
+        assert!(snapshot.nodes.is_empty());
+        assert!(observed.events.lock().unwrap().is_empty());
+        assert_eq!(observed.peak.load(Ordering::SeqCst), 0);
+        let run = snapshot.runs.values().next().unwrap();
+        let failure = run
+            .plan_validation_failure
+            .as_ref()
+            .expect("original structured rejection must remain public");
+        assert!(
+            failure
+                .issues
+                .iter()
+                .any(|issue| issue.category == category),
+            "{kind}: {failure:?}"
+        );
+        assert!(
+            failure
+                .issues
+                .iter()
+                .all(|issue| issue.path.starts_with('/') && !issue.message.is_empty())
+        );
+        assert!(!snapshot.artifacts.iter().any(|a| a.accepted));
+        assert_eq!(snapshot.progress.goal_occupied_slots, 0);
+        assert!(snapshot.budget.reserved.is_empty());
+        runtime.shutdown().await.unwrap();
+    }
 }

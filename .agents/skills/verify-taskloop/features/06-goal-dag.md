@@ -30,3 +30,5 @@ cargo test --locked --offline orchestration::tests
 S2.A1真实模板入口：按`tests/inquiry_consumer/README.md`配置固定Milkie及真实Harness，执行消费者workflow模式；核对模板摘要由Runtime提供、提案严格匹配骨架及连接、独立质量检查通过。该路径与受控SDK模板测试分别记录，不以夹具替代真实Planner。
 
 规划拒绝诊断须同时核对在线SDK与只读GoalClient的`runs[*].plan_validation_failure`，保留每次提案的分类及JSON Pointer；CLI人工输出应显示相同原因。定位：`an_invalid_plan_is_corrected_once_with_exact_feedback_before_business_dispatch`与`cli_preserves_reports_and_distinguishes_not_met_checker_error_and_planning_exhaustion`。
+
+六类非法提案须经公开Goals提交后验证：`six_invalid_plan_categories_have_public_locations_and_zero_business_dispatch`逐类检查原始分类/位置、单Planner Run、业务节点与派发数0、槽位/预留释放。格式反例使用合法JSON但超过宿主节点容量的提案；字节格式/重复键等另由既有注册与验证器反例覆盖。
