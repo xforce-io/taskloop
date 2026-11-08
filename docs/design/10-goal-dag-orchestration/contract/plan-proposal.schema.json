@@ -110,6 +110,30 @@
                     "value"
                   ],
                   "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "import"
+                    },
+                    "artifact_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "pointer": {
+                      "type": "string",
+                      "maxLength": 2048,
+                      "pattern": "^(?:/(?:[^~]|~[01])*)*$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "artifact_id",
+                    "pointer"
+                  ],
+                  "additionalProperties": false
                 }
               ]
             }
