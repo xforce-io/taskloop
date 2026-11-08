@@ -34,8 +34,8 @@ pub use plan::{
 };
 pub use record::{
     GoalArtifact, GoalCommandReceipt, GoalEvaluationSummary, GoalMemberSnapshot, GoalMemberStatus,
-    GoalNodeSnapshot, GoalNodeStatus, GoalReceipt, GoalRunPhase, GoalRunRole, GoalRunSnapshot,
-    GoalSignalRequest, GoalSnapshot, GoalStopSummary, GoalWaiting, LockedPlan,
+    GoalNodeSnapshot, GoalNodeStatus, GoalProgress, GoalReceipt, GoalRunPhase, GoalRunRole,
+    GoalRunSnapshot, GoalSignalRequest, GoalSnapshot, GoalStopSummary, GoalWaiting, LockedPlan,
 };
 pub use registry::{OrchestrationRegistry, RegistrationReceipt, TemplateNode, WorkflowTemplate};
 pub use types::*;

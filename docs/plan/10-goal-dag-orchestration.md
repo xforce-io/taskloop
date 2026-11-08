@@ -87,3 +87,14 @@
 - Planner执行视图包含生效限制和显式imports摘要；干净暂停关闭该宿主协调观测源，保留Goal根Span供resume，Trace可重建摘要升级v3，历史事件字节不改。
 - 最新完整常规套件192通过、5项环境用例ignored，日志`target/verify-taskloop/10-dev/latest-full-regression.log`；严格Clippy通过，日志`clippy-strict-retest.log`。离线契约校验通过资源摘要、引用、投影及8项语义反例，不能据此声明E2E完成。
 - L2 v0.10.12集中重复协议、明确状态提交生效点及无step路径，规则/Decision记法不要求新增规则引擎或持久化层；原18项验收逐字保持。待完成：评价节点/崩溃窗口完整验证、真实Inquiry与第二业务/Agent、功能地图、最终候选独立review及release。
+
+
+## 实现检查点八（2026-11-08）
+
+- 公开SDK新增实执行评价节点覆盖：checkpoint的pass/fail/error、data的fail/error分别断言公共产物、Receipt、Goal结论及后继是否启动；同一受控checker在pause期间返回fail/error仍终结，pass暂停后显式resume不重跑已接纳检查。
+- input节点等待不创建Run，pause保留nonce和原期限且拒绝signal；resume后同键signal仅消费一次，输出value供后继执行。workflow模式通过冻结模板完成同一Runtime执行链，不只测试图结构校验。
+- CLI进程在Planner/Worker/final三个原生已启动窗口被SIGKILL；同键run先恢复为blocked/interrupted、拒绝resume、原生调用数不增，final阶段已接纳报告保留。仅证明这三个已启动窗口，不替代§6.9所有崩溃窗口。
+- GoalSnapshot新增GoalProgress只读投影：pending请求、通用准入排队原因、目标/宿主占槽及宿主未知停止槽数；与业务记录/产物在同一只读事务读取。Goals与GoalClient共用投影，跨owner只给计数，不泄露其他目标身份。SDK用未知占槽正例比对两入口一致。
+- 新建功能地图06/07/08，逐项映射S1–S6和原18项细验收，保留真实Agent/应用、故障窗口及尚未覆盖路径的取证要求，不将测试命令成功等同于整条S通过。
+- 完整常规回归197通过、5项既有环境用例ignored（`goal-nodes-recovery-full-regression.log`），随后完善CLI人工进度/产物引用及NDJSON节点/progress投影，按受影响CLI套件复验（`goal-human-progress-cli-retest.log`）；严格Clippy见`goal-human-progress-clippy.log`。这些均为开发证据，最终干净候选仍按verify重新取证。
+- L2 v0.10.13补全已承诺的progress字段，原18项验收逐字不变。下一阶段继续补齐其余可靠性边界并构建固定Inquiry领域库的隔离消费者；真实服务、最终verify、独立review、CI及release尚未完成。

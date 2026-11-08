@@ -112,3 +112,4 @@
 | GoalRunContext | Runtime指定的Goal执行归属，只标识Goal、角色、计划和检查身份，不授予访问权限。 | — |
 | CliDriver | 持有前台宿主所有权、仅派发所选Goal并提供本地控制入口的应用驱动器。 | — |
 | GoalCommandResult | 在线目标命令的固定回执与当前状态、待停止Run及阻塞原因摘要。 | — |
+| GoalProgress | 从同一只读快照派生的待准入请求、排队原因及目标和宿主占槽计数，不公开其他目标身份。 | — |

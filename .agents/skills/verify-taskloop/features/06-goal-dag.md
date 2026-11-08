@@ -1,0 +1,27 @@
+# Goal 提交、规划与 DAG 执行（Issue #10）
+
+S1–S3的主要功能文件。事实源为 `docs/design/10-goal-dag-orchestration.md` §4、§6及§11的原18项验收；本文件定义验证路径，不记录候选已通过。
+
+公开入口：`taskloop goal run/get/plan/signal/stop/resume/artifact`、`Runtime::open_orchestrated`、`Goals`、`GoalClient`。run/resume为前台宿主；无step操作。只读命令不得启动工作。
+
+| 验收 | 驾驶路径与判定 |
+|---|---|
+| S1.A1 | 用可信HOST配置和GoalRequest启动前台CLI，分别取人工与NDJSON输出；核对目标身份、阶段、最终结论和产物语义一致。用户不写DAG、不查私表。受控协议对端只能证明CLI行为，真实Planner另按08执行。 |
+| S1.A2 | 成功、未达标、检查错误、非法输入、等待及取消分别执行；核对退出码和公开status/outcome，错误保留原因，有产物不等于达标。 |
+| S1.A3 | 前台等待时从另一客户端补充，暂停期间拒绝signal且保留nonce/期限；退出后只读查询、离线命令失败、显式resume。SIGINT/SIGTERM干净停止，SIGKILL后的已启动工作禁止重放。 |
+| S2.A1 | autonomous与workflow分别由Planner提案，读取锁定Plan与执行记录；模板图骨架和权限不变。只测模板校验不算模板执行完成。 |
+| S2.A2 | 对格式、环/自环、引用、输入连接、能力权限及预算/必需验收六类非法图逐项提交；核对位置/原因、业务Executor调用数0。 |
+| S2.A3 | 受控Planner先非法后修正，核对新调用确实取得固定反馈；另耗尽次数、规划时间和调用额度，不能放宽原限制继续。 |
+| S3.A1 | 依次执行顺序、独立分叉、全部汇合三种图；用独立Run开始结束及同时活动计数证明并发，不能仅凭图形或总耗时。 |
+| S3.A2 | 单成员与多成员分别成功；输入不合法不得派发，成员失败/汇合不合法不得形成公共输出。多成员乱序完成仍按member_id确定性汇合。 |
+| S3.A3 | 上游失败后后继dependency_failed；另一图让input节点等待、独立分支继续，核对等待无Worker Run且不占槽，补充或到期后可收束。 |
+
+候选入口：
+
+```sh
+cargo test --locked --offline --test goal_cli
+cargo test --locked --offline --test goal_sdk
+cargo test --locked --offline orchestration::tests
+```
+
+`goal_cli`运行真实CLI进程配合受控Milkie协议对端；`goal_sdk`为外部crate使用公开SDK及受控Executor。两者不启动真实模型，不能替代08的应用/Agent证据。上述命令没有覆盖到的表内路径须另取证，不能按整套命令成功自动汇总S行pass。

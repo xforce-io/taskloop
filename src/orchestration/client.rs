@@ -62,15 +62,7 @@ impl GoalClient {
     pub fn get(&self, id: &str) -> Result<GoalSnapshot> {
         let mut conn = self.conn.lock().map_err(Error::io)?;
         let tx = conn.transaction()?;
-        let row = self.authorized(&tx, id)?;
-        let mut snapshot = row.record.snapshot(id, row.revision);
-        let mut statement =
-            tx.prepare("SELECT metadata FROM goal_artifacts WHERE goal_id=?1 ORDER BY rowid")?;
-        snapshot.artifacts = statement
-            .query_map([id], |r| r.get::<_, String>(0))?
-            .map(|r| serde_json::from_str(&r?).map_err(Error::io))
-            .collect::<Result<_>>()?;
-        drop(statement);
+        let snapshot = crate::store::goals::goal_snapshot_from(&tx, id, &self.caller.principal)?;
         tx.commit()?;
         Ok(snapshot)
     }

@@ -235,6 +235,22 @@ fn cli_runs_queries_exports_and_replays_without_new_native_invocations() {
     assert_eq!(replay["revision"], result["revision"]);
     assert_eq!(f.started(), 3);
     assert!(!f.root.path().join("store/owner.sock").exists());
+    let human = f
+        .command()
+        .args(["goal", "run", "--config"])
+        .arg(&f.host)
+        .arg("--spec")
+        .arg(&f.goal)
+        .output()
+        .unwrap();
+    assert_eq!(human.status.code(), Some(0));
+    let human = String::from_utf8_lossy(&human.stderr);
+    assert!(human.contains(id));
+    assert!(human.contains("Achieved"));
+    assert!(human.contains("节点完成：1/1"));
+    assert!(human.contains(artifact_id));
+    assert!(human.contains(artifact["artifact"]["sha256"].as_str().unwrap()));
+    assert_eq!(f.started(), 3);
 }
 #[test]
 fn cli_preserves_reports_and_distinguishes_not_met_checker_error_and_planning_exhaustion() {
@@ -356,5 +372,57 @@ fn clean_os_signals_pause_then_resume_without_reexecuting_the_worker() {
                 .filter(|source| source["run_id"] == id)
                 .all(|source| source["terminal"] == true)
         );
+    }
+}
+
+#[test]
+fn killed_hosts_reconcile_started_runs_without_replaying_any_business_stage() {
+    for (phase, count) in [("planner", 1), ("work", 2), ("final", 3)] {
+        let f = Fixture::new("goal_success", Some(phase));
+        let child = f.start();
+        let id = child.goal_id.clone();
+        f.wait_started(count);
+        assert_eq!(unsafe { libc::kill(child.pid() as i32, libc::SIGKILL) }, 0);
+        assert!(!child.finish().status.success());
+        let before = f.query("get", &id);
+        assert_ne!(before["outcome"], "achieved");
+        let recovered = snapshot(&f.run(), 8);
+        assert_eq!(recovered["status"], "blocked", "{phase}: {recovered}");
+        assert!(
+            recovered["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["reason"] == "interrupted")
+        );
+        assert_eq!(
+            f.started(),
+            count,
+            "recovery must never execute a started Run again"
+        );
+        if phase == "final" {
+            let report = recovered["nodes"]["review"]["outputs"]["report"]["id"]
+                .as_str()
+                .unwrap();
+            assert!(
+                !report.is_empty(),
+                "already accepted report must survive the crash"
+            );
+        }
+        let resumed = f
+            .command()
+            .args(["goal", "resume", &id, "--config"])
+            .arg(&f.host)
+            .args([
+                "--request-key",
+                "unsafe-replay",
+                "--revision",
+                &recovered["revision"].as_u64().unwrap().to_string(),
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(resumed.status.code(), Some(2));
+        assert_eq!(f.started(), count);
     }
 }

@@ -1,6 +1,7 @@
 //! External-crate SDK consumers with measured concurrent work and a semantic isolation check.
 use async_trait::async_trait;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -15,6 +16,8 @@ use tokio_util::sync::CancellationToken;
 #[derive(Default)]
 struct Stats {
     calls: AtomicUsize,
+    check_started: tokio::sync::Notify,
+    check_release: tokio::sync::Notify,
     active: AtomicUsize,
     peak: AtomicUsize,
     members: Mutex<BTreeMap<String, (usize, usize)>>,
@@ -55,7 +58,13 @@ impl Drop for Active {
         }
     }
 }
-struct ExecutorFixture(Arc<Stats>, bool);
+#[derive(Clone, Copy)]
+struct NodeScenario {
+    checkpoint: bool,
+    verdict: &'static str,
+    hold: bool,
+}
+struct ExecutorFixture(Arc<Stats>, bool, Option<NodeScenario>, bool);
 #[async_trait]
 impl Executor for ExecutorFixture {
     fn capabilities(&self) -> ExecutorCapabilities {
@@ -89,9 +98,66 @@ impl Executor for ExecutorFixture {
         let (slot, value) = match context.role {
             GoalRunRole::Planner { .. } => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
+                let mut value = json!({"protocol_version":1,"kind":"proposal","proposal":{"protocol_version":1,"goal_spec_digest":invocation.stage_input["goal_spec_digest"],"profile_digest":invocation.stage_input["profile_digest"],"planning_mode":"autonomous","nodes":{"combine":{"capability_ref":"pair@1","depends_on":[],"inputs":{"source":{"kind":"goal","pointer":"/inputs/text"}}}},"outputs":{"result":{"node_id":"combine","port":"result"}},"checks":{"joined":{"phase":"goal_final","checker_ref":"joined@1","targets":["result"]}}}});
+                if let Some(scenario) = self.2 {
+                    let plan = &mut value["proposal"];
+                    plan["nodes"]["check"] = json!({"capability_ref":"evaluation@1","depends_on":["combine"],"inputs":{"draft":{"kind":"node","node_id":"combine","port":"result","pointer":""}}});
+                    plan["nodes"]["after"] = plan["nodes"]["combine"].clone();
+                    plan["nodes"]["after"]["depends_on"] = json!(["check"]);
+                    plan["outputs"]["draft"] = json!({"node_id":"combine","port":"result"});
+                    plan["outputs"]["result"]["node_id"] = json!("after");
+                    if scenario.checkpoint {
+                        plan["checks"]["draft-check"] = json!({"phase":"node_checkpoint","checker_ref":"joined@1","targets":["draft"],"evaluation_node_id":"check"});
+                    }
+                }
+                if invocation.stage_input["planning_mode"] == "workflow" {
+                    let template: WorkflowTemplate =
+                        serde_json::from_value(invocation.stage_input["template"].clone()).unwrap();
+                    value["proposal"]["planning_mode"] = json!("workflow");
+                    value["proposal"]["template_digest"] = json!(format!(
+                        "{:x}",
+                        Sha256::digest(serde_json::to_vec(&template).unwrap())
+                    ));
+                    assert_eq!(template.nodes["combine"].capabilities, vec!["pair@1"]);
+                }
+                if self.3 {
+                    let plan = &mut value["proposal"];
+                    plan["nodes"]["prompt"] =
+                        json!({"capability_ref":"user-input@1","depends_on":[],"inputs":{}});
+                    plan["nodes"]["combine"]["depends_on"] = json!(["prompt"]);
+                    plan["nodes"]["combine"]["inputs"]["source"] =
+                        json!({"kind":"node","node_id":"prompt","port":"value","pointer":""});
+                }
+                ("proposal", value)
+            }
+            GoalRunRole::NodeMember { member_id, .. } if member_id == "checker" => {
+                let scenario = self.2.expect("explicit evaluation scenario");
+                if scenario.hold {
+                    self.0.check_started.notify_one();
+                    self.0.check_release.notified().await;
+                }
+                let input: CheckInput = serde_json::from_value(invocation.stage_input).unwrap();
+                assert_eq!(
+                    input.phase,
+                    if scenario.checkpoint {
+                        CheckInputPhase::NodeCheckpoint
+                    } else {
+                        CheckInputPhase::NodeEvaluation
+                    }
+                );
+                let CheckSubject::Artifacts { targets, .. } = &input.subject else {
+                    panic!("evaluation needs exact artifacts")
+                };
+                assert_eq!(targets.keys().collect::<Vec<_>>(), vec!["draft"]);
+                assert_eq!(invocation.artifacts.len(), 1);
+                assert_eq!(
+                    invocation.inputs,
+                    serde_json::to_value(&input.goal_inputs).unwrap()
+                );
+                assert!(invocation.signal_facts.is_empty());
                 (
-                    "proposal",
-                    json!({"protocol_version":1,"kind":"proposal","proposal":{"protocol_version":1,"goal_spec_digest":invocation.stage_input["goal_spec_digest"],"profile_digest":invocation.stage_input["profile_digest"],"planning_mode":"autonomous","nodes":{"combine":{"capability_ref":"pair@1","depends_on":[],"inputs":{"source":{"kind":"goal","pointer":"/inputs/text"}}}},"outputs":{"result":{"node_id":"combine","port":"result"}},"checks":{"joined":{"phase":"goal_final","checker_ref":"joined@1","targets":["result"]}}}}),
+                    "evaluation",
+                    json!({"protocol_version":1,"verdict":scenario.verdict,"results":[{"id":"joined","verdict":scenario.verdict,"message":"Controlled evaluation-node result","evidence_refs":input.evidence_refs}],"evidence_refs":input.evidence_refs,"violations":[]}),
                 )
             }
             GoalRunRole::NodeMember { member_id, .. } => {
@@ -183,6 +249,25 @@ async fn host_mode(
     capacity: u64,
     unknown: bool,
 ) -> (Runtime, Caller) {
+    host_scenario(root, stats, capacity, unknown, None).await
+}
+async fn host_scenario(
+    root: &std::path::Path,
+    stats: Arc<Stats>,
+    capacity: u64,
+    unknown: bool,
+    scenario: Option<NodeScenario>,
+) -> (Runtime, Caller) {
+    host_variant(root, stats, capacity, unknown, scenario, false).await
+}
+async fn host_variant(
+    root: &std::path::Path,
+    stats: Arc<Stats>,
+    capacity: u64,
+    unknown: bool,
+    scenario: Option<NodeScenario>,
+    input: bool,
+) -> (Runtime, Caller) {
     let mut registry = OrchestrationRegistry::new();
     for (name, schema) in [
         ("text", json!({"type":"string"})),
@@ -246,12 +331,47 @@ async fn host_mode(
             },
         )
         .unwrap();
-    registry.register_capability(serde_json::from_value(json!({"protocol_version":1,"id":"pair","version":"1","kind":"work","inputs":{"source":{"schema_ref":"text","required":true,"source_policy":{"kind":"goal","pointer":"/inputs/text"}}},"outputs":{"result":{"schema_ref":"pair"}},"gate":"_tl.schema@1","max_rule_check_ms":1000,"members":{"a":{"input_mode":"node_ports","entry_ref":"worker@1","input_bindings":{"source":{"port":"source","pointer":""}}},"b":{"input_mode":"node_ports","entry_ref":"worker@1","input_bindings":{"source":{"port":"source","pointer":""}}}},"join":{"kind":"object-by-worker","outputs":{"result":{"kind":"members","slots":{"a":"result","b":"result"}}}}})).unwrap()).unwrap();
-    registry.register_profile(serde_json::from_value(json!({"id":"pair","version":"1","goal_input_schema":"goal-input","goal_selectors":{"/inputs/text":"text"},"planner_entry_ref":"planner@1","capabilities":["pair@1"],"planning_input_schemas":[],"templates":[],"outputs":{"result":{"schema_ref":"pair","allowed_capabilities":["pair@1"]}},"final_outputs":["result"],"checks":[{"id":"joined","phase":"goal_final","checker_ref":"joined@1","rules_digest":rules,"target_outputs":["result"],"required":true}],"allowed_tools":["artifact.write"]})).unwrap()).unwrap();
+    let mut pair = json!({"protocol_version":1,"id":"pair","version":"1","kind":"work","inputs":{"source":{"schema_ref":"text","required":true,"source_policy":{"kind":"goal","pointer":"/inputs/text"}}},"outputs":{"result":{"schema_ref":"pair"}},"gate":"_tl.schema@1","max_rule_check_ms":1000,"members":{"a":{"input_mode":"node_ports","entry_ref":"worker@1","input_bindings":{"source":{"port":"source","pointer":""}}},"b":{"input_mode":"node_ports","entry_ref":"worker@1","input_bindings":{"source":{"port":"source","pointer":""}}}},"join":{"kind":"object-by-worker","outputs":{"result":{"kind":"members","slots":{"a":"result","b":"result"}}}}});
+    if input {
+        pair["inputs"]["source"]["source_policy"] = json!({"kind":"artifact"});
+        registry.register_capability(serde_json::from_value(json!({"protocol_version":1,"id":"user-input","version":"1","kind":"input","inputs":{},"outputs":{"value":{"schema_ref":"text"}},"gate":"_tl.schema@1","max_rule_check_ms":1000,"signal_schema_ref":"text","max_wait_ms":5000})).unwrap()).unwrap();
+    }
+    registry
+        .register_capability(serde_json::from_value(pair).unwrap())
+        .unwrap();
+    let mut profile = json!({"id":"pair","version":"1","goal_input_schema":"goal-input","goal_selectors":{"/inputs/text":"text"},"planner_entry_ref":"planner@1","capabilities":["pair@1"],"planning_input_schemas":[],"templates":[],"outputs":{"result":{"schema_ref":"pair","allowed_capabilities":["pair@1"]}},"final_outputs":["result"],"checks":[{"id":"joined","phase":"goal_final","checker_ref":"joined@1","rules_digest":rules,"target_outputs":["result"],"required":true}],"allowed_tools":["artifact.write"]});
+    if let Some(scenario) = scenario {
+        registry.register_capability(serde_json::from_value(json!({"protocol_version":1,"id":"evaluation","version":"1","kind":"work","inputs":{"draft":{"schema_ref":"pair","required":true,"source_policy":{"kind":"artifact"}}},"outputs":{"evaluation":{"schema_ref":"_tl.evaluation-candidate@1"}},"gate":"_tl.schema@1","max_rule_check_ms":1000,"members":{"checker":{"entry_ref":"joined@1","input_mode":"check_request"}},"join":{"kind":"object-by-worker","outputs":{"evaluation":{"kind":"member","member_id":"checker","slot":"evaluation"}}},"evaluation":{"purpose":if scenario.checkpoint {"checkpoint"} else {"data"},"checker_ref":"joined@1","target_ports":{"draft":"draft"}}})).unwrap()).unwrap();
+        profile["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("evaluation@1"));
+        profile["outputs"]["draft"] = profile["outputs"]["result"].clone();
+        if scenario.checkpoint {
+            profile["checks"].as_array_mut().unwrap().push(json!({"id":"draft-check","phase":"node_checkpoint","checker_ref":"joined@1","rules_digest":rules,"target_outputs":["draft"],"required":true,"before_outputs":["result"]}));
+        }
+    }
+    if input {
+        profile["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("user-input@1"));
+    }
+    if scenario.is_none() && !input {
+        let template: WorkflowTemplate = serde_json::from_value(json!({"id":"fixed-pair","version":"1","nodes":{"combine":{"capabilities":["pair@1"],"depends_on":[],"inputs":{"source":{"kind":"goal","pointer":"/inputs/text"}},"fillable_inputs":[]}},"outputs":{"result":{"node_id":"combine","port":"result"}},"checks":{"joined":{"phase":"goal_final","checker_ref":"joined@1","targets":["result"]}}})).unwrap();
+        registry.register_template(template).unwrap();
+        profile["templates"] = json!(["fixed-pair@1"]);
+    }
+    registry
+        .register_profile(serde_json::from_value(profile).unwrap())
+        .unwrap();
     let mut limit = limits();
     limit.max_concurrent_runs = capacity;
     let bindings = HostBindings::default()
-        .executor("fixture", Arc::new(ExecutorFixture(stats, unknown)))
+        .executor(
+            "fixture",
+            Arc::new(ExecutorFixture(stats, unknown, scenario, input)),
+        )
         .grant(
             "local",
             Grant {
@@ -271,7 +391,13 @@ async fn host_mode(
             "local".into(),
             GoalGrant {
                 profile_digests: vec![registration.profiles["pair@1"].clone()],
-                capabilities: vec!["pair@1".into()],
+                capabilities: if scenario.is_some() {
+                    vec!["pair@1".into(), "evaluation@1".into()]
+                } else if input {
+                    vec!["pair@1".into(), "user-input@1".into()]
+                } else {
+                    vec!["pair@1".into()]
+                },
                 tools: vec!["artifact.write".into()],
                 limits: limit.clone(),
             },
@@ -428,6 +554,21 @@ async fn an_unknown_run_keeps_its_slot_without_blocking_another_queued_goals_dea
     let mut waiting = request("expires", "queued");
     waiting.spec.limits.max_wall_ms = 200;
     let queued = goals.submit(waiting, &caller).await.unwrap().goal_id;
+    let progress = goals.get(&queued, &caller).await.unwrap().progress;
+    assert_eq!(progress.pending_requests, 1);
+    assert_eq!(
+        progress.queue_reason.as_deref(),
+        Some("run_admission_pending")
+    );
+    assert_eq!(progress.goal_occupied_slots, 0);
+    assert_eq!(progress.host_occupied_slots, 1);
+    assert_eq!(progress.host_stop_unknown_slots, 1);
+    let client = GoalClient::open(root.path().join("store"), caller.clone()).unwrap();
+    let readonly = client.get(&queued).unwrap().progress;
+    assert_eq!(
+        serde_json::to_value(progress).unwrap(),
+        serde_json::to_value(readonly).unwrap()
+    );
     let expired = finished(&goals, &queued, &caller).await;
     assert_eq!(expired.outcome, Some(GoalOutcome::Failed));
     assert_eq!(expired.terminal_intent.unwrap().reason, "wall_timeout");
@@ -444,4 +585,303 @@ async fn an_unknown_run_keeps_its_slot_without_blocking_another_queued_goals_dea
         runtime.shutdown().await.unwrap_err().code,
         "stop_unconfirmed"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn evaluation_nodes_distinguish_checkpoint_fail_data_fail_and_check_errors() {
+    for (checkpoint, verdict, expected) in [
+        (true, "pass", GoalOutcome::Achieved),
+        (true, "fail", GoalOutcome::NotMet),
+        (true, "error", GoalOutcome::Failed),
+        (false, "fail", GoalOutcome::Achieved),
+        (false, "error", GoalOutcome::Failed),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let stats = Arc::new(Stats::default());
+        let (runtime, caller) = host_scenario(
+            &root.path().join("store"),
+            stats.clone(),
+            2,
+            false,
+            Some(NodeScenario {
+                checkpoint,
+                verdict,
+                hold: false,
+            }),
+        )
+        .await;
+        let goals = runtime.goals().unwrap();
+        let id = goals
+            .submit(request("evaluation", "source"), &caller)
+            .await
+            .unwrap()
+            .goal_id;
+        let snapshot = finished(&goals, &id, &caller).await;
+        assert_eq!(
+            snapshot.outcome,
+            Some(expected),
+            "checkpoint={checkpoint}, verdict={verdict}: {snapshot:?}"
+        );
+        assert_eq!(snapshot.nodes["combine"].status, GoalNodeStatus::Succeeded);
+        let draft = &snapshot.nodes["combine"].outputs["result"];
+        assert_eq!(
+            parse_unique(&goals.read_artifact(&draft.id, &caller).await.unwrap().bytes).unwrap(),
+            json!({"a":"source:a","b":"source:b"})
+        );
+        let check = snapshot
+            .evaluations
+            .iter()
+            .find(|e| {
+                e.phase
+                    == if checkpoint {
+                        CheckInputPhase::NodeCheckpoint
+                    } else {
+                        CheckInputPhase::NodeEvaluation
+                    }
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&check.verdict).unwrap(),
+            json!(verdict)
+        );
+        assert!(check.receipt_id.is_some());
+        if verdict == "error" {
+            assert!(snapshot.nodes["check"].outputs.is_empty());
+            assert_eq!(
+                snapshot.terminal_intent.as_ref().unwrap().reason,
+                "check_unavailable"
+            );
+        } else {
+            let reference = &snapshot.nodes["check"].outputs["evaluation"];
+            let evaluation = parse_unique(
+                &goals
+                    .read_artifact(&reference.id, &caller)
+                    .await
+                    .unwrap()
+                    .bytes,
+            )
+            .unwrap();
+            assert_eq!(evaluation["verdict"], verdict);
+        }
+        if expected == GoalOutcome::Achieved {
+            assert_eq!(snapshot.nodes["after"].status, GoalNodeStatus::Succeeded);
+            assert_eq!(stats.calls.load(Ordering::SeqCst), 7);
+        } else {
+            assert!(snapshot.nodes["after"].outputs.is_empty());
+            assert!(!snapshot.runs.values().any(
+                |r| matches!(&r.role, GoalRunRole::NodeMember { node_id, .. } if node_id == "after")
+            ));
+            assert_eq!(stats.calls.load(Ordering::SeqCst), 4);
+        }
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_accepts_started_checkpoint_results_without_hiding_fail_or_error() {
+    for (verdict, outcome) in [
+        ("pass", None),
+        ("fail", Some(GoalOutcome::NotMet)),
+        ("error", Some(GoalOutcome::Failed)),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let stats = Arc::new(Stats::default());
+        let (runtime, caller) = host_scenario(
+            &root.path().join("store"),
+            stats.clone(),
+            2,
+            false,
+            Some(NodeScenario {
+                checkpoint: true,
+                verdict,
+                hold: true,
+            }),
+        )
+        .await;
+        let goals = runtime.goals().unwrap();
+        let id = goals
+            .submit(request("pause-check", "source"), &caller)
+            .await
+            .unwrap()
+            .goal_id;
+        tokio::time::timeout(Duration::from_secs(4), stats.check_started.notified())
+            .await
+            .unwrap();
+        let snapshot = goals.get(&id, &caller).await.unwrap();
+        goals
+            .stop(&id, "pause", snapshot.revision, &caller)
+            .await
+            .unwrap();
+        stats.check_release.notify_one();
+        let paused = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let s = goals.get(&id, &caller).await.unwrap();
+                if matches!(
+                    s.status,
+                    GoalStatus::Stopped | GoalStatus::Finished | GoalStatus::Blocked
+                ) {
+                    break s;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(paused.outcome, outcome, "{verdict}: {paused:?}");
+        assert_eq!(
+            paused.status,
+            if outcome.is_some() {
+                GoalStatus::Finished
+            } else {
+                GoalStatus::Stopped
+            }
+        );
+        assert_eq!(
+            paused
+                .evaluations
+                .iter()
+                .find(|c| c.phase == CheckInputPhase::NodeCheckpoint)
+                .unwrap()
+                .status,
+            "accepted"
+        );
+        assert!(!paused.runs.values().any(
+            |r| matches!(&r.role, GoalRunRole::NodeMember { node_id, .. } if node_id == "after")
+        ));
+        assert_eq!(stats.calls.load(Ordering::SeqCst), 4);
+        if verdict == "error" {
+            assert!(paused.nodes["check"].outputs.is_empty());
+        } else {
+            assert!(paused.nodes["check"].outputs.contains_key("evaluation"));
+        }
+        if outcome.is_none() {
+            goals
+                .resume(&id, "resume", paused.revision, &caller)
+                .await
+                .unwrap();
+            let resumed = finished(&goals, &id, &caller).await;
+            assert_eq!(resumed.outcome, Some(GoalOutcome::Achieved));
+            assert_eq!(
+                stats.calls.load(Ordering::SeqCst),
+                7,
+                "accepted checkpoint must not be rerun"
+            );
+        }
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn input_nodes_wait_without_a_run_preserve_nonce_across_pause_and_accept_signal_once() {
+    let root = tempfile::tempdir().unwrap();
+    let stats = Arc::new(Stats::default());
+    let (runtime, caller) = host_variant(
+        &root.path().join("store"),
+        stats.clone(),
+        2,
+        false,
+        None,
+        true,
+    )
+    .await;
+    let goals = runtime.goals().unwrap();
+    let id = goals
+        .submit(request("input", "provided"), &caller)
+        .await
+        .unwrap()
+        .goal_id;
+    let waiting = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let s = goals.get(&id, &caller).await.unwrap();
+            if s.status == GoalStatus::Waiting {
+                break s;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(stats.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(waiting.nodes["prompt"].status, GoalNodeStatus::WaitingInput);
+    let wait = waiting.waiting[0].clone();
+    assert_eq!(wait.node_id.as_deref(), Some("prompt"));
+    goals
+        .stop(&id, "pause", waiting.revision, &caller)
+        .await
+        .unwrap();
+    let stopped = goals.get(&id, &caller).await.unwrap();
+    assert_eq!(stopped.status, GoalStatus::Stopped);
+    assert_eq!(stopped.waiting[0].nonce, wait.nonce);
+    assert_eq!(stopped.waiting[0].expires_at_utc_ms, wait.expires_at_utc_ms);
+    let signal = |key: &str, revision| GoalSignalRequest {
+        protocol_version: 1,
+        wait_id: wait.wait_id.clone(),
+        nonce: wait.nonce.clone(),
+        payload: json!("provided"),
+        request_key: key.into(),
+        expected_revision: revision,
+    };
+    assert!(
+        goals
+            .signal(&id, signal("paused", stopped.revision), &caller)
+            .await
+            .is_err()
+    );
+    let stopped = goals.get(&id, &caller).await.unwrap();
+    goals
+        .resume(&id, "resume", stopped.revision, &caller)
+        .await
+        .unwrap();
+    let resumed = goals.get(&id, &caller).await.unwrap();
+    let signal = signal("answer", resumed.revision);
+    let receipt = goals.signal(&id, signal.clone(), &caller).await.unwrap();
+    let replayed = goals.signal(&id, signal, &caller).await.unwrap();
+    assert_eq!(receipt.applied_revision, replayed.applied_revision);
+    let result = finished(&goals, &id, &caller).await;
+    assert_eq!(result.outcome, Some(GoalOutcome::Achieved));
+    assert_eq!(result.budget.runs_used, 4);
+    assert_eq!(stats.calls.load(Ordering::SeqCst), 4);
+    assert!(result.waiting.is_empty());
+    let accepted = &result.nodes["prompt"].outputs["value"];
+    assert_eq!(
+        parse_unique(
+            &goals
+                .read_artifact(&accepted.id, &caller)
+                .await
+                .unwrap()
+                .bytes
+        )
+        .unwrap(),
+        json!("provided")
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_planning_executes_the_frozen_template_through_the_same_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let stats = Arc::new(Stats::default());
+    let (runtime, caller) = host(&root.path().join("store"), stats.clone()).await;
+    let goals = runtime.goals().unwrap();
+    let mut workflow = request("workflow", "template");
+    workflow.spec.planning.mode = PlanningMode::Workflow;
+    workflow.spec.planning.template_ref = Some("fixed-pair@1".into());
+    let id = goals.submit(workflow, &caller).await.unwrap().goal_id;
+    let snapshot = finished(&goals, &id, &caller).await;
+    assert_eq!(
+        snapshot.outcome,
+        Some(GoalOutcome::Achieved),
+        "{snapshot:?}"
+    );
+    assert_eq!(stats.calls.load(Ordering::SeqCst), 4);
+    let plan = goals.plan(&id, &caller).await.unwrap();
+    assert_eq!(plan.proposal.planning_mode, PlanningMode::Workflow);
+    assert!(plan.proposal.template_digest.is_some());
+    assert_eq!(
+        plan.proposal.nodes.keys().collect::<Vec<_>>(),
+        vec!["combine"]
+    );
+    assert_eq!(snapshot.progress.host_occupied_slots, 0);
+    assert!(snapshot.progress.queue_reason.is_none());
+    runtime.shutdown().await.unwrap();
 }

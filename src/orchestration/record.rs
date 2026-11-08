@@ -128,6 +128,15 @@ pub struct GoalWaiting {
     pub consumed: bool,
     pub reason: String,
 }
+/// Point-in-time scheduling projection. Host counts disclose no other owner's identities.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalProgress {
+    pub pending_requests: u64,
+    pub queue_reason: Option<String>,
+    pub goal_occupied_slots: u64,
+    pub host_occupied_slots: u64,
+    pub host_stop_unknown_slots: u64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalSnapshot {
     pub protocol_version: u32,
@@ -153,6 +162,8 @@ pub struct GoalSnapshot {
     pub budget: GoalBudget,
     pub limit_sources: GoalLimitSources,
     pub deadline_expired: bool,
+    #[serde(default)]
+    pub progress: GoalProgress,
     pub stop: GoalStopSummary,
     pub limits: GoalLimits,
     pub error: Option<Error>,
@@ -342,6 +353,16 @@ impl GoalRecord {
     }
     pub(crate) fn snapshot(&self, id: &str, revision: u64) -> GoalSnapshot {
         let now = crate::runtime::now_ms();
+        let pending_requests = self
+            .requests
+            .values()
+            .filter(|r| !r.cancelled && r.run_id.is_none())
+            .count()
+            + self
+                .runs
+                .values()
+                .filter(|r| !r.view.started && r.view.phase == GoalRunPhase::Suspended)
+                .count();
         GoalSnapshot {
             protocol_version: 1,
             goal_id: id.into(),
@@ -391,6 +412,16 @@ impl GoalRecord {
                         .waiting
                         .values()
                         .any(|w| !w.consumed && now >= w.expires_at_utc_ms)),
+            progress: GoalProgress {
+                pending_requests: pending_requests as u64,
+                queue_reason: (pending_requests > 0
+                    && matches!(self.status, GoalStatus::Running | GoalStatus::Waiting)
+                    && self.pause_at_utc_ms.is_none()
+                    && self.terminal_intent.is_none()
+                    && self.blockers.is_empty())
+                .then(|| "run_admission_pending".into()),
+                ..Default::default()
+            },
             stop: GoalStopSummary {
                 pause_at_utc_ms: self.pause_at_utc_ms,
                 terminal_at_utc_ms: self.terminal_intent.as_ref().map(|i| i.at_utc_ms),

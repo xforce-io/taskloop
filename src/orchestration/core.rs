@@ -681,14 +681,7 @@ impl Goals {
         self.core.submit(bytes, caller)
     }
     pub async fn get(&self, id: &str, caller: &Caller) -> Result<GoalSnapshot> {
-        let row = self.core.authorized(id, caller)?;
-        let mut snapshot = row.record.snapshot(id, row.revision);
-        snapshot.artifacts = self
-            .core
-            .inner
-            .store
-            .goal_artifacts(id, &caller.principal)?;
-        Ok(snapshot)
+        self.core.inner.store.goal_snapshot(id, &caller.principal)
     }
     pub async fn plan(&self, id: &str, caller: &Caller) -> Result<LockedPlan> {
         self.core

@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.12；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.13；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 产品基线：[L1概要及归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)，以及提交`16a68d48abb829dc14f13d0e0f4d3ed8c754558c`的v0.2用户路径与验收。复用§4行为和§11原18项Sx.Ax，不改变产品范围。本文件按用户指定十三节格式保存唯一L2事实源，L1留在Issue评论。
 
@@ -591,7 +591,7 @@ Planner输出采用PlannerResult联合类型：`{protocol_version:1,kind:"propos
 
 Flow的queued账本记录保留旧active的RunId/epoch及已计次数，不预留物理槽位；SharedDispatcher选中后在同一准入事务将queued→reserved并占一个legacy lane/全局槽位，才允许started。该变更仅取得物理准入，沿用原RunId/epoch/已计max_runs，禁止再计一次Run或递增epoch，不套用Goal R01的新调用计数。未选中的旧排队实例不得因迁移占满容量；所有旧构造函数也按此路径，不把v1的“有active”误当“已经原生启动”。Goal继续用RunRequest表示未物化调用，不新增Goal queued Run阶段。迁移中任一started未知仍保留占槽，即使它暂时使占用超过降低后的宿主上限，也不得裁剪事实，新准入只能等待释放。
 
-一个宿主持有Store所有权锁，一个协调器串行处理命令与Run完成事件，异步执行体可并发。就绪选择按Goal队列轮转、同Goal按node_id/member_id稳定排序；独立Goal不能被大量节点永久饿死。全局槽位与目标槽位都以**持久化的已预留/在途/停止未知Run**计数，内存Semaphore只作加速，不能成为唯一事实源。快照progress显示queue_reason和受未知停止占用的槽数；跨owner只展示计数和原因，不泄露其他实例ID/产物。
+一个宿主持有Store所有权锁，一个协调器串行处理命令与Run完成事件，异步执行体可并发。就绪选择按Goal队列轮转、同Goal按node_id/member_id稳定排序；独立Goal不能被大量节点永久饿死。全局槽位与目标槽位都以**持久化的已预留/在途/停止未知Run**计数，内存Semaphore只作加速，不能成为唯一事实源。快照progress显示queue_reason和受未知停止占用的槽数；跨owner只展示计数和原因，不泄露其他实例ID/产物。 GoalProgress包含pending_requests、queue_reason、goal_occupied_slots、host_occupied_slots及host_stop_unknown_slots；有待物化/挂起请求且业务允许推进时queue_reason=run_admission_pending，否则null。该原因表示尚未获得完整准入，不推断一定由某个其他Goal阻塞。记录、产物及run_leases计数在同一只读事务投影，不另存一份调度状态。
 
 意图校验严格按§6.5.1矩阵：pause允许已启动Run在原期限内继续受控工具调用、完成内建Gate并接纳干净结果，不能启动后继/新检查Run；到停止窗口再取消Token。其他终结意图拒绝新业务接纳。业务派发/输出接纳在SQLite事务中核对：owner/grant、Goal revision与epoch、spec/plan/capability摘要、节点/Worker前态、依赖与输入摘要、cancel/stop意图、wall期限、预算/容量预留、命令或结果幂等标识。revision是提交时读取最新值并CAS，不要求异步Run出生时的Goal revision等于当前值；无关兄弟节点推进不能使正确结果过期。有效性由epoch、目标节点前态与确切输入/能力/计划摘要决定。字段匹配失败产生有限拒绝原因，不调用模型协商。模型Review仅在Profile声明的plan/checkpoint/final检查点发生。
 

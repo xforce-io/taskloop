@@ -136,6 +136,32 @@ fn human(snapshot: &GoalSnapshot) {
         "目标 {}：{:?} / {:?}，revision={}，结果={:?}",
         snapshot.goal_id, snapshot.status, snapshot.stage, snapshot.revision, snapshot.outcome
     );
+    let completed = snapshot
+        .nodes
+        .values()
+        .filter(|node| node.status == GoalNodeStatus::Succeeded)
+        .count();
+    eprintln!("节点完成：{}/{}", completed, snapshot.nodes.len());
+    if let Some(reason) = &snapshot.progress.queue_reason {
+        eprintln!(
+            "排队：{}；待准入={}，目标占槽={}，宿主占槽={}，未知停止占槽={}",
+            reason,
+            snapshot.progress.pending_requests,
+            snapshot.progress.goal_occupied_slots,
+            snapshot.progress.host_occupied_slots,
+            snapshot.progress.host_stop_unknown_slots
+        );
+    }
+    for artifact in snapshot
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.accepted)
+    {
+        eprintln!(
+            "产物 {}：{}，sha256={}",
+            artifact.artifact.slot, artifact.artifact.id, artifact.artifact.sha256
+        );
+    }
     for waiting in &snapshot.waiting {
         if !waiting.consumed {
             eprintln!(
@@ -219,22 +245,26 @@ async fn foreground(args: &Args) -> Result<u8> {
         args.id().to_owned()
     };
     let mut last_revision = None;
+    let mut last_progress = None;
     let mut exit_signal = None;
     let mut stop_deadline = None;
     let snapshot = loop {
         let snapshot = driver.get().await?;
-        if last_revision != Some(snapshot.revision) {
+        if last_revision != Some(snapshot.revision)
+            || last_progress.as_ref() != Some(&snapshot.progress)
+        {
             if args.json() {
                 event(
                     "progress",
                     Some(&id),
                     Some(snapshot.revision),
-                    json!({"status":snapshot.status,"stage":snapshot.stage,"outcome":snapshot.outcome,"waiting":snapshot.waiting,"budget":{"runs_used":snapshot.budget.runs_used,"used":snapshot.budget.used}}),
+                    json!({"status":snapshot.status,"stage":snapshot.stage,"outcome":snapshot.outcome,"waiting":snapshot.waiting,"progress":snapshot.progress,"nodes":snapshot.nodes.iter().map(|(id,node)| (id.clone(), node.status)).collect::<std::collections::BTreeMap<_,_>>(),"budget":{"runs_used":snapshot.budget.runs_used,"used":snapshot.budget.used}}),
                 )?;
             } else {
                 human(&snapshot);
             }
             last_revision = Some(snapshot.revision);
+            last_progress = Some(snapshot.progress.clone());
         }
         if matches!(
             snapshot.status,

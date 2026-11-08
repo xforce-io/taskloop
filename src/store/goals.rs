@@ -50,6 +50,27 @@ pub(crate) enum GoalWriteGuard<'a> {
     Cleanup,
     Recovery,
 }
+/// Call inside a read transaction so record, artifacts and physical slots share one snapshot.
+pub(crate) fn goal_snapshot_from(conn: &Connection, id: &str, owner: &str) -> Result<GoalSnapshot> {
+    let row = goal_by_id(conn, id)?;
+    if row.owner != owner {
+        return Err(not_found());
+    }
+    let mut snapshot = row.record.snapshot(id, row.revision);
+    let mut statement =
+        conn.prepare("SELECT metadata FROM goal_artifacts WHERE goal_id=?1 ORDER BY rowid")?;
+    snapshot.artifacts = statement
+        .query_map([id], |r| r.get::<_, String>(0))?
+        .map(|r| serde_json::from_str(&r?).map_err(Error::io))
+        .collect::<Result<_>>()?;
+    let counts: (i64, i64, i64) = conn.query_row(
+        "SELECT count(*), coalesce(sum(CASE WHEN owner_kind='goal' AND owner_id=?1 THEN 1 ELSE 0 END),0), coalesce(sum(CASE WHEN phase='stop_unknown' THEN 1 ELSE 0 END),0) FROM run_leases WHERE slot_held=1",
+        [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    snapshot.progress.host_occupied_slots = u64::try_from(counts.0).map_err(Error::io)?;
+    snapshot.progress.goal_occupied_slots = u64::try_from(counts.1).map_err(Error::io)?;
+    snapshot.progress.host_stop_unknown_slots = u64::try_from(counts.2).map_err(Error::io)?;
+    Ok(snapshot)
+}
 fn not_found() -> Error {
     Error::new("not_found", "/goal", "Goal not found")
 }
@@ -1147,16 +1168,12 @@ impl Store {
             .query_map(params![goal, run], |r| r.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?)
     }
-    pub(crate) fn goal_artifacts(&self, id: &str, owner: &str) -> Result<Vec<GoalArtifact>> {
-        let c = self.connection()?;
-        let mut st=c.prepare("SELECT a.metadata FROM goal_artifacts a JOIN goals g ON g.id=a.goal_id WHERE a.goal_id=?1 AND g.owner=?2 ORDER BY a.rowid")?;
-        let records = st
-            .query_map(params![id, owner], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        records
-            .into_iter()
-            .map(|r| serde_json::from_str(&r).map_err(Error::io))
-            .collect()
+    pub(crate) fn goal_snapshot(&self, id: &str, owner: &str) -> Result<GoalSnapshot> {
+        let mut conn = self.connection()?;
+        let tx = conn.transaction()?;
+        let snapshot = goal_snapshot_from(&tx, id, owner)?;
+        tx.commit()?;
+        Ok(snapshot)
     }
     pub(crate) fn goal_run_candidates(
         &self,

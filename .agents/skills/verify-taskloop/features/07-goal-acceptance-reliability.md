@@ -1,0 +1,29 @@
+# Goal 评价、预算与可靠性（Issue #10）
+
+S4–S5的主要功能文件。标准为 `docs/design/10-goal-dag-orchestration.md` §6.5–6.11及§11；不得把业务达标、原生停止和Trace完整性合成一个成功标志。
+
+公开入口：Goals/GoalClient的状态、产物、评价、预算、Trace及控制命令；故障注入可使用受控Executor/独立CLI进程，结果从公开接口核对。
+
+| 验收 | 驾驶路径与判定 |
+|---|---|
+| S4.A1 | plan、checkpoint、goal_final的pass/fail/error分别执行；data评价的fail为数据，不充当必需评价。checkpoint fail接纳评价与not_met意图须原子，error无公共成功输出；全部必需pass才achieved。 |
+| S4.A2 | 过期、伪造身份/证据、检查不可用及工作成功但目标fail分别触发；不得成功，保留候选及已接纳文章/缺口。checker只能读取本请求target与允许字段。 |
+| S4.A3 | 改动候选摘要、Spec/Profile/Plan/规则版本及依赖引用；拒绝失效事实，不因作者自报pass授予提交权。 |
+| S5.A1 | submit/signal/stop/cancel同键重放及同键异参；迟到输出和重复结算；目标、Run、公共输出、回执及容量只生效一次。 |
+| S5.A2 | 在Planner、业务及检查中取消/暂停/杀宿主；§6.9每个崩溃窗口分别注入。已启动未知不重跑且保留占槽，未启动挂起只在显式resume首次启动；pause中的既有检查fail/error不能被掩盖。保留已接纳产物。 |
+| S5.A3 | 分别耗尽墙钟、规划、活动时间、Run、转移、工具及候选容量；同时争最后配额/共享Flow与Goal槽位。两个owner不能混读，未知停止占槽不阻挡另一Goal自己的到期事务。只用公开预算/progress/Trace诊断。 |
+
+候选入口：
+
+```sh
+cargo test --locked --offline --test goal_cli
+cargo test --locked --offline --test goal_sdk
+cargo test --locked --offline orchestration::core::tests
+cargo test --locked --offline store::goals::tests
+cargo test --locked --offline
+cargo clippy --locked --offline --all-targets -- -D warnings
+```
+
+重点核对 `evaluation_nodes_distinguish_checkpoint_fail_data_fail_and_check_errors`、`pause_accepts_started_checkpoint_results_without_hiding_fail_or_error`、`killed_hosts_reconcile_started_runs_without_replaying_any_business_stage`、`an_unknown_run_keeps_its_slot_without_blocking_another_queued_goals_deadline`。测试名只指向部分边界，不代替表中全部故障窗口与额度覆盖。
+
+每项保存候选SHA、冻结配置、命令、公开快照、Run数、用量/停止事实及原始日志。独立CLI被SIGKILL只能证明真实进程恢复；协议夹具不能证明某个真实Harness已停止。
