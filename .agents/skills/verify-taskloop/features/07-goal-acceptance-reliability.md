@@ -50,5 +50,6 @@ cargo clippy --locked --offline --all-targets -- -D warnings
 - `planner_review_workers_and_final_checks_obey_declared_tool_byte_and_time_budgets`：Planner、计划检查、业务成员、最终检查分别耗尽工具次数、候选字节、执行时间，共12组合；从公开RunBudget确认对应limits_hit，原Spec不变、预留/占槽清零。使用仅拥有Rust Future的受控Executor，不能当真实Harness停止证据。
 - `cli_online_cancel_returns_an_intent_then_closes_without_erasing_the_accepted_report`：Planner、业务、最终检查三阶段分别在线取消；实际CLI退出7、Run数不再增加、槽位清零、Socket关闭，最终检查阶段保留已接纳文章；离线控制退出6。
 - `failed_output_insertion_rolls_back_goal_budget_and_revision`：先写有效blob，测试库触发器在goal_artifacts的真实INSERT上注入故障；必须观察到注入错误，Goal状态/revision/账本/公共产物均回滚。保留的孤立blob不成为已接纳Artifact。
+- `a_projection_panic_fails_the_node_without_poisoning_coordination_or_losing_members`：实际推进到节点checking后，以仅测试编译的线程局部钩子注入内建投影panic。必须失败为contract_error，保留成员产物、零公共输出/评价、不增加Run，预算/槽位归零，协调器仍可调用且重复检查不再推进；不把该注入描述为已发现自然可触发的业务输入。
 
 版本重开路径使用明确的60秒未到期前置，并断言deadline_expired=false；等待过期由独立200毫秒用例验证。两条路径分别证明版本冻结与期限，不互相替代。

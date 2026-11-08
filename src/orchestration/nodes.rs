@@ -15,6 +15,11 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use tokio::time::Instant;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static PANIC_NODE_PROJECTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl GoalCore {
     /// G05/G06/G07/G08: one durable coordination transaction, independent of native slot capacity.
     pub(crate) fn advance(&self, id: &str) -> Result<bool> {
@@ -456,124 +461,139 @@ impl GoalCore {
         let mut effects = GoalCommitEffects::default();
         let contract = &self.registry.capabilities[&node.view.capability_ref];
         let allocation = row.record.budget.reserved[nonce].allocation.active_ms;
-        let projected = (|| -> Result<BTreeMap<String, Value>> {
-            let join = contract
-                .join
-                .as_ref()
-                .ok_or_else(|| Error::io("work node join missing"))?;
-            let mut projected = BTreeMap::new();
-            for (port, projection) in &join.outputs {
-                let value = match projection {
-                    OutputProjection::Member { member_id, slot } => {
-                        self.member_value(node, member_id, slot)?
-                    }
-                    OutputProjection::Members { slots } => Value::Object(
-                        slots
-                            .iter()
-                            .map(|(member, slot)| {
-                                Ok((member.clone(), self.member_value(node, member, slot)?))
-                            })
-                            .collect::<Result<Map<_, _>>>()?,
-                    ),
-                };
-                self.registry
-                    .schemas
-                    .validate(&contract.outputs[port].schema_ref, &value)?;
-                projected.insert(port.clone(), value);
-            }
-            Ok(projected)
-        })();
-        let applied = projected.and_then(|outputs| {
-            let mut evaluation_error = false;
-            if let Some(evaluation) = &contract.evaluation {
-                let evaluation_id = node
-                    .check_request_id
-                    .as_ref()
-                    .ok_or_else(|| Error::io("node check request missing"))?;
-                let check = &next.checks[evaluation_id];
-                let issued = IssuedCheck {
-                    input: serde_json::from_slice(&self.inner.store.read_blob(&check.input_sha)?)?,
-                    input_digest: check.input_digest.clone(),
-                    checker_ref: evaluation.checker_ref.clone(),
-                    producer_run_id: check.producer_run_id.clone(),
-                };
-                let checked = self.registry.check_evaluation(
-                    &issued,
-                    &bounded_json(
-                        &outputs["evaluation"],
-                        self.options.max_json_candidate_bytes,
-                    )?,
-                    self.options.max_json_candidate_bytes,
-                    &self.existing_check_evidence(&next, &issued)?,
-                )?;
-                let receipt = issued.receipt(checked, row.revision + 1);
-                let sha = self
-                    .inner
-                    .store
-                    .write_blob(&bounded_json(&receipt, 4_194_304)?)?;
-                let check = next.checks.get_mut(evaluation_id).expect("issued check");
-                check.receipt_sha = Some(sha);
-                check.candidate_sha = Some(receipt.candidate_digest.clone());
-                check.view.status = "accepted".into();
-                check.view.verdict = Some(receipt.verdict.clone());
-                check.view.receipt_id = Some(evaluation_id.clone());
-                effects.checks.push((issued, Some(receipt.clone())));
-                if receipt.verdict == EvaluationVerdict::Error {
-                    evaluation_error = true;
-                    set_terminal(
-                        &mut next,
-                        GoalOutcome::Failed,
-                        "check_unavailable",
-                        node_id,
-                        row.revision + 1,
-                        observed.utc_ms,
-                    );
-                } else if receipt.verdict == EvaluationVerdict::Fail
-                    && evaluation.purpose == EvaluationPurpose::Checkpoint
-                {
-                    set_terminal(
-                        &mut next,
-                        GoalOutcome::NotMet,
-                        "quality_not_met",
-                        node_id,
-                        row.revision + 1,
-                        observed.utc_ms,
-                    );
+        let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let projected = (|| -> Result<BTreeMap<String, Value>> {
+                #[cfg(test)]
+                if PANIC_NODE_PROJECTION.replace(false) {
+                    panic!("injected fixed projection panic");
                 }
-            }
-            if evaluation_error {
-                next.nodes
-                    .get_mut(node_id)
-                    .expect("checking node")
-                    .view
-                    .status = GoalNodeStatus::Failed;
-            } else {
-                for (port, value) in outputs {
-                    let artifact = self.public_artifact(
-                        &row.id,
-                        &next,
-                        node_id,
-                        &port,
-                        &value,
-                        "node_projection",
+                let join = contract
+                    .join
+                    .as_ref()
+                    .ok_or_else(|| Error::io("work node join missing"))?;
+                let mut projected = BTreeMap::new();
+                for (port, projection) in &join.outputs {
+                    let value = match projection {
+                        OutputProjection::Member { member_id, slot } => {
+                            self.member_value(node, member_id, slot)?
+                        }
+                        OutputProjection::Members { slots } => Value::Object(
+                            slots
+                                .iter()
+                                .map(|(member, slot)| {
+                                    Ok((member.clone(), self.member_value(node, member, slot)?))
+                                })
+                                .collect::<Result<Map<_, _>>>()?,
+                        ),
+                    };
+                    self.registry
+                        .schemas
+                        .validate(&contract.outputs[port].schema_ref, &value)?;
+                    projected.insert(port.clone(), value);
+                }
+                Ok(projected)
+            })();
+            projected.and_then(|outputs| {
+                let mut evaluation_error = false;
+                if let Some(evaluation) = &contract.evaluation {
+                    let evaluation_id = node
+                        .check_request_id
+                        .as_ref()
+                        .ok_or_else(|| Error::io("node check request missing"))?;
+                    let check = &next.checks[evaluation_id];
+                    let issued = IssuedCheck {
+                        input: serde_json::from_slice(
+                            &self.inner.store.read_blob(&check.input_sha)?,
+                        )?,
+                        input_digest: check.input_digest.clone(),
+                        checker_ref: evaluation.checker_ref.clone(),
+                        producer_run_id: check.producer_run_id.clone(),
+                    };
+                    let checked = self.registry.check_evaluation(
+                        &issued,
+                        &bounded_json(
+                            &outputs["evaluation"],
+                            self.options.max_json_candidate_bytes,
+                        )?,
+                        self.options.max_json_candidate_bytes,
+                        &self.existing_check_evidence(&next, &issued)?,
                     )?;
+                    let receipt = issued.receipt(checked, row.revision + 1);
+                    let sha = self
+                        .inner
+                        .store
+                        .write_blob(&bounded_json(&receipt, 4_194_304)?)?;
+                    let check = next.checks.get_mut(evaluation_id).expect("issued check");
+                    check.receipt_sha = Some(sha);
+                    check.candidate_sha = Some(receipt.candidate_digest.clone());
+                    check.view.status = "accepted".into();
+                    check.view.verdict = Some(receipt.verdict.clone());
+                    check.view.receipt_id = Some(evaluation_id.clone());
+                    effects.checks.push((issued, Some(receipt.clone())));
+                    if receipt.verdict == EvaluationVerdict::Error {
+                        evaluation_error = true;
+                        set_terminal(
+                            &mut next,
+                            GoalOutcome::Failed,
+                            "check_unavailable",
+                            node_id,
+                            row.revision + 1,
+                            observed.utc_ms,
+                        );
+                    } else if receipt.verdict == EvaluationVerdict::Fail
+                        && evaluation.purpose == EvaluationPurpose::Checkpoint
+                    {
+                        set_terminal(
+                            &mut next,
+                            GoalOutcome::NotMet,
+                            "quality_not_met",
+                            node_id,
+                            row.revision + 1,
+                            observed.utc_ms,
+                        );
+                    }
+                }
+                if evaluation_error {
                     next.nodes
                         .get_mut(node_id)
                         .expect("checking node")
                         .view
-                        .outputs
-                        .insert(port, artifact.artifact.clone());
-                    next.artifacts
-                        .insert(artifact.artifact.id.clone(), artifact.clone());
-                    effects.artifacts.push(artifact);
+                        .status = GoalNodeStatus::Failed;
+                } else {
+                    for (port, value) in outputs {
+                        let artifact = self.public_artifact(
+                            &row.id,
+                            &next,
+                            node_id,
+                            &port,
+                            &value,
+                            "node_projection",
+                        )?;
+                        next.nodes
+                            .get_mut(node_id)
+                            .expect("checking node")
+                            .view
+                            .outputs
+                            .insert(port, artifact.artifact.clone());
+                        next.artifacts
+                            .insert(artifact.artifact.id.clone(), artifact.clone());
+                        effects.artifacts.push(artifact);
+                    }
+                    next.nodes
+                        .get_mut(node_id)
+                        .expect("checking node")
+                        .view
+                        .status = GoalNodeStatus::Succeeded;
                 }
-                next.nodes
-                    .get_mut(node_id)
-                    .expect("checking node")
-                    .view
-                    .status = GoalNodeStatus::Succeeded;
-            }
-            Ok(())
+                Ok(())
+            })
+        }))
+        .unwrap_or_else(|_| {
+            Err(Error::new(
+                "contract_error",
+                "/node/check",
+                "built-in node projection or check panicked",
+            ))
         });
         let elapsed = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let error = if elapsed > allocation {

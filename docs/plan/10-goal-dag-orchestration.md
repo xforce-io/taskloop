@@ -186,3 +186,10 @@
 - 数据库写失败测试原本因缺blob在SQL写入前拒绝，不足以证明写失败回滚。现写有效blob并在真实Artifact INSERT上注入触发器故障，断言命中注入错误及Goal/revision/预算/公共产物全部回滚；孤立blob仍私有保留。用例通过（actual-sql-write-failure-rollback.log），严格Clippy通过（final-boundary-fixtures-clippy.log）。
 - 按用户refine要求精简L2为v0.10.17，§6.1删重复图并改为成员执行→公共接纳→后继就绪三步，明确Runtime内部职责与Harness内部执行循环。§4、§6.2–6.11、§11与前版逐字一致，十三节、本地链接及离线契约检查通过；不改变原18项验收或新增执行组件。
 - 上述为聚焦开发证据；冻结候选完整套件与对应CI另行保存，不能把旧SHA证据改挂。正式verify、真实模型复验、独立代码review及release仍未完成；历史接入选择尚待用户答复。
+
+## 实现检查点十九（2026-11-09）
+
+- 7a57bac已推送，冻结完整常规回归223通过、5 ignored；严格Clippy、独立旧Flow消费者、无模型三注册预检和真实Milkie+受控Pi的3项协议/Trace测试均通过。证据汇总为7a57bac-development-evidence.json；CI run 42508040232仍按原SHA单列，不能用它证明下一候选。Issue设计摘要已回读核对v0.10.17/7a57bac，其余正文及未勾验收未改。
+- 对照L2 §6.6/§11.1的panic要求发现，finish_node_check原有固定投影与Schema/评价接纳闭包没有catch_unwind边界；panic会越过节点失败处置并污染持有的协调锁。先在7a57bac基础仅加入cfg(test)线程局部故障钩子和实际checking入口回归，复现注入panic越界，日志projection-panic-before-fix.log为实际失败。未声称有自然业务输入可触发；问题依据为缺失明确要求的故障隔离边界与注入实测。
+- 修复仅在现有内建投影/检查及候选接纳计算外围捕获可展开panic，返回固定contract_error且不回显panic载荷；复用原失败分支重置待提交输出/Receipt、保留成员事实并结算/收束，协调锁在捕获边界之外，不新增应用回调或公共协议。OOM/abort仍按原宿主崩溃契约处理。
+- 同一故障注入入口复验通过（projection-panic-after-fix.log）：Goal failed、节点contract_error、成员产物可读、无公共输出/评价、只有原2个Run、无预留/占槽；重复finish/advance无新revision且协调器可用。该修复落实既有L2，不改产品行为、版本与原18项验收。冻结全套及对应CI继续保存新SHA证据；真实Agent复验和独立review仍待完成。

@@ -2539,4 +2539,70 @@ mod tests {
         assert_eq!(goals.get(&id, &caller).await.unwrap().revision, revision);
         runtime.shutdown().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn a_projection_panic_fails_the_node_without_poisoning_coordination_or_losing_members() {
+        let (_directory, runtime, goals, caller, request) =
+            setup(Some(Arc::new(CompleteGoal(EvaluationVerdict::Pass)))).await;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        for _ in 0..2 {
+            goals.core.advance(&id).unwrap();
+            let run = goals.core.materialize(&id).unwrap().unwrap();
+            goals
+                .core
+                .prepare_execution(&id, &run)
+                .unwrap()
+                .unwrap()
+                .execute()
+                .await
+                .unwrap();
+            goals.core.consume_return(&id, &run).unwrap();
+        }
+        let before = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(before.nodes["review"].status, GoalNodeStatus::Checking);
+        let members = before.nodes["review"].members["reviewer"].outputs.clone();
+        assert!(!members.is_empty());
+        super::super::nodes::PANIC_NODE_PROJECTION.set(true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            goals.core.finish_node_check(&id, "review")
+        }));
+        assert!(
+            result.is_ok(),
+            "a built-in projection panic escaped the Goal boundary"
+        );
+        assert!(result.unwrap().unwrap());
+        let ended = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(ended.outcome, Some(GoalOutcome::Failed));
+        assert_eq!(ended.nodes["review"].status, GoalNodeStatus::Failed);
+        assert_eq!(
+            ended.nodes["review"].error.as_ref().unwrap().code,
+            "contract_error"
+        );
+        assert!(ended.nodes["review"].outputs.is_empty());
+        assert!(goals.evaluations(&id, &caller).await.unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_value(&ended.nodes["review"].members["reviewer"].outputs).unwrap(),
+            serde_json::to_value(&members).unwrap()
+        );
+        for artifact in members.values() {
+            assert!(
+                !goals
+                    .read_artifact(&artifact.id, &caller)
+                    .await
+                    .unwrap()
+                    .bytes
+                    .is_empty()
+            );
+        }
+        assert_eq!(ended.budget.runs_used, 2);
+        assert_eq!(ended.progress.goal_occupied_slots, 0);
+        assert!(ended.budget.reserved.is_empty());
+        assert!(!goals.core.finish_node_check(&id, "review").unwrap());
+        assert!(!goals.core.advance(&id).unwrap());
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            ended.revision
+        );
+        runtime.shutdown().await.unwrap();
+    }
 }
