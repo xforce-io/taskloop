@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.3；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.4；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -289,7 +289,7 @@ Schema用于定义和离线校验契约形状，不要求为内部对象实现�
 
 ### 6.3.2 公共端口如何映射到Worker
 
-NodeContract每个input端口含schema_ref、required、source_policy；可选default仅允许constant来源且必须通过对应Schema。Profile.goal_selectors显式声明固定Goal输入视图的pointer→schema_ref；注册时证明是required字段路径，解析出的Schema与所声明资源规范化内容一致，运行时使用该资源的冻结摘要。`/goal`必须吻合GoalRequest的goal字段Schema，不能自改长度；`/inputs/...`从goal_input_schema解析。端口连接继续要求摘要相等，不做一般Schema兼容推理。
+NodeContract每个input端口含schema_ref、required、source_policy；可选default仅允许constant来源且必须通过对应Schema。Profile.goal_selectors显式声明固定Goal输入视图的pointer→schema_ref；注册时证明是required字段路径，解析出的Schema与所声明资源规范化内容一致，运行时使用该资源的冻结摘要。`/goal`必须吻合GoalRequest的goal字段Schema，不能自改长度；`/inputs/...`从goal_input_schema解析。端口连接继续要求摘要相等，不做一般Schema兼容推理。非空node/import选择使用Profile.artifact_selectors中的`源schema_ref → pointer → 目标schema_ref`声明；注册时证明required字段路径与目标资源规范化内容一致，运行时按冻结目标摘要连接。未声明则只允许整值连接；这是既有固定字段selector规则的具体登记位置。
 
 work的members以member_id为键。普通成员input_mode=node_ports，每项含entry_ref及input_bindings；评价成员input_mode=check_request，禁止input_bindings，按下节由Runtime生成整个CheckInput。目标字段名映射为`{port,pointer}`，构造该EntryContract的stage_input顶层对象；只允许从本节点公共输入选取固定required字段，不支持表达式/脚本/隐式常量。注册时要求目标入口Schema为固定对象，必需属性恰有一个绑定，未知属性、重复/缺少必需绑定拒绝；每个源selector与目标字段的Schema摘要相等。可选端口缺失且无default时省略相应可选目标字段，不以null冒充；非空selector不可跨可选属性/数组。派发前对实际stage_input完整验证。
 

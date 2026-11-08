@@ -131,6 +131,29 @@
         "minLength": 1,
         "maxLength": 160
       }
+    },
+    "artifact_selectors": {
+      "type": "object",
+      "maxProperties": 256,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "additionalProperties": {
+        "type": "object",
+        "maxProperties": 256,
+        "propertyNames": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^(?:/(?:[^~/]|~[01])*)+$"
+        },
+        "additionalProperties": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        }
+      }
     }
   },
   "required": [

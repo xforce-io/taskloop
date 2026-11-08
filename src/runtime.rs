@@ -859,6 +859,24 @@ impl Inner {
     pub fn expire(&self, id: &str) -> Result<()> {
         let row = self.store.load(id)?;
         let mut r = decode(&row)?;
+        if r.status == Status::Running
+            && r.active.as_ref().is_some_and(|a| !a.started)
+            && (now_ms() >= r.deadline_ms || r.active_ms >= r.limits.max_active_ms)
+        {
+            r.status = Status::Blocked;
+            r.active = None;
+            r.error = Some(Error::new(
+                "limit_reached",
+                "/dispatch",
+                "queued execution exhausted its budget before dispatch",
+            ));
+            match self.save(&row, &r, false, None, &[]) {
+                Ok(_) => {}
+                Err(e) if e.code == "revision_conflict" => {}
+                Err(e) => return Err(e),
+            }
+            return Ok(());
+        }
         if r.status == Status::Waiting && r.wait_deadline_ms.is_some_and(|x| now_ms() >= x) {
             let d = self.store.definition(&r.definition_digest)?;
             if let State::Wait { timeout_target, .. } =
@@ -1065,7 +1083,9 @@ async fn worker_loop(inner: Arc<Inner>) {
             let Ok(mut r) = decode(&row) else {
                 continue;
             };
-            if r.status == Status::Waiting {
+            if r.status == Status::Waiting
+                || (r.status == Status::Running && r.active.as_ref().is_some_and(|a| !a.started))
+            {
                 let _ = inner.expire(&row.id);
             }
             let started = r.active.as_ref().is_some_and(|a| a.started);
@@ -1128,7 +1148,10 @@ async fn worker_loop(inner: Arc<Inner>) {
                 next = Some(row);
             }
         }
-        if !blocked_capacity && let Some(row) = next {
+        if !blocked_capacity
+            && let Some(row) = next
+            && inner.store.reserve_flow(&row).unwrap_or(false)
+        {
             crate::phase::run(inner.clone(), row).await;
             continue;
         }

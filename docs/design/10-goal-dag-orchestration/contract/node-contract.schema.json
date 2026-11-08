@@ -154,7 +154,7 @@
         "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
       },
       "minProperties": 1,
-      "maxProperties": 16,
+      "maxProperties": 32,
       "additionalProperties": {
         "oneOf": [
           {
