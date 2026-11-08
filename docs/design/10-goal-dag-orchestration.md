@@ -1,8 +1,10 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.6.2；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.7.0；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
+
+本轮L1复用上述产品基线及§4用户路径，L2在既有文件内修订执行职责和图示，不改变产品范围与验收。
 
 本文件遵从用户指定十三节格式，是唯一详细设计事实源；L1 留在 Issue 评论。原18项 Sx.Ax 保留在§11，不改编号或降低要求。本次明确 v0.2 留待技术设计的契约；涉及 CLI、汇合与有界修正沿用已提出的 P1，不扩展为后台服务、条件语言或自动返工。应用深度文章质量由 [Inquiry #7](https://github.com/xforce-io/inquiry/issues/7) 负责。
 
@@ -74,6 +76,16 @@ flowchart TD
 
 S1/S2走A–L，S3走L–N，S4走E–R，S5覆盖C–O与全程故障，S6经同义SDK路径接入应用。空配置/非法Spec就地报缺项，不启动模型；查询错误不伪装成“暂无报告”。计划锁定后不能由补充命令改目标、权限、预算或依赖。等待不占 Worker，宿主仍在前台；退出不是后台托管。实际命令和退出语义见§8。
 
+§4.1是用户可见路径，§6.1是实现这些行为的内部机制，两者不是两套执行流程。一个用户步骤可以对应多次事件接纳与事务提交：
+
+| 用户可见步骤 | 技术承接 |
+|---|---|
+| 提交、看到受理或错误 | §6.1.1授权、事件校验与原子提交 |
+| 规划、锁定计划、执行节点 | §6.1.2分别派发Planner与节点成员；结果回到协调器后才推进 |
+| 等待输入、补充后继续 | §6.6保存等待身份，补充事件经协调器接纳后重新计算就绪节点 |
+| 取消/中断、看到停止结果 | §6.1.2向已有Run请求停止，按§6.9确认和结算，不启动新agent |
+| 达标、未达标或检查错误 | §6.8接纳确切评价，协调器提交终态后由公开快照呈现 |
+
 ### 4.2 产品不变量
 
 R1 固定目标、能力、规则与接纳计划。R2 Agent提案，Runtime调度与提交。R3 节点输入输出和汇合可判定。R4 结构合法、工作成功、质量达标分别记录。R5 规划/Review/业务同受预算、身份和停止治理。R6 无未知执行盲重放，不以Trace代替状态。
@@ -97,48 +109,123 @@ R1 固定目标、能力、规则与接纳计划。R2 Agent提案，Runtime调�
 
 ### 6.1 分层、状态转移处理与执行路径
 
-状态协调器是唯一状态提交入口，其内部显式包含**事件接纳、转移校验、状态转移器、事务提交**。依赖调度只提出可派发动作；Planner、Worker、Gate和评价均返回候选事实，不能直接修改Goal、节点或Run状态。
+本节分开表达三个问题：谁决定并提交状态（§6.1.1），提交后的动作交给谁（§6.1.2），一个节点如何衔接到具体Worker及其执行循环（§6.1.3）。合法状态边仍只由§6.5定义，本节不另造状态机。
+
+| 层次 | 责任 | 与agent的关系 |
+|---|---|---|
+| 状态协调器 | 校验事件、计算转移、事务提交 | Rust确定性逻辑，本身不是agent；不调用模型或工具 |
+| 规划与执行角色 | Planner提出计划；节点成员完成业务；检查Worker生成评价 | 角色不同，可以复用执行通道；Planner无权直接派发业务Worker |
+| 调度与受控Run管线 | 预留资源、唯一启动、工具约束、结果/停止事实 | 连接角色调用与Executor，不替代agent内部执行循环 |
+| Executor / Milkie / Agent Harness | Executor履行执行契约；MilkieExecutor经Milkie适配具体Harness | 每个Run绑定自己的执行器、入口、上下文和工作目录；不是一个全局编排agent |
+
+#### 6.1.1 状态提交闭环
+
+状态协调器是唯一状态提交入口，其内部包含事件接纳、转移校验、状态转移器、事务提交。依赖调度只提出可派发动作；Planner、Worker及检查均返回候选事实，不能直接修改Goal、节点或Run状态。
 
 ```mermaid
 flowchart TD
  C[CLI / Rust宿主] --> A[Goals公开API与授权]
  A --> E
- K[期限 / 取消 / 恢复 / 停止确认事件] --> E
+ K[结果 / 期限 / 取消 / 恢复 / 停止确认事件] --> E
  subgraph Q[状态协调器：唯一状态提交入口]
-  E[接纳命令或执行事件，识别幂等键] --> R[读取当前Goal / 节点 / Run快照]
-  R --> V{转移校验：身份、epoch、前态、依赖、证据、预算}
-  V -->|拒绝| X[返回拒绝或原回执，不推进业务状态]
-  V -->|合法| D[状态转移器：计算新状态及待执行动作]
-  RULE[6.5转移规则与不变量] --> D
-  D --> TX{单事务CAS：状态、回执、产物引用、预算与占槽}
-  TX -->|revision冲突| R
-  TX -->|提交成功| F[已提交状态与动作]
+  E[接纳事件，识别幂等键] --> R[读取当前Goal / 节点 / Run快照]
+  R --> V{身份 / epoch / 前态 / 证据 / 预算校验}
+  V -->|拒绝| X[返回拒绝或原回执]
+  V -->|合法| D[状态转移器：计算新状态及动作]
+  RULE[§6.5转移规则] --> D
+  D --> TX{SQLite事务与revision CAS}
+  TX -->|冲突| R
+  TX -->|成功| F[已提交状态与动作]
  end
  DB[(state.sqlite / immutable blobs)] --> R
  TX -->|原子持久化| DB
- F --> O[GoalSnapshot / 产物 / 预算 / 命令回执]
- F --> S[提交后派发：只执行已预留且仍有效的动作]
- S --> P[受控Planner / 声明检查 / 业务Worker / 停止请求]
- P --> M[共享Managed Run与检查管线]
- M --> H[Executor → Milkie → Harness]
- H --> G[候选Schema / Gate / 汇合 / 评价对象校验]
- G --> B[结果事件：提案、输出、检查或停止事实]
+ F --> O[公开快照 / 产物 / 回执]
+ F --> S[动作分派：见§6.1.2]
+ S --> B[执行或检查结果事件]
  B --> E
  F -.已提交事实的观测投影.-> T[(现有Trace与治理)]
- M -.运行观测.-> T
 ```
 
 处理顺序固定如下：
 
-1. **事件进入**：提交/补充/取消命令、Planner提案、Worker结果、检查结果、超时和停止确认都进入同一协调器。执行结束不是业务状态已接纳。
-2. **读快照与校验**：按§6.7核对当前身份、epoch、前态、计划/输入/证据摘要、依赖、取消与预算；幂等命令返回原回执，迟到或伪造结果拒绝。异步结果不以出生时revision是否等于当前值判断有效性。
-3. **计算转移**：状态转移器按§6.5规则计算Goal、节点、Run的变更和待执行动作，包括锁定计划、ready集、失败传播、等待、最终验收、停止及容量处理。它不调用模型、工具或Executor，不在此步先做外部副作用。
-4. **原子提交**：用当前revision做CAS，把业务变更、幂等回执、产物/评价引用、预算预留及占槽事实一起提交。业务接纳与停止/消耗结算使用§6.7分别定义的有效性条件；失效输出不得阻断可信收尾。冲突时重读并重新校验计算，不能拿旧决策直接覆盖；存储失败不派发。
-5. **提交后执行**：只派发已提交且仍有效的动作；受控Run仍须先CAS记录started才调用Executor。派发/取消竞争及崩溃窗口按§6.7–6.9处理，不能因为图上有一条动作边就盲重放。结果再作为事件进入下一次转移。
+1. **事件进入**：命令、提案、输出、检查结果、期限和停止确认进入同一协调器。执行结束不等于业务结果已接纳。
+2. **读快照与校验**：按§6.7核对身份、epoch、前态、确切摘要、依赖、意图与预算；已接纳命令返回原回执。异步结果不以出生时revision是否等于当前值判断有效性。
+3. **计算转移**：按§6.5计算Goal、节点、Run变化及动作，包括就绪集、失败传播、等待、验收和停止。此步骤不执行外部副作用。
+4. **原子提交**：以当前revision做条件更新；必须恰好更新一个目标，否则回滚并重读、重算。状态、幂等回执、产物/评价引用、预算和占槽变更在同一SQLite IMMEDIATE事务提交；跨Goal物理容量按同事务的共享run_leases核算。文件所有权锁保证单写宿主，不能替代revision校验。业务接纳与可信停止/消耗结算使用§6.7各自的有效性条件，失效输出不得阻断收尾。blob可预写，原子提交的是引用而非文件与SQLite的跨资源事务。
+5. **提交后执行**：按§6.1.2动作类型处理；存储失败不派发。启动前仍须CAS记录started并复核意图/期限/预留；崩溃后不盲重放。结果再进入协调器。
 
-图中反馈边表示Runtime处理事件的闭环，**不是业务DAG回边或锁定后重规划**。具体状态与合法事件见§6.5，事务/并发见§6.7，恢复见§6.9；模型Review只在声明检查点，不参与每次确定性转移。
+图中反馈边是事件处理闭环，不是业务DAG回边或锁定后重规划。模型Review仅发生在声明检查点，不参与每次确定性状态转移。具体状态见§6.5，事务/并发见§6.7，恢复见§6.9。
 
-主路径：受理并固化Spec/Profile→受控规划→结构与计划评价事件→事务锁定→原子预留与派发→接纳公共输出→必需Goal评价→事务提交终态。失败路径同样经过状态转移器：非法提案仅在上限内修正；输入/Worker/Gate失败传播；质量fail为not_met；检查error为failed/check_unavailable；取消和资源边界先停止再收束；未知停止单列并占容量。Trace失败只降级观测，不更改业务结论。
+#### 6.1.2 动作分派与执行通道
+
+已提交动作按性质分开，不能把启动、内建检查、停止画成同一条模型执行链：
+
+```mermaid
+flowchart TD
+ A[已提交且仍有效的动作] --> K{动作类型}
+ K -->|启动受控Run| R[Planner / 业务成员 / 检查Worker]
+ R --> D[SharedDispatcher：唯一启动入口]
+ D --> M[Managed Run：输入 / 工具 / 预算 / 身份]
+ M --> E[绑定的Executor]
+ E --> ME[MilkieExecutor]
+ ME --> MI[Milkie sidecar]
+ MI --> H[该Run的Agent Harness会话]
+ E --> OE[其他已注册且满足契约的Executor]
+ H --> C[执行结束与候选输出]
+ OE --> C
+ C --> V[内建结果Schema / 身份校验]
+ K -->|内建检查或汇合| B[Runtime有界确定性检查 / object-by-worker]
+ K -->|停止已有Run| S[按run_id定位原Executor绑定]
+ S --> ST[取消Token / stop_or_confirm]
+ ST --> SF[停止确认或停止未知事实]
+ V --> EV[结果事件进入§6.1.1协调器]
+ B --> EV
+ SF --> EV
+ M -.运行观测.-> T[(现有Trace与治理)]
+ MI -.Harness观测.-> T
+```
+
+- **启动**：Planner、业务成员和需要模型/自定义逻辑的检查Worker分别拥有独立Run；复用管线不等于复用同一agent会话。Planner按Profile入口，成员按NodeContract中的EntryContract，检查Worker按已注册checker入口构造Invocation。它们均受同一SharedDispatcher、预算和停止约束。
+- **内建检查/汇合**：包括计划结构、Schema、身份、一致性及内建object-by-worker；是有界确定性代码，不经过Harness。图示表达计算与结果回传的责任，纯校验可作为事件接纳的一部分，不要求每次额外创建Run或持久化检查命令。需要自定义逻辑时转为显式受控能力/检查Run，不能挂任意Rust回调，见§6.6。
+- **停止**：针对原Run身份和原执行器绑定发出，不新建Planner/Worker Run、不申请新Worker槽位。停止未知保留原槽位；未启动预留的释放/挂起按意图矩阵办理。实际停止可经Milkie的原会话协议实现，不经过候选Schema/质量Gate来决定是否停止。
+
+“声明检查”是Profile/计划中的要求，不是执行组件。执行时按冻结要求选择内建检查或检查Worker；结构校验通过不代表质量达标。图中的其他Executor保留现有扩展契约，不表示首版额外实现新的Harness适配器。
+
+#### 6.1.3 节点、Worker与执行循环
+
+一个业务节点通过NodeContract展开为一个或多个具名成员；每个成员引用某个L4 Worker的EntryContract，最多创建一次Run。**Worker是执行组件，成员是调用规格，Run是这次执行事实，不能互换。**
+
+```mermaid
+flowchart TD
+ P[锁定的DAG计划] --> N[依赖满足的节点与NodeContract]
+ N --> I[按冻结绑定准备各成员输入]
+ I --> A[成员A：EntryContract → 独立Run A]
+ I --> B[成员B：EntryContract → 独立Run B]
+ A --> R[共享准入与受控执行通道：§6.1.2]
+ B --> R
+ R --> C[按run_id归属返回各成员候选]
+ C --> V[各成员Schema / 内建Entry Gate]
+ V --> J{全部必需成员已成功接纳}
+ J -->|尚未齐员| W[保留已接纳成员结果，等待其他成员]
+ J -->|全部成功| G[内建确定性汇合 → 节点Schema / Gate]
+ G --> O[协调器提交一次节点公共输出]
+ O --> D[重新计算后继就绪集]
+ V -->|成员失败| F[不形成公共成功输出，停止其余成员并收束]
+ G -->|契约错误| F
+```
+
+单成员节点省去多成员收集，但仍走相同接纳规则。各成员按可用槽位分别准入，图中分叉不表示必须同时取得全部槽位。候选、成员接纳与公共接纳是不同事实；候选不能提前成为下游输入，停止/失败竞争按§6.5–6.7处理。
+
+Worker的执行流程（routine）分成两个边界，本版不另设Routine对象或第二套状态机：
+
+| 流程范围 | 由谁执行 | 方法及状态来源 |
+|---|---|---|
+| 多个节点/成员的顺序、并行、等待、汇合 | TaskLoop Runtime | 锁定DAG、NodeContract和已提交状态；不是Planner在自己的会话里递归派发Worker |
+| 单个Run内的agent执行循环 | 该Run绑定的Agent Harness，经Executor/Milkie适配 | EntryContract.instruction、锁定Skill及输入约束指导方法；Harness执行模型/工具交互，TaskLoop ToolBridge执行授权和预算检查 |
+
+Skill是提供方法与资源的包，不是TaskLoop可逐步恢复的状态机；不承诺Harness内部每个思考步骤都有TaskLoop业务revision。Harness观测经现有Trace关联到Run，业务推进仍只依据接纳事实。如某个内部阶段必须有独立依赖、产物验收、等待或恢复边界，应在锁定前建模为显式DAG节点，不能隐藏在Skill里后宣称具备这些保障。首版不新增Worker内部的持久化子流程引擎，也不允许Worker借routine修改已锁定图或扩大权限。
+
+主路径：受理并固化Spec/Profile→独立Planner Run→结构与计划评价事件→协调器锁定→节点成员分别准入执行→成员接纳及节点汇合→必需Goal评价→协调器提交终态。失败路径仍回到同一协调器：非法提案仅在上限内修正；输入/成员/Gate失败传播；质量fail为not_met；检查error为failed/check_unavailable；取消和资源边界先停止再收束；未知停止单列并占容量。Trace失败只降级观测，不更改业务结论。
 
 ### 6.2 固定对象与归属
 
@@ -592,12 +679,12 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 | S2.A2 | 重复JSON键、未知字段、超容量、环/自环、未知端口、孤立节点、非法selector、Schema不匹配、权限及验收缺失 | Unit/Integration：分类/path/expected/actual及业务派发计数0 |
 | S2.A3 | 初次错→修正合法；needs_input联合结果/补充后耗尽；3次均错；时间/工具/Run先耗尽；plan check fail与error不同 | Integration：每次提案/检查及全预算，不通过换Run重置上限 |
 | S3.A1 | 三图形；不同延迟完成序列；实际最大并发不超过配置 | Integration/E2E：带身份的开始/结束与持久化槽位，不能仅看输出顺序 |
-| S3.A2 | 多成员乱序返回仍确定性汇合；一员失败不公共接纳；汇合非法Schema/panic/停止未知 | Integration：成员产物/候选、汇合摘要和节点结果 |
+| S3.A2 | 多成员乱序返回仍确定性汇合；同Executor绑定的成员具备不同Run/工作目录及精确输入、Skill/工具约束；一员失败不公共接纳；汇合非法Schema/panic/停止未知 | Integration：成员产物/候选、汇合摘要和节点结果 |
 | S3.A3 | 一支input等待，另一支推进；等待到期与signal并发及离线跨期限；上游失败后相关后继dependency_failed，无永久pending | Integration：公开ready/waiting/依赖状态和容量 |
 | S4.A1/A2 | pass/fail/error组合、缺必需receipt、跨Goal证据、旧规则/旧摘要/错producer_run拒绝 | Integration：CheckRequest/EvaluationReceipt和最终状态 |
 | S4.A2/A3 | checkpoint keys/targets/checker精确覆盖；before_outputs保护D漏依赖拒绝、A→B后联合检查A/B无反插环；checkpoint fail停并行分支后收束；评价Worker成功但verdict fail；初稿pass不能接纳最终稿；取消与结果同刻竞争 | Integration/E2E：worker outcome、quality verdict、revision各自证据 |
 | S5.A1 | 同键同参、同键异参；崩溃后的同键run必须先恢复对账；响应丢失后重试；完成事件重复/迟到/乱序 | Integration：命令回执唯一性、Run/接纳计数不增加 |
-| S5.A2 | 在§6.9每个崩溃窗口注入；取消递增epoch后旧Run停止/消耗仍可结算；wall/transition耗尽仍可收尾；stop确认/未知/旧绑定缺失；数据库写失败 | Integration：停止/epoch/持久化对照，不仅内存断言 |
+| S5.A2 | 内建检查不启动Harness，停止请求定位原Run且不新增Run；在§6.9每个崩溃窗口注入；取消递增epoch后旧Run停止/消耗仍可结算；wall/transition耗尽仍可收尾；stop确认/未知/旧绑定缺失；数据库写失败 | Integration：停止/epoch/持久化对照，不仅内存断言 |
 | S5.A3 | Flow与Goal同时争唯一宿主槽位及v1 active原子迁移，旧构造函数不得绕账本；两Run同时争最后工具调用/时间/候选额度；业务状态边/失败传播cleanup的transition精确计数；准备与规则check也消耗；未知停止不归还reserved | Integration：used/reserved/available不变量及拒绝原因 |
 | S5.A3 | 两Goal同能力不同输入；owner越权；一个Goal未知停止占槽时另一排队Goal仍按自身墙钟到期收束，不伪成功 | Integration：隔离产物和授权；全局容量确实受占用 |
 | S6.A1/A2 | Inquiry真实Agent规划执行、产物/引用和未达标；公开接口读取，不读内部表 | E2E：应用侧运行、最终产物/评价、来源定位；最终文章质量另属Inquiry #7 |
