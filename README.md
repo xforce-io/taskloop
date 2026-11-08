@@ -71,3 +71,5 @@ Milkie 依赖固定于上游 #277/#278 的契约与提交，基础兼容候选�
 [详细契约 #8](docs/design/8-trace-policy-data-governance.md)；观测库升级为 v3，业务库版本保持不变。
 
 中央到期后，独立后台通过 Executor 调用 Milkie 的公开 `observation.purge`。`source_cleanup` 单列 scheduled/pending/deferred/unsupported/failed/purged/not_applicable 等状态；未确认清理记录不因容量而淘汰。绑定变化或旧记录缺绑定时明确不可确认，不猜测已清理。中央观测接纳失败会关闭本次源采集，业务继续；普通未托管入口保留原 observer 行为。源清理不删除认证、原生功能会话、业务执行或工具记录。
+
+Trace 的业务结果和观测收尾分别发布。MilkieObserver 的失败/超时回调可按原事件 ID 重试，观察者须按 ID 幂等；宿主业务工具不会因观测重试而重放。最终 adapter.summary 给出交付确认序号、源最新序号和分项原因，早期业务 usage 中的 pending 不代表最终完整性。见 [尾部恢复契约](docs/design/15-trace-tail-recovery-diagnostics.md)。

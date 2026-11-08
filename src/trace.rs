@@ -600,7 +600,31 @@ impl MilkieObserver for RunTrace {
         // Adapter status contains no arbitrary error/body data.
         let failed = s["adapter_delivery_failed"] == true;
         let data = if s["kind"] == "adapter.summary" {
-            json!({"kind":"adapter.summary","adapter_delivery_failed":failed})
+            let failures: Vec<_> = s["delivery_failures"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+                .filter(|v| {
+                    matches!(
+                        *v,
+                        "replay_timeout"
+                            | "replay_error"
+                            | "callback_timeout"
+                            | "callback_error"
+                            | "queue_overflow"
+                            | "protocol_invalid"
+                            | "source_incomplete"
+                            | "shutdown_unconfirmed"
+                            | "tail_timeout"
+                    )
+                })
+                .take(9)
+                .collect();
+            json!({"kind":"adapter.summary","adapter_delivery_failed":failed,
+                "delivery_failures":failures,"replay_attempts":s["replay_attempts"].as_u64(),
+                "source_last_sequence":s["source_last_sequence"].as_u64(),
+                "delivered_sequence":s["delivered_sequence"].as_u64()})
         } else if s["kind"] == "adapter.termination" {
             json!({"kind":"adapter.termination","agentStopConfirmed":s["agentStopConfirmed"].as_bool(),"adapterStopConfirmed":s["adapterStopConfirmed"].as_bool(),"pendingToolCalls":s["pendingToolCalls"].as_u64(),"adapter_delivery_failed":failed})
         } else {
