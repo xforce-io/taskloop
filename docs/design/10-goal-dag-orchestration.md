@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.6；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.6.1；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -370,15 +370,15 @@ CLI前台宿主只主动推进run/resume明确选择的Goal，不自动恢复同
 
 ### 6.9.1 每次持锁打开的必经恢复顺序
 
-任何写宿主（CLI run/resume，包括同键run重放，以及嵌入式构造函数）都必须先执行本顺序；readonly GoalClient不取得锁、不执行停止或业务恢复。
+任何写宿主（CLI run/resume，包括同键run重放，以及嵌入式构造函数）都必须先执行本顺序；readonly GoalClient不取得锁、不执行停止或业务恢复。**资源对账共享，但业务恢复按owner_kind和owner_id逐个分派，禁止对整库状态做一个if/else。**
 
 1. 取得Store所有权锁、检查版本和模式，在同一事务完成必要迁移与完整run_leases导入；在此之前禁止任何Executor启动或控制Socket服务。
-2. 对已有terminal_intent的目标只继续停止/失败传播/结算，不清除意图，不将其转stopped；即使传播分批中断也先恢复派发关闭状态。对started未结算Run先持久化stop_unknown、失效业务epoch（已失效不重复递增）和blocked/interrupted，保留槽位。
-3. 对可识别的原Executor绑定发起有界stop_or_confirm，处理结果按原Run身份结算；身份无法证明则保持stop_unknown/host_binding_changed，不换适配器确认。恢复动作不受业务预算、wall到期或Worker槽位阻挡，采用15秒有界收尾。不能在未保存未知事实/未发起可用原适配器对账时，仅返回旧创建回执退出9。
-4. 原目标存在未提交的节点checking时，即使Run都已settled也标blocked/interrupted，不重算该已开始汇合；否则没有started/未结算工作且无终结意图时，将reserved挂起并把此前running/waiting目标转stopped/host_interrupted，保留等待身份。对同库**全部**未终态目标检查时钟与期限：业务只推进所选Goal不豁免其他Goal的到期收束/清理。超期先建立失败意图再处理resume；等待与纯排队目标同样适用。
-恢复必须幂等：同一已知stop_unknown不反复递增epoch，已经stopped且无新增事实/过期事件的目标不重写状态或递增revision；时钟高水位的纯刷新不改业务revision。
-
-5. 最后开放Socket与业务命令。此时同键submit只返回原回执/当前快照，不隐式resume；若恢复得到blocked必须返回8并给pending原因，不能按普通非终态重放退出9。新Goal和显式resume只有通过各自准入后才派发。
+2. 遍历每个owner_kind=goal的未终态目标G，各项查询严格以G.goal_id过滤节点、成员、Run和意图。G已有terminal_intent时只继续G的停止/失败传播/结算，不清除意图、不将G转stopped。G有started未结算Run时，先持久化其stop_unknown、失效G的业务epoch（已失效不重复递增）及blocked/interrupted，保留这些Run的槽位。一个Goal的checking/终结意图不能应用到另一个Goal。
+3. 对每个Goal/Flow所属Run分别使用其原Executor绑定发起有界stop_or_confirm；结果按该Run原始归属结算。无法证明身份则保持其stop_unknown/host_binding_changed，不换适配器。该对账不受业务预算、Goal墙钟或Worker槽位阻挡，采用15秒有界收尾；同键run也不得跳过未知事实持久化和可用原绑定的停止对账后直接退出9。
+4. 再**逐个Goal G**分类：若G无terminal_intent但G自己的节点存在未提交checking，则仅将G blocked/interrupted，不重算该已开始汇合；若G无上述checking、无started/未结算Run且无终结意图，则只挂起G的reserved，释放其物理槽位/未用预留，并将此前running/waiting的G转stopped/host_interrupted、保留G的等待身份。此分支不扫描或挂起其他Goal/Flow的reserved。对同库每个未终态Goal分别检查时钟和期限；到期先设置该Goal的失败意图再处理其resume，纯等待/排队亦适用。
+5. owner_kind=flow的记录交由Flow适配器依原definition/visit/epoch/limits处理：从未启动的active/reserved保留首次启动资格，仍须经同一run_leases/legacy lane准入；不能写成Goal的suspended/stopped，也不要求不存在的Goals::resume。Flow已启动未结束仍按原停止未知/不重放协议处理，不受其他Goal的checking/pause/terminal_intent影响；真正共享的全局槽位不足仍正常阻止派发。
+6. 恢复必须幂等：同一已知stop_unknown不反复递增epoch，已经stopped且无新增事实/过期事件的Goal不重写状态或递增revision；时钟高水位纯刷新不改业务revision。
+7. 最后开放Socket与业务命令。此时同键submit只返回原回执/当前快照，不隐式resume；若其Goal已恢复为blocked则返回8及pending原因，不能按普通非终态重放退出9。新Goal、显式Goal resume与Flow首次启动分别通过各自业务校验及统一物理准入后才派发。
 
 GoalRecord和GoalSnapshot的blockers以{reason,subject}集合保存独立阻塞原因；error仅为摘要，不能用清掉一个error掩盖其他阻塞。clock_untrusted是其中可解除的一项：保存发生前的阶段/暂停事实和last_observed_utc_ms，不重置deadline。用户修正系统时间后重新打开宿主，或宿主周期复核发现now_utc_ms≥该持久值且时钟映射可表示，移除仅这一blocker；若无其他blocker/terminal_intent/未知Run，转stopped/clock_restored并等待显式resume；若已到固定期限，直接走到期失败收束。存在interrupted/stop_unknown时只移除时钟阻塞，不恢复业务；仍不可信则维持blocked并提示修正时间。不会因解阻重跑已启动Run或延长预算。时钟仍不可信时拒绝新submit，保留只读查询及可信停止/消耗收尾；时钟恢复不自动重新受理曾拒绝的创建请求。
 
