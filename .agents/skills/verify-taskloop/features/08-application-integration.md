@@ -15,3 +15,17 @@ Inquiry消费者须固定源码SHA，通过公开API集成并复用真实领域�
 原始证据至少包含：候选与依赖SHA、配置/规则摘要、目标和输入出处、Goal/Plan/Run公开视图、工具事实、原文与文章Artifact引用、逐条引用回溯、Evaluation与Receipt、预算和Trace完整性。Trace降级如实记录，不能补造agent/tool事件。
 
 真实服务未运行、只跑受控协议夹具或只验证离线Schema时，本节验收保持not_run/blocked；不得记skip或pass。真实集成命令在应用消费者可运行后登记，不提供当前不存在的命令。
+
+
+## 隔离消费者入口
+
+固定Inquiry领域库的消费者见 `tests/inquiry_consumer/README.md`，依赖SHA及Cargo.lock随源码冻结。按该文件显式准备真实Milkie/Grok环境，在仓库根执行：
+
+```sh
+cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- check /absolute/output/preflight
+cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- positive /absolute/output/positive
+cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- negative /absolute/output/negative
+cargo run --locked --offline --manifest-path tests/inquiry_consumer/Cargo.toml -- document /absolute/output/document
+```
+
+check只验证注册，不计S6通过。positive需核对article.md、citation-backtrace.json、原文/快照及公开Evaluation；negative需核对not_met与保留的文章/缺口；document需证明替换Profile后真实执行同一核心。保留失败目录和真实Trace降级，不在失败后修改规则或配额来改判原任务。
