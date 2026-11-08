@@ -19,7 +19,7 @@ pub(crate) fn read(root: &Path, execution: &str, query: &TraceQuery) -> Result<T
             r.get(0)
         })
         .optional()?;
-    if version != 3 || summary != Some(2) {
+    if version != 3 || !matches!(summary, Some(2 | 3)) {
         return Err(Error::new(
             "storage_incompatible",
             "/trace",

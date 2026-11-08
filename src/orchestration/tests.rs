@@ -406,7 +406,8 @@ fn malformed_cyclic_or_unauthorized_plans_are_rejected_with_paths() {
     registry.validate_and_freeze(&bindings).unwrap();
     let plan = example_plan(&registry);
     let context = context(&registry);
-    let cases: [(fn(&mut Value), PlanIssueCategory); 10] = [
+    type PlanMutation = (fn(&mut Value), PlanIssueCategory);
+    let cases: [PlanMutation; 10] = [
         (
             |p| p["nodes"]["review"]["depends_on"] = json!(["review"]),
             PlanIssueCategory::Cycle,

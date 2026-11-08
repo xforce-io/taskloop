@@ -4,7 +4,7 @@ use super::*;
 // The same statements are used for one-time backfill and atomic INSERT triggers.
 const SOURCE: &str = "INSERT INTO trace_summary_sources(execution_id,run_id,source_id,last_sequence,observed,terminal,activity_sequence,activity_timestamp)
 VALUES(json_extract(?1,'$.execution_id'),json_extract(?1,'$.run_id'),json_extract(?1,'$.source_id'),json_extract(?1,'$.source_sequence'),1,
- json_extract(?1,'$.kind') IN ('phase.finished','execution.finished'),
+ (json_extract(?1,'$.kind') IN ('phase.finished','execution.finished') OR (json_extract(?1,'$.kind')='goal.coordinator_closed' AND json_extract(?1,'$.state_id')='_tl.goal' AND json_extract(?1,'$.data.scope')='goal')),
  CASE WHEN json_extract(?1,'$.kind') IN ('agent.activity','model.requested','model.responded') THEN json_extract(?1,'$.source_sequence') END,
  CASE WHEN json_extract(?1,'$.kind') IN ('agent.activity','model.requested','model.responded') THEN ?1 -> '$.timestamp_ms' END)
 ON CONFLICT(execution_id,run_id,source_id) DO UPDATE SET
@@ -41,7 +41,7 @@ impl TraceStore {
                 r.get(0)
             })
             .optional()?;
-        if version.is_some_and(|v| v > 2) {
+        if version.is_some_and(|v| v > 3) {
             return Err(Error::new(
                 "storage_incompatible",
                 "/trace",
@@ -49,7 +49,7 @@ impl TraceStore {
             ));
         }
         let present: i64=conn.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('trace_summary_sources','trace_summary_spans','trace_summary_runs','trace_summary_insert','trace_summary_delete')",[],|r|r.get(0))?;
-        if version == Some(2) && present == 5 {
+        if version == Some(3) && present == 5 {
             return Ok(());
         }
         conn.execute_batch("BEGIN IMMEDIATE;
@@ -75,7 +75,7 @@ impl TraceStore {
                 DELETE FROM trace_summary_spans WHERE execution_id=OLD.execution_id AND run_id=OLD.run_id;
                 DELETE FROM trace_summary_runs WHERE execution_id=OLD.execution_id AND run_id=OLD.run_id;
               END;
-              DELETE FROM trace_summary_meta; INSERT INTO trace_summary_meta VALUES(2);",SOURCE.replace("?1","NEW.body"),SPAN.replace("?1","NEW.body"),RUN.replace("?1","NEW.body")))?;
+              DELETE FROM trace_summary_meta; INSERT INTO trace_summary_meta VALUES(3);",SOURCE.replace("?1","NEW.body"),SPAN.replace("?1","NEW.body"),RUN.replace("?1","NEW.body")))?;
             Ok(())
         })();
         match rebuilt {

@@ -281,6 +281,11 @@ impl Runtime {
                 "registry was frozen with different HostBindings",
             ));
         }
+        for entry in frozen.entries.values() {
+            entry
+                .budget
+                .validate(options.max_tool_calls_per_run, options.max_candidate_bytes)?;
+        }
         let (trace_options, trace_policy) = match trace {
             Some(t) => (Some(t.options), Some(t.policy)),
             None => (None, None),
@@ -918,6 +923,9 @@ impl Runtime {
                         "content collectors have not finished",
                     )
                 })??;
+            if let Some(core) = &self.goals {
+                core.close_observation_streams();
+            }
             let _ = trace.finish_observation();
         }
         Ok(())
@@ -1321,45 +1329,43 @@ async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestra
                 }
             }
         }
-        if let Some(core) = &goals {
-            if let Ok(rows) = inner.store.goal_all_active() {
-                for row in rows {
-                    let _ = core.maintain(&row.id);
-                    for (run_id, run) in &row.record.runs {
-                        if live.contains(&format!("goal:{run_id}")) {
-                            continue;
-                        }
-                        if run.view.phase == crate::GoalRunPhase::ExecutionReturned {
-                            let _ = core.consume_return(&row.id, run_id);
-                        }
-                        if run.view.started && !run.view.native_stop_confirmed {
-                            let key = format!("goal-recovery:{run_id}");
-                            if live.insert(key.clone()) {
-                                let core = core.clone();
-                                let id = row.id.clone();
-                                let run_id = run_id.clone();
-                                work.spawn(async move {
-                                    let result = AssertUnwindSafe(core.probe_stop(id, run_id))
-                                        .catch_unwind()
-                                        .await
-                                        .unwrap_or_else(|_| {
-                                            Err(Error::io("Goal stop probe panicked"))
-                                        });
-                                    (key, result)
-                                });
-                            }
+        if let Some(core) = &goals
+            && let Ok(rows) = inner.store.goal_all_active()
+        {
+            for row in rows {
+                let _ = core.maintain(&row.id);
+                for (run_id, run) in &row.record.runs {
+                    if live.contains(&format!("goal:{run_id}")) {
+                        continue;
+                    }
+                    if run.view.phase == crate::GoalRunPhase::ExecutionReturned {
+                        let _ = core.consume_return(&row.id, run_id);
+                    }
+                    if run.view.started && !run.view.native_stop_confirmed {
+                        let key = format!("goal-recovery:{run_id}");
+                        if live.insert(key.clone()) {
+                            let core = core.clone();
+                            let id = row.id.clone();
+                            let run_id = run_id.clone();
+                            work.spawn(async move {
+                                let result = AssertUnwindSafe(core.probe_stop(id, run_id))
+                                    .catch_unwind()
+                                    .await
+                                    .unwrap_or_else(|_| Err(Error::io("Goal stop probe panicked")));
+                                (key, result)
+                            });
                         }
                     }
-                    if let Ok(current) = inner.store.goal_load(&row.id) {
-                        for (node, state) in &current.record.nodes {
-                            if state.view.status == crate::GoalNodeStatus::Checking {
-                                let _ = core.finish_node_check(&row.id, node);
-                            }
-                        }
-                    }
-                    let _ = core.advance(&row.id);
-                    owners.push((row.queue_order, row.id, true));
                 }
+                if let Ok(current) = inner.store.goal_load(&row.id) {
+                    for (node, state) in &current.record.nodes {
+                        if state.view.status == crate::GoalNodeStatus::Checking {
+                            let _ = core.finish_node_check(&row.id, node);
+                        }
+                    }
+                }
+                let _ = core.advance(&row.id);
+                owners.push((row.queue_order, row.id, true));
             }
         }
         owners.sort();
@@ -1454,16 +1460,16 @@ async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestra
     }
     // shutdown keeps owning the dispatcher until all native futures return or report unknown.
     while work.join_next().await.is_some() {}
-    if let Some(core) = goals {
-        if let Ok(rows) = inner.store.goal_all_active() {
-            for row in rows {
-                for (run, state) in &row.record.runs {
-                    if state.view.phase == crate::GoalRunPhase::ExecutionReturned {
-                        let _ = core.consume_return(&row.id, run);
-                    }
+    if let Some(core) = goals
+        && let Ok(rows) = inner.store.goal_all_active()
+    {
+        for row in rows {
+            for (run, state) in &row.record.runs {
+                if state.view.phase == crate::GoalRunPhase::ExecutionReturned {
+                    let _ = core.consume_return(&row.id, run);
                 }
-                let _ = core.maintain(&row.id);
             }
+            let _ = core.maintain(&row.id);
         }
     }
 }

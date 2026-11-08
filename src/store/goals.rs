@@ -19,7 +19,7 @@ pub(crate) struct GoalRow {
     pub record: GoalRecord,
 }
 pub(crate) enum GoalCommit {
-    Saved(GoalRow),
+    Saved(Box<GoalRow>),
     Replayed(Value),
 }
 pub(crate) enum GoalWriteGuard<'a> {
@@ -492,13 +492,13 @@ impl Store {
             }
         }
         tx.commit()?;
-        Ok(GoalCommit::Saved(GoalRow {
+        Ok(GoalCommit::Saved(Box::new(GoalRow {
             id: row.id.clone(),
             owner: row.owner.clone(),
             revision: next_revision,
             queue_order: row.queue_order,
             record: next,
-        }))
+        })))
     }
 }
 fn goal_command(
@@ -1007,6 +1007,215 @@ impl Store {
     }
 }
 
+/// High-frequency admission changes only monotonic counters and the corresponding remaining
+/// tool/byte reservations. Merge these deltas under the state transaction instead of invalidating
+/// the public business revision for every call. Other budget facts remain protected by Goal CAS.
+fn merge_admission_counters(
+    before: &GoalBudget,
+    after: &mut GoalBudget,
+    current: &GoalBudget,
+) -> Result<()> {
+    fn delta(old: u64, current: u64) -> Result<u64> {
+        current
+            .checked_sub(old)
+            .ok_or_else(|| Error::io("admission counter moved backwards"))
+    }
+    fn add(value: &mut u64, amount: u64) -> Result<()> {
+        *value = value
+            .checked_add(amount)
+            .ok_or_else(|| Error::io("admission counter overflow"))?;
+        Ok(())
+    }
+    add(
+        &mut after.used.tool_calls,
+        delta(before.used.tool_calls, current.used.tool_calls)?,
+    )?;
+    add(
+        &mut after.used.candidate_bytes,
+        delta(before.used.candidate_bytes, current.used.candidate_bytes)?,
+    )?;
+    add(
+        &mut after.rejected_calls,
+        delta(before.rejected_calls, current.rejected_calls)?,
+    )?;
+    add(
+        &mut after.rejected_bytes,
+        delta(before.rejected_bytes, current.rejected_bytes)?,
+    )?;
+    for (id, old) in &before.reserved {
+        let Some(now) = current.reserved.get(id) else {
+            return Err(Error::io(
+                "reservation changed without a Goal state revision",
+            ));
+        };
+        if let Some(next) = after.reserved.get_mut(id) {
+            next.remaining.tool_calls = next
+                .remaining
+                .tool_calls
+                .saturating_sub(delta(now.remaining.tool_calls, old.remaining.tool_calls)?);
+            next.remaining.candidate_bytes = next.remaining.candidate_bytes.saturating_sub(delta(
+                now.remaining.candidate_bytes,
+                old.remaining.candidate_bytes,
+            )?);
+        }
+    }
+    for (id, old) in &before.meters {
+        let Some(now) = current.meters.get(id) else {
+            return Err(Error::io("original Run meter disappeared"));
+        };
+        let Some(next) = after.meters.get_mut(id) else {
+            return Err(Error::io("Run meter cannot be deleted"));
+        };
+        add(&mut next.tool_calls, delta(old.tool_calls, now.tool_calls)?)?;
+        add(
+            &mut next.candidate_bytes,
+            delta(old.candidate_bytes, now.candidate_bytes)?,
+        )?;
+        add(
+            &mut next.calls_rejected,
+            delta(old.calls_rejected, now.calls_rejected)?,
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_goal_artifact(conn: &Connection, artifact: &GoalArtifact) -> Result<()> {
+    conn.execute(
+        "INSERT INTO goal_artifacts VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![
+            artifact.artifact.id,
+            artifact.goal_id,
+            artifact.node_id,
+            artifact.member_id,
+            artifact.plan_digest,
+            artifact.schema_digest,
+            artifact.artifact.sha256,
+            serde_json::to_string(artifact)?,
+            artifact.accepted,
+            artifact.producer_run_id
+        ],
+    )?;
+    Ok(())
+}
+impl Store {
+    pub(crate) fn goal_save_tool_receipt(
+        &self,
+        goal_id: &str,
+        receipt: &ArtifactReceipt,
+        epoch: u64,
+        binding: &str,
+    ) -> Result<String> {
+        let bytes = serde_json::to_vec(receipt)?;
+        let sha = self.write_blob(&bytes)?;
+        let mut conn = self.connection()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let path = format!("$.runs.{}", serde_json::to_string(&receipt.run_id)?);
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT json_extract(body,?2) FROM goals WHERE id=?1",
+                params![goal_id, path],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let run: crate::orchestration::GoalRunRecord =
+            serde_json::from_str(&raw.ok_or_else(not_found)?).map_err(Error::io)?;
+        if receipt.execution_id != goal_id
+            || !run.view.started
+            || run.view.epoch != epoch
+            || run.executor_binding != binding
+        {
+            return Err(Error::new(
+                "stale_attempt",
+                "/run",
+                "untrusted tool receipt producer",
+            ));
+        }
+        tx.execute(
+            "INSERT INTO goal_tool_receipts VALUES(?1,?2,?3,?4)",
+            params![receipt.id, goal_id, receipt.run_id, sha],
+        )?;
+        tx.commit()?;
+        Ok(receipt.id.clone())
+    }
+    pub(crate) fn goal_tool_receipt_shas(&self, goal: &str, run: &str) -> Result<Vec<String>> {
+        let c = self.connection()?;
+        let mut statement = c.prepare(
+            "SELECT sha256 FROM goal_tool_receipts WHERE goal_id=?1 AND run_id=?2 ORDER BY rowid",
+        )?;
+        Ok(statement
+            .query_map(params![goal, run], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+    pub(crate) fn goal_artifacts(&self, id: &str, owner: &str) -> Result<Vec<GoalArtifact>> {
+        let c = self.connection()?;
+        let mut st=c.prepare("SELECT a.metadata FROM goal_artifacts a JOIN goals g ON g.id=a.goal_id WHERE a.goal_id=?1 AND g.owner=?2 ORDER BY a.rowid")?;
+        let records = st
+            .query_map(params![id, owner], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        records
+            .into_iter()
+            .map(|r| serde_json::from_str(&r).map_err(Error::io))
+            .collect()
+    }
+    pub(crate) fn goal_run_candidates(
+        &self,
+        id: &str,
+        run: &str,
+    ) -> Result<BTreeMap<String, GoalArtifact>> {
+        let c = self.connection()?;
+        let mut st=c.prepare("SELECT metadata FROM goal_artifacts WHERE goal_id=?1 AND producer_run_id=?2 AND accepted=0 ORDER BY rowid")?;
+        let records = st
+            .query_map(params![id, run], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut latest = BTreeMap::new();
+        for raw in records {
+            let artifact: GoalArtifact = serde_json::from_str(&raw).map_err(Error::io)?;
+            latest.insert(artifact.artifact.slot.clone(), artifact);
+        }
+        Ok(latest)
+    }
+    /// Diagnostic writes never accept output, modify the public revision, or grant import authority.
+    pub(crate) fn goal_save_candidate(
+        &self,
+        id: &str,
+        run_id: &str,
+        epoch: u64,
+        binding: &str,
+        artifact: &GoalArtifact,
+    ) -> Result<()> {
+        let mut c = self.connection()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if artifact.accepted
+            || artifact.goal_id != id
+            || artifact.producer_run_id.as_deref() != Some(run_id)
+        {
+            return Err(Error::io("candidate identity mismatch"));
+        }
+        let path = format!("$.runs.{}", serde_json::to_string(run_id)?);
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT json_extract(body,?2) FROM goals WHERE id=?1",
+                params![id, path],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let run: crate::orchestration::GoalRunRecord =
+            serde_json::from_str(&raw.ok_or_else(not_found)?).map_err(Error::io)?;
+        if run.view.epoch != epoch || run.executor_binding != binding || !run.view.started {
+            return Err(Error::new(
+                "stale_attempt",
+                "/run",
+                "original candidate producer is not trusted",
+            ));
+        }
+        insert_goal_artifact(&tx, artifact)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,7 +1326,7 @@ mod tests {
             )
             .unwrap()
         {
-            GoalCommit::Saved(row) => row,
+            GoalCommit::Saved(row) => *row,
             _ => panic!("unexpected replay"),
         }
     }
@@ -1452,214 +1661,5 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
-    }
-}
-
-/// High-frequency admission changes only monotonic counters and the corresponding remaining
-/// tool/byte reservations. Merge these deltas under the state transaction instead of invalidating
-/// the public business revision for every call. Other budget facts remain protected by Goal CAS.
-fn merge_admission_counters(
-    before: &GoalBudget,
-    after: &mut GoalBudget,
-    current: &GoalBudget,
-) -> Result<()> {
-    fn delta(old: u64, current: u64) -> Result<u64> {
-        current
-            .checked_sub(old)
-            .ok_or_else(|| Error::io("admission counter moved backwards"))
-    }
-    fn add(value: &mut u64, amount: u64) -> Result<()> {
-        *value = value
-            .checked_add(amount)
-            .ok_or_else(|| Error::io("admission counter overflow"))?;
-        Ok(())
-    }
-    add(
-        &mut after.used.tool_calls,
-        delta(before.used.tool_calls, current.used.tool_calls)?,
-    )?;
-    add(
-        &mut after.used.candidate_bytes,
-        delta(before.used.candidate_bytes, current.used.candidate_bytes)?,
-    )?;
-    add(
-        &mut after.rejected_calls,
-        delta(before.rejected_calls, current.rejected_calls)?,
-    )?;
-    add(
-        &mut after.rejected_bytes,
-        delta(before.rejected_bytes, current.rejected_bytes)?,
-    )?;
-    for (id, old) in &before.reserved {
-        let Some(now) = current.reserved.get(id) else {
-            return Err(Error::io(
-                "reservation changed without a Goal state revision",
-            ));
-        };
-        if let Some(next) = after.reserved.get_mut(id) {
-            next.remaining.tool_calls = next
-                .remaining
-                .tool_calls
-                .saturating_sub(delta(now.remaining.tool_calls, old.remaining.tool_calls)?);
-            next.remaining.candidate_bytes = next.remaining.candidate_bytes.saturating_sub(delta(
-                now.remaining.candidate_bytes,
-                old.remaining.candidate_bytes,
-            )?);
-        }
-    }
-    for (id, old) in &before.meters {
-        let Some(now) = current.meters.get(id) else {
-            return Err(Error::io("original Run meter disappeared"));
-        };
-        let Some(next) = after.meters.get_mut(id) else {
-            return Err(Error::io("Run meter cannot be deleted"));
-        };
-        add(&mut next.tool_calls, delta(old.tool_calls, now.tool_calls)?)?;
-        add(
-            &mut next.candidate_bytes,
-            delta(old.candidate_bytes, now.candidate_bytes)?,
-        )?;
-        add(
-            &mut next.calls_rejected,
-            delta(old.calls_rejected, now.calls_rejected)?,
-        )?;
-    }
-    Ok(())
-}
-
-fn insert_goal_artifact(conn: &Connection, artifact: &GoalArtifact) -> Result<()> {
-    conn.execute(
-        "INSERT INTO goal_artifacts VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-        params![
-            artifact.artifact.id,
-            artifact.goal_id,
-            artifact.node_id,
-            artifact.member_id,
-            artifact.plan_digest,
-            artifact.schema_digest,
-            artifact.artifact.sha256,
-            serde_json::to_string(artifact)?,
-            artifact.accepted,
-            artifact.producer_run_id
-        ],
-    )?;
-    Ok(())
-}
-impl Store {
-    pub(crate) fn goal_save_tool_receipt(
-        &self,
-        goal_id: &str,
-        receipt: &ArtifactReceipt,
-        epoch: u64,
-        binding: &str,
-    ) -> Result<String> {
-        let bytes = serde_json::to_vec(receipt)?;
-        let sha = self.write_blob(&bytes)?;
-        let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let path = format!("$.runs.{}", serde_json::to_string(&receipt.run_id)?);
-        let raw: Option<String> = tx
-            .query_row(
-                "SELECT json_extract(body,?2) FROM goals WHERE id=?1",
-                params![goal_id, path],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        let run: crate::orchestration::GoalRunRecord =
-            serde_json::from_str(&raw.ok_or_else(not_found)?).map_err(Error::io)?;
-        if receipt.execution_id != goal_id
-            || !run.view.started
-            || run.view.epoch != epoch
-            || run.executor_binding != binding
-        {
-            return Err(Error::new(
-                "stale_attempt",
-                "/run",
-                "untrusted tool receipt producer",
-            ));
-        }
-        tx.execute(
-            "INSERT INTO goal_tool_receipts VALUES(?1,?2,?3,?4)",
-            params![receipt.id, goal_id, receipt.run_id, sha],
-        )?;
-        tx.commit()?;
-        Ok(receipt.id.clone())
-    }
-    pub(crate) fn goal_tool_receipt_shas(&self, goal: &str, run: &str) -> Result<Vec<String>> {
-        let c = self.connection()?;
-        let mut statement = c.prepare(
-            "SELECT sha256 FROM goal_tool_receipts WHERE goal_id=?1 AND run_id=?2 ORDER BY rowid",
-        )?;
-        Ok(statement
-            .query_map(params![goal, run], |r| r.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-    pub(crate) fn goal_artifacts(&self, id: &str, owner: &str) -> Result<Vec<GoalArtifact>> {
-        let c = self.connection()?;
-        let mut st=c.prepare("SELECT a.metadata FROM goal_artifacts a JOIN goals g ON g.id=a.goal_id WHERE a.goal_id=?1 AND g.owner=?2 ORDER BY a.rowid")?;
-        let records = st
-            .query_map(params![id, owner], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        records
-            .into_iter()
-            .map(|r| serde_json::from_str(&r).map_err(Error::io))
-            .collect()
-    }
-    pub(crate) fn goal_run_candidates(
-        &self,
-        id: &str,
-        run: &str,
-    ) -> Result<BTreeMap<String, GoalArtifact>> {
-        let c = self.connection()?;
-        let mut st=c.prepare("SELECT metadata FROM goal_artifacts WHERE goal_id=?1 AND producer_run_id=?2 AND accepted=0 ORDER BY rowid")?;
-        let records = st
-            .query_map(params![id, run], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut latest = BTreeMap::new();
-        for raw in records {
-            let artifact: GoalArtifact = serde_json::from_str(&raw).map_err(Error::io)?;
-            latest.insert(artifact.artifact.slot.clone(), artifact);
-        }
-        Ok(latest)
-    }
-    /// Diagnostic writes never accept output, modify the public revision, or grant import authority.
-    pub(crate) fn goal_save_candidate(
-        &self,
-        id: &str,
-        run_id: &str,
-        epoch: u64,
-        binding: &str,
-        artifact: &GoalArtifact,
-    ) -> Result<()> {
-        let mut c = self.connection()?;
-        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if artifact.accepted
-            || artifact.goal_id != id
-            || artifact.producer_run_id.as_deref() != Some(run_id)
-        {
-            return Err(Error::io("candidate identity mismatch"));
-        }
-        let path = format!("$.runs.{}", serde_json::to_string(run_id)?);
-        let raw: Option<String> = tx
-            .query_row(
-                "SELECT json_extract(body,?2) FROM goals WHERE id=?1",
-                params![id, path],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        let run: crate::orchestration::GoalRunRecord =
-            serde_json::from_str(&raw.ok_or_else(not_found)?).map_err(Error::io)?;
-        if run.view.epoch != epoch || run.executor_binding != binding || !run.view.started {
-            return Err(Error::new(
-                "stale_attempt",
-                "/run",
-                "original candidate producer is not trusted",
-            ));
-        }
-        insert_goal_artifact(&tx, artifact)?;
-        tx.commit()?;
-        Ok(())
     }
 }

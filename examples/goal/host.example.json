@@ -1,0 +1,102 @@
+{
+  "protocol_version": 1,
+  "factory": "document-review@1",
+  "store_dir": "/absolute/private/taskloop-store",
+  "resources_root": "/absolute/taskloop/docs/design/10-goal-dag-orchestration/contract/document-review-package",
+  "configuration_version": "document-review-host@1",
+  "milkie": {
+    "program": "/absolute/node",
+    "args": [
+      "/absolute/milkie/dist/cli/index.js"
+    ],
+    "connection_file": "/absolute/private/model-connection.json",
+    "data_dir": "/absolute/private/taskloop-milkie",
+    "config_dir": "/absolute/private/native-config",
+    "session_dir": "/absolute/private/native-sessions",
+    "env": {}
+  },
+  "entry_budgets": {
+    "planner@1": {
+      "policy_id": "document-review-v1",
+      "max_run_ms": 120000,
+      "max_check_ms": 1000,
+      "max_tool_calls": 8,
+      "submission_reserve": 2,
+      "finalize_before_ms": 1000,
+      "max_model_iterations": null,
+      "max_candidate_bytes": 262144
+    },
+    "review@1": {
+      "policy_id": "document-review-v1",
+      "max_run_ms": 120000,
+      "max_check_ms": 1000,
+      "max_tool_calls": 8,
+      "submission_reserve": 2,
+      "finalize_before_ms": 1000,
+      "max_model_iterations": null,
+      "max_candidate_bytes": 262144
+    },
+    "quality@1": {
+      "policy_id": "document-review-v1",
+      "max_run_ms": 120000,
+      "max_check_ms": 1000,
+      "max_tool_calls": 8,
+      "submission_reserve": 2,
+      "finalize_before_ms": 1000,
+      "max_model_iterations": null,
+      "max_candidate_bytes": 262144
+    }
+  },
+  "goal_grants": {
+    "local-review": {
+      "profile_refs": [
+        "document-review@1"
+      ],
+      "capabilities": [
+        "review@1"
+      ],
+      "tools": [
+        "artifact.write"
+      ],
+      "limits": {
+        "max_wall_ms": 600000,
+        "max_active_ms": 480000,
+        "max_runs": 12,
+        "max_transitions": 64,
+        "max_tool_calls": 200,
+        "max_total_candidate_bytes": 1048576,
+        "max_concurrent_runs": 2
+      }
+    }
+  },
+  "caller_grants": [
+    "local-review"
+  ],
+  "limits": {
+    "max_wall_ms": 600000,
+    "max_active_ms": 480000,
+    "max_runs": 12,
+    "max_transitions": 64,
+    "max_tool_calls": 200,
+    "max_total_candidate_bytes": 1048576,
+    "max_concurrent_runs": 2
+  },
+  "max_admitted_goals": 8,
+  "max_tool_calls_per_run": 16,
+  "max_candidate_bytes": 1048576,
+  "trace": {
+    "options": {
+      "max_events_per_run": 1000,
+      "max_bytes_per_run": 1048576,
+      "source_max_events": 1000,
+      "source_max_bytes": 1048576
+    },
+    "policy": {
+      "policy_id": "document-review-metadata@1",
+      "max_total_events": 100000,
+      "max_total_bytes": 67108864,
+      "max_runs": 1000,
+      "retention_ms": 86400000
+    }
+  }
+}

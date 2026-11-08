@@ -77,3 +77,13 @@
 - CliDriver及只派发所选Goal的启动模式已接入，SDK默认仍可服务多个Goal/Flow；尚未完成最终CLI二进制与配置工厂用户路径验证。Tokio增加net/signal，仅新增锁定依赖socket2 0.6.5，无旧包升级。
 - 编译内置文档审阅工厂按Rust定义注册入口/节点/Profile，读取明确命名Schema/Skill/规则；不加载package.json。通用CLI与SDK消费者将复用这一工厂。
 - 后续仍需：完整CLI/信号/恢复与锁释放验证，实际并行/评价节点/崩溃窗口、两个真实业务/Agent、功能地图、最终候选独立review及release。所有18项验收未降低、未提前勾选。
+
+
+## 实现检查点七（2026-11-08）
+
+- CLI二进制、可信HOST配置及编译内置document-review工厂已接通；真实CLI进程配合受控Milkie协议对端，覆盖成功/查询/导出/同键重放、not_met/检查错误/规划耗尽、在线取消，以及SIGINT/SIGTERM暂停后恢复。测试从公开NDJSON读取Goal身份，不查私有业务表。
+- 外部SDK测试验证同节点成员真实并发且按成员身份汇合、两个Goal共享容量及owner隔离、未知Run保留容量且另一排队Goal按自己的墙钟到期。上述对端与Executor均受控，不是真实Agent或Inquiry集成证据。
+- CLI首次测试暴露Planner在已有请求物化并运行后被重复创建的问题：准入现在覆盖所有尚未完成业务接纳的Planner调用，合法修正仍能在结果事务内创建下一请求；SDK延迟Planner回归覆盖这一窗口。
+- Planner执行视图包含生效限制和显式imports摘要；干净暂停关闭该宿主协调观测源，保留Goal根Span供resume，Trace可重建摘要升级v3，历史事件字节不改。
+- 最新完整常规套件192通过、5项环境用例ignored，日志`target/verify-taskloop/10-dev/latest-full-regression.log`；严格Clippy通过，日志`clippy-strict-retest.log`。离线契约校验通过资源摘要、引用、投影及8项语义反例，不能据此声明E2E完成。
+- L2 v0.10.12集中重复协议、明确状态提交生效点及无step路径，规则/Decision记法不要求新增规则引擎或持久化层；原18项验收逐字保持。待完成：评价节点/崩溃窗口完整验证、真实Inquiry与第二业务/Agent、功能地图、最终候选独立review及release。

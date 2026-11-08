@@ -21,7 +21,8 @@ pub(crate) mod readonly;
 pub use cleanup::SourceCleanup;
 pub(crate) use cleanup::cleanup_loop;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TraceOptions {
     pub max_events_per_run: u64,
     pub max_bytes_per_run: u64,
@@ -1090,7 +1091,7 @@ mod tests {
                 .query_row("SELECT version FROM trace_summary_meta", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
     }
 }

@@ -23,7 +23,7 @@ def send(m):
 def finish(status='succeeded',stopped=True):
  r.update(status=status,stopped=stopped,finishedAt=int(time.time()*1000));save()
 def call(call_id='host-call',request_id='tool:1',wrong=False):
- send({'id':request_id,'method':'tool.call','params':{'callId':call_id,'nativeCallId':'native-'+call_id,'name':r['tool'],'input':{'slot':'result','value':{'nonce':r['nonce']}},'runId':r['runId'],'contextId':'wrong' if wrong else r['contextId'],'traceparent':r.get('tooltrace',r.get('traceparent'))}})
+ send({'id':request_id,'method':'tool.call','params':{'callId':call_id,'nativeCallId':'native-'+call_id,'name':r['tool'],'input':r.get('goal_output',{'slot':'result','value':{'nonce':r['nonce']}}),'runId':r['runId'],'contextId':'wrong' if wrong else r['contextId'],'traceparent':r.get('tooltrace',r.get('traceparent'))}})
 for line in sys.stdin:
  m=json.loads(line);method=m.get('method');params=m.get('params',{})
  if not method:
@@ -51,6 +51,21 @@ for line in sys.stdin:
    tail_events=[{'version':1,'id':f"{r['runId']}:{n}",'sourceId':r['runId'],'sequence':n,'runId':r['runId'],'contextId':r['contextId'],'traceId':parent[3:35],'timestamp':int(time.time()*1000),'monotonicNs':str(n),'spanId':'1111111111111111','parentSpanId':parent[36:52],'kind':'execution.started' if n==1 else 'execution.finished' if n==total else 'agent.activity','data':{'runtime':'fixture'} if n==1 else {'status':'succeeded','stopped':True} if n==total else {'category':'message'}} for n in range(1,total+1)]
    for event in tail_events[:-1]:send({'method':'execution.observation','params':event})
   elif r.get('traceparent'):send({'method':'execution.observation','params':{'version':1,'id':str(uuid.uuid4()),'runId':r['runId'],'contextId':r['contextId'],'traceId':r['traceparent'][3:35],'kind':'agent.activity','data':{'category':'message'}}})
+  if mode.startswith('goal_'):
+   stage=payload['task_input']
+   if payload['state_id']=='_tl.planner':
+    phase='planner'
+    proposal={'protocol_version':1,'goal_spec_digest':stage['goal_spec_digest'],'profile_digest':stage['profile_digest'],'planning_mode':stage['planning_mode'],'nodes':{'review':{'capability_ref':'review@1','depends_on':['review'] if mode=='goal_bad_plan'else [],'inputs':{'question':{'kind':'goal','pointer':'/goal'},'document':{'kind':'goal','pointer':'/inputs/document_text'}}}},'outputs':{'report':{'node_id':'review','port':'report'}},'checks':{'quality':{'phase':'goal_final','checker_ref':'quality@1','targets':['report']}}}
+    r['goal_output']={'slot':'proposal','value':{'protocol_version':1,'kind':'proposal','proposal':proposal}}
+   elif payload['state_id'].startswith('_tl.check.'):
+    phase='final'
+    verdict='fail'if mode=='goal_not_met'else'error'if mode=='goal_check_error'else'pass'
+    r['goal_output']={'slot':'evaluation','value':{'protocol_version':1,'verdict':verdict,'results':[{'id':rule['id'],'verdict':verdict,'message':'Controlled protocol-fixture result','evidence_refs':stage['evidence_refs']}for rule in stage['rules']['rules']],'evidence_refs':stage['evidence_refs'],'violations':[]}}
+   else:
+    phase='work'
+    r['goal_output']={'slot':'report','value':{'summary':stage['document'][:3000],'findings':['Controlled protocol-fixture finding']}}
+   save()
+   if os.environ.get('MILKIE_FIXTURE_GOAL_HOLD_STAGE')==phase:time.sleep(1.5)
   if mode=='crash':os._exit(7)
   if mode=='harness_exit':finish('failed');continue
   if payload['flow_input'].get('hold') or mode=='stop_unknown':continue

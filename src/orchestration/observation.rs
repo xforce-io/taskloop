@@ -11,6 +11,18 @@ use serde_json::json;
 use std::sync::Arc;
 
 impl GoalCore {
+    pub(crate) fn close_observation_streams(&self) {
+        if let Ok(mut roots) = self.root_traces.lock() {
+            for (_, trace) in std::mem::take(&mut *roots) {
+                trace.emit(
+                    "goal.coordinator_closed",
+                    &trace.phase_span(),
+                    None,
+                    json!({}),
+                );
+            }
+        }
+    }
     fn root_trace(&self, id: &str) -> Option<Arc<crate::trace::RunTrace>> {
         let store = self.inner.trace.as_ref()?;
         let mut roots = self.root_traces.lock().ok()?;

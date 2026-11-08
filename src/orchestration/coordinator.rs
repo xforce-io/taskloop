@@ -84,6 +84,10 @@ impl GoalCore {
         let validation = self.validate_member_outputs(run);
         let mut next = row.record.clone();
         let mut effects = GoalCommitEffects::default();
+        next.runs
+            .get_mut(run_id)
+            .expect("original Run")
+            .business_disposed = true;
         let application = match validation {
             Err(error) => self.apply_execution_failure(
                 &mut next,
@@ -157,28 +161,27 @@ impl GoalCore {
         settle_run(&mut next, run_id, elapsed)?;
         if let GoalRunRole::NodeMember { node_id, .. } = &run.view.role
             && next.terminal_intent.is_none()
+            && let Err(error) = self.begin_node_check(&mut next, node_id, observed.utc_ms)
         {
-            if let Err(error) = self.begin_node_check(&mut next, node_id, observed.utc_ms) {
-                next.nodes
-                    .get_mut(node_id)
-                    .expect("original node")
-                    .view
-                    .status = GoalNodeStatus::Failed;
-                next.nodes
-                    .get_mut(node_id)
-                    .expect("original node")
-                    .view
-                    .error = Some(error.clone());
-                set_terminal(
-                    &mut next,
-                    GoalOutcome::Failed,
-                    &error.code,
-                    node_id,
-                    row.revision + 1,
-                    observed.utc_ms,
-                );
-                next.error = Some(error);
-            }
+            next.nodes
+                .get_mut(node_id)
+                .expect("original node")
+                .view
+                .status = GoalNodeStatus::Failed;
+            next.nodes
+                .get_mut(node_id)
+                .expect("original node")
+                .view
+                .error = Some(error.clone());
+            set_terminal(
+                &mut next,
+                GoalOutcome::Failed,
+                &error.code,
+                node_id,
+                row.revision + 1,
+                observed.utc_ms,
+            );
+            next.error = Some(error);
         }
         self.cleanup_terminal(&mut next)?;
         self.close_stopping(&mut next, observed.utc_ms)?;
@@ -266,6 +269,10 @@ impl GoalCore {
         now: u64,
     ) -> Result<()> {
         let role = next.runs[run_id].view.role.clone();
+        next.runs
+            .get_mut(run_id)
+            .expect("original Run")
+            .business_disposed = true;
         next.runs.get_mut(run_id).expect("original Run").view.error = Some(error.clone());
         if matches!(role, GoalRunRole::Planner { .. }) {
             let sha = next.runs[run_id]
@@ -336,7 +343,7 @@ impl GoalCore {
             }
         }
         next.stage = GoalStage::Planning;
-        if next.planning_attempts >= 1 + next.prepared.request.spec.planning.max_revisions {
+        if next.planning_attempts > next.prepared.request.spec.planning.max_revisions {
             set_terminal(
                 next,
                 GoalOutcome::Failed,

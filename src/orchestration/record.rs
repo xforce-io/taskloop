@@ -397,7 +397,10 @@ impl GoalRecord {
                 pending_runs: self
                     .runs
                     .iter()
-                    .filter(|(_, r)| r.view.phase != GoalRunPhase::Settled)
+                    .filter(|(_, r)| {
+                        r.view.started && r.view.phase != GoalRunPhase::Settled
+                            || !r.view.started && r.view.phase == GoalRunPhase::Reserved
+                    })
                     .map(|(id, _)| id.clone())
                     .collect(),
                 stop_unknown_runs: self

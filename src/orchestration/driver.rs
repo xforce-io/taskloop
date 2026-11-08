@@ -110,7 +110,12 @@ impl ManagedRunOwner for GoalOwner {
             attachment_policy_digest,
             accepted: false,
             producer_run_id: Some(self.run_id.clone()),
-            producer_kind: "entry_candidate".into(),
+            producer_kind: match self.context.role {
+                GoalRunRole::Planner { .. } => "planner_candidate",
+                GoalRunRole::NodeMember { .. } => "member_candidate",
+                GoalRunRole::PlanCheck { .. } | GoalRunRole::FinalCheck { .. } => "check_candidate",
+            }
+            .into(),
         };
         self.core.inner.store.goal_save_candidate(
             &self.context.goal_id,

@@ -228,7 +228,14 @@ impl GoalCore {
     }
     pub(crate) fn prepare_planner_request(&self, record: &mut GoalRecord) -> Result<()> {
         if record.requests.values().any(|r| {
-            matches!(r.role, GoalRunRole::Planner { .. }) && !r.cancelled && r.run_id.is_none()
+            matches!(r.role, GoalRunRole::Planner { .. })
+                && !r.cancelled
+                && r.run_id.as_ref().is_none_or(|id| {
+                    record
+                        .runs
+                        .get(id)
+                        .is_some_and(|run| !run.business_disposed)
+                })
         }) {
             return Ok(());
         }
@@ -264,7 +271,7 @@ impl GoalCore {
             .filter(|id| record.prepared.allowed_capabilities.contains(id))
             .map(|id| self.registry.capabilities[id].clone())
             .collect::<Vec<_>>();
-        let mut input = json!({"goal":spec.goal,"inputs":spec.inputs,"goal_spec_digest":record.prepared.spec_digest,"profile_digest":record.prepared.profile_digest,"planning_mode":spec.planning.mode,"capability_catalog":catalog,"profile":profile,"planning_feedback":{"attempt":attempt,"previous_candidate_sha":previous.map(|p|&p.candidate_sha),"errors":errors,"check_results":check_results}});
+        let mut input = json!({"goal":spec.goal,"inputs":spec.inputs,"goal_spec_digest":record.prepared.spec_digest,"profile_digest":record.prepared.profile_digest,"planning_mode":spec.planning.mode,"effective_limits":record.prepared.effective_limits,"imports":spec.imports,"capability_catalog":catalog,"profile":profile,"planning_feedback":{"attempt":attempt,"previous_candidate_sha":previous.map(|p|&p.candidate_sha),"errors":errors,"check_results":check_results}});
         if let Some(id) = &spec.planning.template_ref {
             input["template"] = serde_json::to_value(&self.registry.templates[id])?;
         }
@@ -284,7 +291,11 @@ impl GoalCore {
                 epoch: record.epoch,
                 input_sha: sha.clone(),
                 input_digest: sha,
-                input_artifact_ids: vec![],
+                input_artifact_ids: spec
+                    .imports
+                    .iter()
+                    .map(|import| import.artifact_id.clone())
+                    .collect(),
                 check_request_id: None,
                 run_id: None,
                 cancelled: false,
@@ -569,10 +580,10 @@ impl GoalCore {
         self.close_stopping(record, self.clock.observe()?.utc_ms)
     }
     pub(crate) fn close_stopping(&self, record: &mut GoalRecord, now: u64) -> Result<()> {
-        let unsettled = record
-            .runs
-            .values()
-            .any(|r| r.view.phase != GoalRunPhase::Settled);
+        let unsettled = record.runs.values().any(|r| {
+            r.view.started && r.view.phase != GoalRunPhase::Settled
+                || !r.view.started && r.view.phase == GoalRunPhase::Reserved
+        });
         let unknown = record
             .runs
             .values()
@@ -750,6 +761,382 @@ impl Goals {
             effective_limits: r.prepared.effective_limits,
             sources: r.prepared.limit_sources,
         })
+    }
+}
+
+impl GoalCore {
+    /// R01/R06. Pending requests have no Run or slot until this transaction wins.
+    pub(crate) fn materialize(&self, id: &str) -> Result<Option<String>> {
+        let _coordinator = self.coordinator.lock().map_err(Error::io)?;
+        let row = self.inner.store.goal_load(id)?;
+        let observed = self.inner.store.observe_goal_clock(&self.clock)?;
+        if !row
+            .record
+            .permissions(observed.utc_ms, observed.trusted)
+            .advance_allowed()
+        {
+            return Ok(None);
+        }
+        let existing = row
+            .record
+            .runs
+            .iter()
+            .filter(|(_, r)| !r.view.started && r.view.phase == GoalRunPhase::Suspended)
+            .min_by_key(|(_, r)| r.view.role.order_key())
+            .map(|(id, r)| (id.clone(), r.request_id.clone()));
+        let request = if let Some((_, request_id)) = &existing {
+            row.record.requests.get(request_id)
+        } else {
+            row.record
+                .requests
+                .values()
+                .filter(|r| !r.cancelled && r.run_id.is_none())
+                .min_by_key(|r| r.role.order_key())
+        };
+        let Some(request) = request.cloned() else {
+            return Ok(None);
+        };
+        let entry = &self.registry.entries[&request.entry_ref];
+        let run_id = existing
+            .as_ref()
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| format!("run-{}", uuid::Uuid::new_v4()));
+        let mut next = row.record.clone();
+        let protected = match &request.role {
+            GoalRunRole::FinalCheck { check_id } if existing.is_none() => Some(check_id.as_str()),
+            _ => None,
+        };
+        let amount = if let Some(check) = protected {
+            next.budget
+                .protected_final
+                .get(check)
+                .copied()
+                .ok_or_else(|| Error::io("final allocation lost"))?
+        } else {
+            let available = next
+                .budget
+                .permanent_available(&next.prepared.effective_limits);
+            let policy = GoalBudgetAmount::for_entry(&entry.budget)?;
+            GoalBudgetAmount {
+                active_ms: policy.active_ms.min(available.active_ms),
+                tool_calls: policy.tool_calls.min(available.tool_calls),
+                candidate_bytes: policy.candidate_bytes.min(available.candidate_bytes),
+            }
+        };
+        if amount.active_ms < 2 || amount.tool_calls == 0 || amount.candidate_bytes == 0 {
+            return self.fail_admission(&row, observed.utc_ms);
+        }
+        match next.budget.reserve(
+            &run_id,
+            amount,
+            protected,
+            existing.is_none(),
+            &next.prepared.effective_limits,
+        )? {
+            BudgetAdmission::Pending => return Ok(None),
+            BudgetAdmission::Exhausted => return self.fail_admission(&row, observed.utc_ms),
+            BudgetAdmission::Granted => {}
+        }
+        let check_ms = entry
+            .budget
+            .max_check_ms
+            .unwrap_or(0)
+            .min(amount.active_ms / 2);
+        let run_ms = entry
+            .budget
+            .max_run_ms
+            .unwrap_or(0)
+            .min(amount.active_ms - check_ms);
+        let check_ms = entry
+            .budget
+            .max_check_ms
+            .unwrap_or(0)
+            .min(amount.active_ms - run_ms);
+        if run_ms == 0 || check_ms == 0 {
+            return self.fail_admission(&row, observed.utc_ms);
+        }
+        let executor = &self.inner.bindings.executors[&entry.contract.executor];
+        let binding = digest(&bounded_json(
+            &json!({"configuration_version":self.inner.bindings.configuration_version,"executor":entry.contract.executor,"identity":executor.identity(),"limits":executor.budget_limits()}),
+            1_048_576,
+        )?);
+        if let Some(run) = next.runs.get_mut(&run_id) {
+            run.view.phase = GoalRunPhase::Reserved;
+            run.allocation = amount;
+            run.run_allocation_ms = run_ms;
+            run.check_allocation_ms = check_ms;
+        } else {
+            next.runs.insert(
+                run_id.clone(),
+                GoalRunRecord {
+                    view: GoalRunSnapshot {
+                        run_id: run_id.clone(),
+                        role: request.role.clone(),
+                        entry_ref: request.entry_ref.clone(),
+                        epoch: request.epoch,
+                        phase: GoalRunPhase::Reserved,
+                        started: false,
+                        native_stop_confirmed: false,
+                        stop_unknown: false,
+                        interrupted: false,
+                        budget: None,
+                        error: None,
+                    },
+                    request_id: request.request_id.clone(),
+                    input_sha: request.input_sha.clone(),
+                    executor: entry.contract.executor.clone(),
+                    executor_binding: binding,
+                    candidates: BTreeMap::new(),
+                    started_at_utc_ms: None,
+                    returned_at_utc_ms: None,
+                    usage_sha: None,
+                    business_disposed: false,
+                    settlement_sequence: 0,
+                    active_ms: 0,
+                    allocation: amount,
+                    run_allocation_ms: run_ms,
+                    check_allocation_ms: check_ms,
+                    tool_receipt_shas: vec![],
+                    execution_outcome: None,
+                },
+            );
+            if let GoalRunRole::Planner { attempt } = request.role {
+                next.planning_attempts = attempt;
+            }
+        }
+        next.requests
+            .get_mut(&request.request_id)
+            .expect("persisted request")
+            .run_id = Some(run_id.clone());
+        if let Some(check_id) = &request.check_request_id {
+            next.checks
+                .get_mut(check_id)
+                .ok_or_else(|| Error::io("Run request check missing"))?
+                .producer_run_id = Some(run_id.clone());
+        }
+        if let GoalRunRole::NodeMember { node_id, member_id } = &request.role {
+            let member = next
+                .nodes
+                .get_mut(node_id)
+                .and_then(|n| n.view.members.get_mut(member_id))
+                .ok_or_else(|| Error::io("Run request member missing"))?;
+            member.run_id = Some(run_id.clone());
+            member.status = GoalMemberStatus::Reserved;
+        }
+        match self.commit_goal(
+            &row,
+            &next,
+            GoalWriteGuard::Advance,
+            None,
+            &Default::default(),
+            &self.clock,
+        ) {
+            Ok(GoalCommit::Saved(_)) => Ok(Some(run_id)),
+            Ok(GoalCommit::Replayed(_)) => Err(Error::io("internal materialization replay")),
+            Err(e) if e.code == "dispatch_capacity" || e.code == "revision_conflict" => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    fn fail_admission(&self, row: &GoalRow, now: u64) -> Result<Option<String>> {
+        let mut next = row.record.clone();
+        set_terminal(
+            &mut next,
+            GoalOutcome::Failed,
+            "budget_exhausted",
+            "goal",
+            row.revision + 1,
+            now,
+        );
+        next.error = Some(Error::new(
+            "budget_exhausted",
+            "/budget",
+            "no positive bounded execution/check allocation remains",
+        ));
+        self.cleanup_terminal(&mut next)?;
+        self.commit_goal(
+            row,
+            &next,
+            GoalWriteGuard::Cleanup,
+            None,
+            &Default::default(),
+            &self.clock,
+        )?;
+        self.cancel_goal_handles(&next);
+        Ok(None)
+    }
+}
+
+impl GoalCore {
+    fn signal(
+        &self,
+        id: &str,
+        request: &GoalSignalRequest,
+        caller: &Caller,
+    ) -> Result<GoalCommandReceipt> {
+        self.open()?;
+        nonempty(&request.request_key, "/request_key")?;
+        let _coordinator = self.coordinator.lock().map_err(Error::io)?;
+        let row = self.authorized(id, caller)?;
+        let fp = digest(&bounded_json(request, 4_194_304)?);
+        if let Some(response) = self.inner.store.goal_command(
+            id,
+            &caller.principal,
+            "signal",
+            &request.request_key,
+            &fp,
+        )? {
+            return decode_command(response);
+        }
+        let observed = self.inner.store.observe_goal_clock(&self.clock)?;
+        let mut next = row.record.clone();
+        let mut effects = GoalCommitEffects::default();
+        let apply = (|| -> Result<()> {
+            if request.protocol_version != 1 {
+                return Err(Error::new(
+                    "input_invalid",
+                    "/protocol_version",
+                    "expected version 1",
+                ));
+            }
+            if row.revision != request.expected_revision {
+                return Err(Error::new(
+                    "revision_conflict",
+                    "/revision",
+                    "refresh the Goal before a new signal",
+                ));
+            }
+            let wait = next
+                .waiting
+                .get(&request.wait_id)
+                .ok_or_else(|| Error::new("signal_invalid", "/wait_id", "unknown waiting input"))?
+                .clone();
+            if !next
+                .permissions(observed.utc_ms, observed.trusted)
+                .signal_allowed(&control::SignalAuthority {
+                    wait_identity_valid: wait.nonce == request.nonce && !wait.consumed,
+                    schema_and_caller_valid: true,
+                    revision_valid: true,
+                    expires_at_ms: wait.expires_at_utc_ms,
+                })
+            {
+                return Err(Error::new(
+                    "signal_invalid",
+                    "/wait",
+                    "waiting input is consumed, expired, paused or otherwise closed",
+                ));
+            }
+            self.registry
+                .schemas
+                .validate(&wait.schema_ref, &request.payload)?;
+            if let Some(node_id) = &wait.node_id {
+                let node = &next.nodes[node_id];
+                if node.view.status != GoalNodeStatus::WaitingInput {
+                    return Err(Error::new(
+                        "signal_invalid",
+                        "/node",
+                        "node is not waiting for input",
+                    ));
+                }
+                let artifact =
+                    self.public_artifact(id, &next, node_id, "value", &request.payload, "signal")?;
+                let node = next.nodes.get_mut(node_id).expect("waiting node");
+                node.view.status = GoalNodeStatus::Succeeded;
+                node.view
+                    .outputs
+                    .insert("value".into(), artifact.artifact.clone());
+                next.artifacts
+                    .insert(artifact.artifact.id.clone(), artifact.clone());
+                effects.artifacts.push(artifact);
+            } else if next.stage != GoalStage::Planning {
+                return Err(Error::new(
+                    "signal_invalid",
+                    "/stage",
+                    "planning input belongs to a different stage",
+                ));
+            }
+            next.waiting
+                .get_mut(&request.wait_id)
+                .expect("waiting input")
+                .consumed = true;
+            next.signals.push(SignalFact {
+                id: format!("signal-{}", uuid::Uuid::new_v4()),
+                event_name: request.wait_id.clone(),
+                payload: request.payload.clone(),
+                received_at: chrono::Utc::now().to_rfc3339(),
+            });
+            next.status = GoalStatus::Running;
+            if wait.node_id.is_none() {
+                if next.planning_attempts > next.prepared.request.spec.planning.max_revisions {
+                    set_terminal(
+                        &mut next,
+                        GoalOutcome::Failed,
+                        "planning_exhausted",
+                        "planner",
+                        row.revision + 1,
+                        observed.utc_ms,
+                    );
+                    self.cleanup_terminal(&mut next)?;
+                } else {
+                    self.prepare_planner_request(&mut next)?;
+                }
+            }
+            Ok(())
+        })();
+        let response = match apply {
+            Ok(()) => CommandResponse::Accepted {
+                receipt: GoalCommandReceipt {
+                    protocol_version: 1,
+                    goal_id: id.into(),
+                    request_key: request.request_key.clone(),
+                    kind: "signal".into(),
+                    applied_revision: row.revision + 1,
+                    accepted: true,
+                },
+            },
+            Err(error) => {
+                next = row.record.clone();
+                effects = Default::default();
+                CommandResponse::Rejected { error }
+            }
+        };
+        let guard = if matches!(response, CommandResponse::Accepted { .. }) {
+            GoalWriteGuard::Signal {
+                wait_id: &request.wait_id,
+                nonce: &request.nonce,
+            }
+        } else {
+            GoalWriteGuard::Cleanup
+        };
+        let encoded = serde_json::to_value(&response)?;
+        let saved = self.commit_goal(
+            &row,
+            &next,
+            guard,
+            Some(CommandReceipt {
+                kind: "signal".into(),
+                key: request.request_key.clone(),
+                fingerprint: fp,
+                response: encoded.clone(),
+                not_after_ms: None,
+            }),
+            &effects,
+            &self.clock,
+        )?;
+        self.inner.notify.notify_one();
+        match saved {
+            GoalCommit::Saved(_) => decode_command(encoded),
+            GoalCommit::Replayed(value) => decode_command(value),
+        }
+    }
+}
+impl Goals {
+    pub async fn signal(
+        &self,
+        id: &str,
+        request: GoalSignalRequest,
+        caller: &Caller,
+    ) -> Result<GoalCommandReceipt> {
+        self.core.signal(id, &request, caller)
     }
 }
 
@@ -1005,7 +1392,10 @@ mod tests {
         ) -> ExecutionOutcome {
             let context = tools.goal_context().expect("Goal attribution");
             match context.role {
-                GoalRunRole::Planner { .. } => SubmitPlan.execute(invocation, tools, cancel).await,
+                GoalRunRole::Planner { .. } => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    SubmitPlan.execute(invocation, tools, cancel).await
+                }
                 GoalRunRole::NodeMember { .. } => {
                     assert_eq!(invocation.stage_input["document"], "Document");
                     tools.call("artifact.write", json!({"slot":"report","value":{"summary":"Document reviewed","findings":["Document"]}})).await.unwrap();
@@ -1582,388 +1972,5 @@ mod tests {
             "not_found"
         );
         runtime.shutdown().await.unwrap();
-    }
-}
-
-impl GoalCore {
-    /// R01/R06. Pending requests have no Run or slot until this transaction wins.
-    pub(crate) fn materialize(&self, id: &str) -> Result<Option<String>> {
-        let _coordinator = self.coordinator.lock().map_err(Error::io)?;
-        let row = self.inner.store.goal_load(id)?;
-        let observed = self.inner.store.observe_goal_clock(&self.clock)?;
-        if !row
-            .record
-            .permissions(observed.utc_ms, observed.trusted)
-            .advance_allowed()
-        {
-            return Ok(None);
-        }
-        let existing = row
-            .record
-            .runs
-            .iter()
-            .filter(|(_, r)| !r.view.started && r.view.phase == GoalRunPhase::Suspended)
-            .min_by_key(|(_, r)| r.view.role.order_key())
-            .map(|(id, r)| (id.clone(), r.request_id.clone()));
-        let request = if let Some((_, request_id)) = &existing {
-            row.record.requests.get(request_id)
-        } else {
-            row.record
-                .requests
-                .values()
-                .filter(|r| !r.cancelled && r.run_id.is_none())
-                .min_by_key(|r| r.role.order_key())
-        };
-        let Some(request) = request.cloned() else {
-            return Ok(None);
-        };
-        let entry = &self.registry.entries[&request.entry_ref];
-        let run_id = existing
-            .as_ref()
-            .map(|(id, _)| id.clone())
-            .unwrap_or_else(|| format!("run-{}", uuid::Uuid::new_v4()));
-        let mut next = row.record.clone();
-        let protected = match &request.role {
-            GoalRunRole::FinalCheck { check_id } if existing.is_none() => Some(check_id.as_str()),
-            _ => None,
-        };
-        let amount = if let Some(check) = protected {
-            next.budget
-                .protected_final
-                .get(check)
-                .copied()
-                .ok_or_else(|| Error::io("final allocation lost"))?
-        } else {
-            let available = next
-                .budget
-                .permanent_available(&next.prepared.effective_limits);
-            let policy = GoalBudgetAmount::for_entry(&entry.budget)?;
-            GoalBudgetAmount {
-                active_ms: policy.active_ms.min(available.active_ms),
-                tool_calls: policy.tool_calls.min(available.tool_calls),
-                candidate_bytes: policy.candidate_bytes.min(available.candidate_bytes),
-            }
-        };
-        if amount.active_ms < 2 || amount.tool_calls == 0 || amount.candidate_bytes == 0 {
-            return self.fail_admission(&row, observed.utc_ms);
-        }
-        match next.budget.reserve(
-            &run_id,
-            amount,
-            protected,
-            existing.is_none(),
-            &next.prepared.effective_limits,
-        )? {
-            BudgetAdmission::Pending => return Ok(None),
-            BudgetAdmission::Exhausted => return self.fail_admission(&row, observed.utc_ms),
-            BudgetAdmission::Granted => {}
-        }
-        let check_ms = entry
-            .budget
-            .max_check_ms
-            .unwrap_or(0)
-            .min(amount.active_ms / 2);
-        let run_ms = entry
-            .budget
-            .max_run_ms
-            .unwrap_or(0)
-            .min(amount.active_ms - check_ms);
-        let check_ms = entry
-            .budget
-            .max_check_ms
-            .unwrap_or(0)
-            .min(amount.active_ms - run_ms);
-        if run_ms == 0 || check_ms == 0 {
-            return self.fail_admission(&row, observed.utc_ms);
-        }
-        let executor = &self.inner.bindings.executors[&entry.contract.executor];
-        let binding = digest(&bounded_json(
-            &json!({"configuration_version":self.inner.bindings.configuration_version,"executor":entry.contract.executor,"identity":executor.identity(),"limits":executor.budget_limits()}),
-            1_048_576,
-        )?);
-        if let Some(run) = next.runs.get_mut(&run_id) {
-            run.view.phase = GoalRunPhase::Reserved;
-            run.allocation = amount;
-            run.run_allocation_ms = run_ms;
-            run.check_allocation_ms = check_ms;
-        } else {
-            next.runs.insert(
-                run_id.clone(),
-                GoalRunRecord {
-                    view: GoalRunSnapshot {
-                        run_id: run_id.clone(),
-                        role: request.role.clone(),
-                        entry_ref: request.entry_ref.clone(),
-                        epoch: request.epoch,
-                        phase: GoalRunPhase::Reserved,
-                        started: false,
-                        native_stop_confirmed: false,
-                        stop_unknown: false,
-                        interrupted: false,
-                        budget: None,
-                        error: None,
-                    },
-                    request_id: request.request_id.clone(),
-                    input_sha: request.input_sha.clone(),
-                    executor: entry.contract.executor.clone(),
-                    executor_binding: binding,
-                    candidates: BTreeMap::new(),
-                    started_at_utc_ms: None,
-                    returned_at_utc_ms: None,
-                    usage_sha: None,
-                    business_disposed: false,
-                    settlement_sequence: 0,
-                    active_ms: 0,
-                    allocation: amount,
-                    run_allocation_ms: run_ms,
-                    check_allocation_ms: check_ms,
-                    tool_receipt_shas: vec![],
-                    execution_outcome: None,
-                },
-            );
-            if let GoalRunRole::Planner { attempt } = request.role {
-                next.planning_attempts = attempt;
-            }
-        }
-        next.requests
-            .get_mut(&request.request_id)
-            .expect("persisted request")
-            .run_id = Some(run_id.clone());
-        if let Some(check_id) = &request.check_request_id {
-            next.checks
-                .get_mut(check_id)
-                .ok_or_else(|| Error::io("Run request check missing"))?
-                .producer_run_id = Some(run_id.clone());
-        }
-        if let GoalRunRole::NodeMember { node_id, member_id } = &request.role {
-            let member = next
-                .nodes
-                .get_mut(node_id)
-                .and_then(|n| n.view.members.get_mut(member_id))
-                .ok_or_else(|| Error::io("Run request member missing"))?;
-            member.run_id = Some(run_id.clone());
-            member.status = GoalMemberStatus::Reserved;
-        }
-        match self.commit_goal(
-            &row,
-            &next,
-            GoalWriteGuard::Advance,
-            None,
-            &Default::default(),
-            &self.clock,
-        ) {
-            Ok(GoalCommit::Saved(_)) => Ok(Some(run_id)),
-            Ok(GoalCommit::Replayed(_)) => Err(Error::io("internal materialization replay")),
-            Err(e) if e.code == "dispatch_capacity" || e.code == "revision_conflict" => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-    fn fail_admission(&self, row: &GoalRow, now: u64) -> Result<Option<String>> {
-        let mut next = row.record.clone();
-        set_terminal(
-            &mut next,
-            GoalOutcome::Failed,
-            "budget_exhausted",
-            "goal",
-            row.revision + 1,
-            now,
-        );
-        next.error = Some(Error::new(
-            "budget_exhausted",
-            "/budget",
-            "no positive bounded execution/check allocation remains",
-        ));
-        self.cleanup_terminal(&mut next)?;
-        self.commit_goal(
-            row,
-            &next,
-            GoalWriteGuard::Cleanup,
-            None,
-            &Default::default(),
-            &self.clock,
-        )?;
-        self.cancel_goal_handles(&next);
-        Ok(None)
-    }
-}
-
-impl GoalCore {
-    fn signal(
-        &self,
-        id: &str,
-        request: &GoalSignalRequest,
-        caller: &Caller,
-    ) -> Result<GoalCommandReceipt> {
-        self.open()?;
-        nonempty(&request.request_key, "/request_key")?;
-        let _coordinator = self.coordinator.lock().map_err(Error::io)?;
-        let row = self.authorized(id, caller)?;
-        let fp = digest(&bounded_json(request, 4_194_304)?);
-        if let Some(response) = self.inner.store.goal_command(
-            id,
-            &caller.principal,
-            "signal",
-            &request.request_key,
-            &fp,
-        )? {
-            return decode_command(response);
-        }
-        let observed = self.inner.store.observe_goal_clock(&self.clock)?;
-        let mut next = row.record.clone();
-        let mut effects = GoalCommitEffects::default();
-        let apply = (|| -> Result<()> {
-            if request.protocol_version != 1 {
-                return Err(Error::new(
-                    "input_invalid",
-                    "/protocol_version",
-                    "expected version 1",
-                ));
-            }
-            if row.revision != request.expected_revision {
-                return Err(Error::new(
-                    "revision_conflict",
-                    "/revision",
-                    "refresh the Goal before a new signal",
-                ));
-            }
-            let wait = next
-                .waiting
-                .get(&request.wait_id)
-                .ok_or_else(|| Error::new("signal_invalid", "/wait_id", "unknown waiting input"))?
-                .clone();
-            if !next
-                .permissions(observed.utc_ms, observed.trusted)
-                .signal_allowed(&control::SignalAuthority {
-                    wait_identity_valid: wait.nonce == request.nonce && !wait.consumed,
-                    schema_and_caller_valid: true,
-                    revision_valid: true,
-                    expires_at_ms: wait.expires_at_utc_ms,
-                })
-            {
-                return Err(Error::new(
-                    "signal_invalid",
-                    "/wait",
-                    "waiting input is consumed, expired, paused or otherwise closed",
-                ));
-            }
-            self.registry
-                .schemas
-                .validate(&wait.schema_ref, &request.payload)?;
-            if let Some(node_id) = &wait.node_id {
-                let node = &next.nodes[node_id];
-                if node.view.status != GoalNodeStatus::WaitingInput {
-                    return Err(Error::new(
-                        "signal_invalid",
-                        "/node",
-                        "node is not waiting for input",
-                    ));
-                }
-                let artifact = self.public_artifact(
-                    id,
-                    &next,
-                    node_id,
-                    "value",
-                    &wait.schema_ref,
-                    &request.payload,
-                    "signal",
-                )?;
-                let node = next.nodes.get_mut(node_id).expect("waiting node");
-                node.view.status = GoalNodeStatus::Succeeded;
-                node.view
-                    .outputs
-                    .insert("value".into(), artifact.artifact.clone());
-                next.artifacts
-                    .insert(artifact.artifact.id.clone(), artifact.clone());
-                effects.artifacts.push(artifact);
-            } else if next.stage != GoalStage::Planning {
-                return Err(Error::new(
-                    "signal_invalid",
-                    "/stage",
-                    "planning input belongs to a different stage",
-                ));
-            }
-            next.waiting
-                .get_mut(&request.wait_id)
-                .expect("waiting input")
-                .consumed = true;
-            next.signals.push(SignalFact {
-                id: format!("signal-{}", uuid::Uuid::new_v4()),
-                event_name: request.wait_id.clone(),
-                payload: request.payload.clone(),
-                received_at: chrono::Utc::now().to_rfc3339(),
-            });
-            next.status = GoalStatus::Running;
-            if wait.node_id.is_none() {
-                if next.planning_attempts >= 1 + next.prepared.request.spec.planning.max_revisions {
-                    set_terminal(
-                        &mut next,
-                        GoalOutcome::Failed,
-                        "planning_exhausted",
-                        "planner",
-                        row.revision + 1,
-                        observed.utc_ms,
-                    );
-                    self.cleanup_terminal(&mut next)?;
-                } else {
-                    self.prepare_planner_request(&mut next)?;
-                }
-            }
-            Ok(())
-        })();
-        let response = match apply {
-            Ok(()) => CommandResponse::Accepted {
-                receipt: GoalCommandReceipt {
-                    protocol_version: 1,
-                    goal_id: id.into(),
-                    request_key: request.request_key.clone(),
-                    kind: "signal".into(),
-                    applied_revision: row.revision + 1,
-                    accepted: true,
-                },
-            },
-            Err(error) => {
-                next = row.record.clone();
-                effects = Default::default();
-                CommandResponse::Rejected { error }
-            }
-        };
-        let guard = if matches!(response, CommandResponse::Accepted { .. }) {
-            GoalWriteGuard::Signal {
-                wait_id: &request.wait_id,
-                nonce: &request.nonce,
-            }
-        } else {
-            GoalWriteGuard::Cleanup
-        };
-        let encoded = serde_json::to_value(&response)?;
-        let saved = self.commit_goal(
-            &row,
-            &next,
-            guard,
-            Some(CommandReceipt {
-                kind: "signal".into(),
-                key: request.request_key.clone(),
-                fingerprint: fp,
-                response: encoded.clone(),
-                not_after_ms: None,
-            }),
-            &effects,
-            &self.clock,
-        )?;
-        self.inner.notify.notify_one();
-        match saved {
-            GoalCommit::Saved(_) => decode_command(encoded),
-            GoalCommit::Replayed(value) => decode_command(value),
-        }
-    }
-}
-impl Goals {
-    pub async fn signal(
-        &self,
-        id: &str,
-        request: GoalSignalRequest,
-        caller: &Caller,
-    ) -> Result<GoalCommandReceipt> {
-        self.core.signal(id, &request, caller)
     }
 }

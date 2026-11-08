@@ -58,7 +58,7 @@ impl GoalCore {
                 if let Some(node) = next.nodes.get_mut(subject) {
                     node.view.status = GoalNodeStatus::Failed;
                     node.view.error = Some(Error::new(
-                        *reason,
+                        reason,
                         "/deadline",
                         "fixed Goal/input deadline expired",
                     ));
@@ -72,7 +72,7 @@ impl GoalCore {
                     observed.utc_ms,
                 );
                 next.error.get_or_insert_with(|| {
-                    Error::new(*reason, "/deadline", "fixed Goal/input deadline expired")
+                    Error::new(reason, "/deadline", "fixed Goal/input deadline expired")
                 });
             }
         }

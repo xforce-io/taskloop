@@ -359,7 +359,7 @@ async fn run_checked(
             budget: budget.clone(),
         }),
         entry: contract.clone(),
-        resources: crate::managed::RunResources::Flow(definition.clone()),
+        resources: crate::managed::RunResources::Flow(Box::new(definition.clone())),
         context,
         candidates: Mutex::new(BTreeMap::new()),
         budget: budget.clone(),

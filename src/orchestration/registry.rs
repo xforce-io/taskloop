@@ -879,13 +879,13 @@ fn validate_profile(
         {
             return Err(invalid("/checks/target_outputs", "unknown target output"));
         }
-        if let Some(before) = &check.before_outputs {
-            if before.iter().any(|id| !profile.outputs.contains_key(id)) {
-                return Err(invalid(
-                    "/checks/before_outputs",
-                    "unknown protected output",
-                ));
-            }
+        if let Some(before) = &check.before_outputs
+            && before.iter().any(|id| !profile.outputs.contains_key(id))
+        {
+            return Err(invalid(
+                "/checks/before_outputs",
+                "unknown protected output",
+            ));
         }
     }
     for id in used_checkers {

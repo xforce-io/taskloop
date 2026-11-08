@@ -1,12 +1,12 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.10.9；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.10.12；状态：Draft，实现中，尚未完成开发验收、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
-L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
+产品基线：[L1概要及归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)，以及提交`16a68d48abb829dc14f13d0e0f4d3ed8c754558c`的v0.2用户路径与验收。复用§4行为和§11原18项Sx.Ax，不改变产品范围。本文件按用户指定十三节格式保存唯一L2事实源，L1留在Issue评论。
 
-本轮L1复用上述产品基线及§4用户路径，L2在既有文件内修订执行职责和图示，不改变产品范围与验收。
+首版包含CLI、固定汇合与有界规划修正；后台服务、条件语言和自动返工不在范围内。[Inquiry #7](https://github.com/xforce-io/inquiry/issues/7)另行负责深度文章质量。用户“go L2”授权编写本规格，不代替实现候选的独立审查或人工批准。
 
-本文件遵从用户指定十三节格式，是唯一详细设计事实源；L1 留在 Issue 评论。原18项 Sx.Ax 保留在§11，不改编号或降低要求。本次明确 v0.2 留待技术设计的契约；涉及 CLI、汇合与有界修正沿用已提出的 P1，不扩展为后台服务、条件语言或自动返工。应用深度文章质量由 [Inquiry #7](https://github.com/xforce-io/inquiry/issues/7) 负责。
+阅读顺序：§4看用户如何完成任务；§6.1看职责与执行链路；§6.3看输入输出和Gate在哪里定义；§6.5查状态转移；§6.7/6.9查事务与恢复。Goal受理或显式resume后由Runtime持续推进，无需用户调用step。G/N/R规则编号用于评审和测试定位，不要求实现规则引擎；事件闭环也不要求新增消息总线。
 
 ## 1 背景
 
@@ -146,15 +146,9 @@ flowchart TD
  F -.已提交事实的观测投影.-> T[(现有Trace与治理)]
 ```
 
-处理顺序固定如下：
+**实际状态转移在TX成功提交时生效。** D只计算待提交变更，不写库、不调用模型。TX使用SQLite IMMEDIATE事务及`WHERE revision=当前值`的条件更新，必须恰好更新一个Goal；冲突则回滚、重读并重算。状态、回执、接纳引用、预算及共享run_leases一起提交；blob可预写，事务只接纳引用。文件所有权锁限制写宿主，revision CAS防止该宿主内并发事件覆盖。
 
-1. **事件进入**：命令、提案、输出、检查结果、期限和停止确认进入同一协调器。执行结束不等于业务结果已接纳。
-2. **读快照与校验**：按§6.7核对身份、epoch、前态、确切摘要、依赖、意图与预算；已接纳命令返回原回执。异步结果不以出生时revision是否等于当前值判断有效性。
-3. **计算转移**：按§6.5计算Goal、节点、Run变化及动作，包括就绪集、失败传播、等待、验收和停止。此步骤不执行外部副作用。
-4. **原子提交**：以当前revision做条件更新；必须恰好更新一个目标，否则回滚并重读、重算。状态、幂等回执、产物/评价引用、预算和占槽变更在同一SQLite IMMEDIATE事务提交；跨Goal物理容量按同事务的共享run_leases核算。文件所有权锁保证单写宿主，不能替代revision校验。业务接纳与可信停止/消耗结算使用§6.7各自的有效性条件，失效输出不得阻断收尾。blob可预写，原子提交的是引用而非文件与SQLite的跨资源事务。
-5. **提交后执行**：按§6.1.2动作类型处理；存储失败不派发。启动前仍须CAS记录started并复核意图/期限/预留；崩溃后不盲重放。结果再进入协调器。
-
-图中反馈边是事件处理闭环，不是业务DAG回边或锁定后重规划。模型Review仅发生在声明检查点，不参与每次确定性状态转移。具体状态见§6.5，事务/并发见§6.7，恢复见§6.9。
+提交后才分派动作；启动前仍复核意图、期限及预留并以CAS记录started。存储失败不派发。完整接纳顺序只在§6.5.2定义，事务有效性见§6.7，崩溃处理见§6.9。图中反馈边表示接纳下一事件；模型Review只在声明检查点发生。
 
 #### 6.1.2 动作分派与执行通道
 
@@ -197,7 +191,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
- P[锁定的DAG计划] --> N[依赖满足的节点与NodeContract]
+ P[锁定的DAG计划] --> N[依赖满足、获准推进的work节点]
  N --> I[按冻结绑定准备各成员输入]
  I --> A[成员A：EntryContract → 独立Run A]
  I --> B[成员B：EntryContract → 独立Run B]
@@ -208,13 +202,15 @@ flowchart TD
  V --> J{全部必需成员已成功接纳}
  J -->|尚未齐员| W[保留已接纳成员结果，等待其他成员]
  J -->|全部成功| G[内建确定性汇合 → 节点Schema / Gate]
- G --> O[协调器提交一次节点公共输出]
- O --> D[重新计算后继就绪集]
+ G --> O[事务接纳公共输出并将节点标为succeeded]
+ O --> D[检查后继：输入齐备则ready，等待容量派发]
  V -->|成员失败| F[不形成公共成功输出，停止其余成员并收束]
  G -->|契约错误| F
 ```
 
 单成员节点省去多成员收集，但仍走相同接纳规则。各成员按可用槽位分别准入，图中分叉不表示必须同时取得全部槽位。候选、成员接纳与公共接纳是不同事实；候选不能提前成为下游输入，停止/失败竞争按§6.5–6.7处理。
+
+图中每次只处理当前可推进的work节点；无依赖的分支可并行，有依赖的后继等公共输出接纳后才ready。input节点走§6.6等待/补充，不创建Worker。NodeContract由应用注册，确定该节点的公共端口、成员及汇合规则；具体映射见§6.3.1–6.3.3。
 
 Worker的执行流程（routine）分成两个边界，本版不另设Routine对象或第二套状态机：
 
@@ -322,7 +318,7 @@ checkpoint节点须由Plan.checks中的唯一node_checkpoint项绑定，checker_
 
 data用途用于既定前向“评价→修订”，不满足或替代任何必需checkpoint。Runtime同样在N02创建只读请求，phase=node_evaluation（仅CheckInput新增的非阻断执行角色，不扩展CheckRequirement.phase）；check_id为`eval.`加node_id的SHA-256前32位并与本Goal绑定，注册计划时碰撞拒绝，不与Profile必需检查混同。N05调用§6.8统一检查接纳流程，data的fail为有效数据；error不产生公共成功。请求角色、Plan节点和purpose由Runtime冻结验证，模型不能用phase回显改变阻断性质。两种节点材料见checkpoint-node.example.json及evaluation-node.example.json，示例不替代带真实产物身份的Plan校验。
 
-**规划入口的绑定：**Profile.planner_entry_ref必须解析到恰有proposal必需输出槽、Schema为Core PlannerResult的入口；这个槽的内容仍是proposal/needs_input联合类型。Runtime给规划入口构造目标视图、goal_spec_digest/profile_digest、planning_mode、冻结Profile和本Profile能力目录，以及固定`planning_feedback={attempt,previous_candidate_sha,errors,check_results}`；首次errors/check_results为空、previous_candidate_sha为null，后续最多100项结构化错误及相关检查摘要；合法规划补充事实由Invocation.signal_facts提供，不改写冻结Spec。反馈与目录同样属于stage_input、须被入口Schema接受，不能只留在前一会话日志中；Profile包含输出别名和完整检查要求，不能让Planner在看不到checks时猜测Plan.checks。入口Schema必须接受该固定字段集合并通过实际值验证；workflow另携宿主冻结的template视图，由其入口Schema及既有模板校验约束，模板缺失即拒绝。示例planner-input.json只接受autonomous，与示例Profile.templates为空一致；它包含完整Profile而非只给能力名。入口Schema不匹配、缺结果槽或工具/隔离能力不支持时在Planner启动前拒绝。
+**规划入口的绑定：**Profile.planner_entry_ref必须解析到恰有proposal必需输出槽、Schema为Core PlannerResult的入口；这个槽的内容仍是proposal/needs_input联合类型。Runtime给规划入口构造目标视图、goal_spec_digest/profile_digest、planning_mode、冻结Profile和本Profile能力目录，以及已受理的effective_limits、imports（仅确切ID/内容与Schema摘要），以及固定`planning_feedback={attempt,previous_candidate_sha,errors,check_results}`；首次errors/check_results为空、previous_candidate_sha为null，后续最多100项结构化错误及相关检查摘要；合法规划补充事实由Invocation.signal_facts提供，不改写冻结Spec。反馈与目录同样属于stage_input、须被入口Schema接受，不能只留在前一会话日志中；Profile包含输出别名和完整检查要求，不能让Planner在看不到checks时猜测Plan.checks。入口Schema必须接受该固定字段集合并通过实际值验证；workflow另携宿主冻结的template视图，由其入口Schema及既有模板校验约束，模板缺失即拒绝。示例planner-input.json只接受autonomous，与示例Profile.templates为空一致；它包含完整Profile而非只给能力名。入口Schema不匹配、缺结果槽或工具/隔离能力不支持时在Planner启动前拒绝。
 
 **checker执行上下文投影：**对于plan/final及两种节点评价，限制不只在stage_input。Invocation.inputs与ToolContext.inputs都只含本CheckRequest允许的goal_inputs字段；Invocation.artifacts及ToolContext.accepted只含本请求的确切target Artifact，signal_facts默认空，不自动带入规划补充、其他节点或兄弟Run事实。只有显式成为请求target的输入产物才能读取其内容。stage_input为完整CheckInput；Skill及工作目录仅含本入口锁定资源和上述材料，不写入完整Goal输入副本。工具桥按同一只读作用域解析引用，受信DomainTool不得从全局Store补查隐藏材料；普通Worker/旧Flow的上下文语义不变。具备完整Goal读取权限的宿主不能把该权限自动传递给checker Run。
 
@@ -431,7 +427,7 @@ Run阶段：`reserved → started → execution_returned → checking → settle
 
 §6.5开头的表给出生命周期概览；本节及§6.5.3–6.5.5定义可直接评审的规则契约，替代实现者从散落正文自行拼接规则。所有业务节点按冻结kind复用work/input规则，能力差异由NodeContract提供成员、输入输出、汇合与检查参数；Planner不能给节点注入自定义状态转移函数。旧Flow沿用旧状态机，不套用这些Goal规则。
 
-每条TransitionRule固定包含以下字段。下面的表是规范，不是可执行DSL；规则由Runtime内建的确定性逻辑实现，不新增表达式解释器、动态插件或另一套持久化引擎。
+每条TransitionRule按下表评审。字段描述规则必须回答的问题，不要求新增同名Rust结构、逐条注册对象或持久化规则表；Runtime内建逻辑直接实现即可。
 
 | 字段 | 契约 |
 |---|---|
@@ -443,7 +439,7 @@ Run阶段：`reserved → started → execution_returned → checking → settle
 | otherwise | 未命中、重复、失效、冲突的确定性处理；不能默认推进或自动重跑 |
 | atomic | 必须同事务接纳的状态、回执、产物/评价引用、预算和容量集合；大规模cleanup可按既定规则分批 |
 
-输入为`当前Goal及相关节点/Run/账本快照 + 规范化事件 + 冻结Spec/Profile/Plan/NodeContract + 宿主本次时间观测`，输出为TransitionDecision：`base_revision、命中rule_id集合、writes、actions、事件回执或拒绝原因`。动作限定为唤醒持久请求准入、启动已预留Run、内建检查/汇合、停止已有Run及必要cleanup；ID绑定原Goal/节点/Run/检查请求，不生成不受控工作。CAS重算必须丢弃旧Decision，重新求值；新的Run/等待身份等只在成功接纳的Decision中固定，回滚对象不得派发。规则本身不读时钟、不调用模型/工具、不打开数据库；授权解析、blob写入与检查计算在相应边界进行，其结果和确切摘要作为待校验事实输入。最终事务必须复核当前意图、期限、账本及版本，不能把事务前的准入结果当授权。
+输入为`当前Goal及相关节点/Run/账本快照 + 规范化事件 + 冻结Spec/Profile/Plan/NodeContract + 宿主本次时间观测`，输出为TransitionDecision：`base_revision、命中rule_id集合、writes、actions、事件回执或拒绝原因`。这里同样定义逻辑结果，不增加公开协议或第二份状态记录。动作限定为唤醒持久请求准入、启动已预留Run、内建检查/汇合、停止已有Run及必要cleanup；ID绑定原Goal/节点/Run/检查请求，不生成不受控工作。CAS重算必须丢弃旧Decision，重新求值；新的Run/等待身份等只在成功接纳的Decision中固定，回滚对象不得派发。规则本身不读时钟、不调用模型/工具、不打开数据库；授权解析、blob写入与检查计算在相应边界进行，其结果和确切摘要作为待校验事实输入。最终事务必须复核当前意图、期限、账本及版本，不能把事务前的准入结果当授权。
 
 **公共判定的唯一事实源：**协调器先对当前快照和本次时间观测计算以下判定，所有G/N/R规则引用它们，不各自重写pause/terminal/blocker/期限组合。它们是现有协调器内的共享纯逻辑，不是新中间件或可配置规则引擎。
 
@@ -712,6 +708,8 @@ GoalId由Runtime生成`goal-<UUIDv4>`，旧Flow ExecutionId保持`execution-<UUI
 
 Goal协调事件以保留的GoalId作为观测流标识（TraceEvent.run_id），data.scope=goal、role=coordinator；它不是业务Run，不创建RunRequest/物理槽位，也不计max_runs。其源清理为not_applicable。原生调用仍使用真实RunId及data.scope=run，并作为同一Goal根下的子Span；两类观测流均占既有TracePolicy的留存容量。Runtime覆盖所有原生事件的Goal/节点/成员/检查归属，不能由Harness回显伪造。TraceEvent原必填字段保持兼容。
 
+干净关闭宿主时为仍暂停/未终结的协调观测流记录goal.coordinator_closed，只结束该宿主的观测源，不关闭Goal根Span、不生成业务Run。显式resume复用同一Goal根；最终结束再关闭根Span。可重建摘要升级至v3以识别该源结束事实，历史事件字节不改；异常退出不补造关闭标记。
+
 公开编排事件包括goal.admitted、plan.proposed/rejected/locked、node.ready/started/accepted/dependency_failed、check.accepted、goal.finished及stop.pending/confirmed。事件由已提交业务事实投影，丢失可查GoalSnapshot和检查记录；不能仅因有一条goal.finished Trace就提交Goal成功。Trace无法持久化显示degraded/complete=false，业务状态仍按真实接纳决定。业务历史保留Spec/计划/Run/检查/回执，不依赖Trace保留期，敏感内容按既有TracePolicy处理，不将原始材料全文强塞观测。
 
 ## 7 模块
@@ -741,7 +739,7 @@ Goal协调事件以保留的GoalId作为观测流标识（TraceEvent.run_id）�
 |---|---|
 | `OrchestrationRegistry::validate_and_freeze` | `(&HostBindings) → RegistrationReceipt`；验证应用代码构造的目录及已读取资源，全部通过才封存引用闭包与宿主绑定指纹；失败目录不可用于open_orchestrated；不提供文件加载入口 |
 | `Runtime::open_orchestrated` | `(RuntimeOptions, Vec<Definition>, HostBindings, OrchestrationRegistry, OrchestrationOptions, Option<TraceSetup>) → Runtime`；共享旧Store及执行器，要求已封存目录且绑定指纹匹配，显式启用Goal；不增加现有RuntimeOptions必填字段破坏结构体调用方 |
-| `Runtime::goals` | `Result<Goals>`；未启用时返回unsupported_mode，不猜配置 |
+| `Runtime::goals` | `Result<Goals>`；未启用时返回unsupported_store_mode，不猜配置 |
 | `Goals::submit` | `(GoalRequest, &Caller) → GoalReceipt{goal_id, revision, replayed}`；新Goal受理即在当前宿主进程内协调推进；同键同参只返回原回执，不隐式resume或重开Planner；当前状态另由get读取 |
 | `Goals::get/plan` | `(goal_id,&Caller) → GoalSnapshot/LockedPlan`；授权只读，plan尚未锁定有明确not_ready |
 | `Goals::signal` | `(goal_id, GoalSignalRequest,&Caller) → CommandReceipt`；wait_id/nonce/revision校验见§6.6 |
@@ -750,9 +748,11 @@ Goal协调事件以保留的GoalId作为观测流标识（TraceEvent.run_id）�
 | `Goals::trace/export_trace` | 与现有Trace查询/导出契约同义，按Goal授权聚合Run，不引入另一Trace平台 |
 | `GoalClient` | 无宿主所有权的本地客户端；只读公开投影，经宿主本地Socket提交在线命令并读回执；不得写业务库、spawn工作或运行协调器 |
 
-OrchestrationRegistry在构造时注入能力、Profile、模板、规则与汇合器；现有HostBindings仍注入Executor、DomainTool、DomainGate、Grant。新 `GoalGrant` 显式允许Profile摘要、能力集合及GoalLimits，引用原有受限工具授权，不靠旧Grant.definitions为空推断“允许任意Profile”。Caller的grants同时匹配；第三方HTTP输入不能反序列化为可信Caller。
+OrchestrationRegistry在构造时注入能力、Profile、模板与规则，汇合只使用§6.3.2固定投影；现有HostBindings仍注入Executor、DomainTool、DomainGate、Grant。新 `GoalGrant` 显式允许Profile摘要、能力集合及GoalLimits，引用原有受限工具授权，不靠旧Grant.definitions为空推断“允许任意Profile”。Caller的grants同时匹配；第三方HTTP输入不能反序列化为可信Caller。
 
-原EntryContract.input_schema用于Worker入口；公共节点端口与Worker入口的输入封装在能力注册时锁定，不能把不兼容数据硬塞给旧入口。DAG Worker沿用EntryContract中的工具/Skill/输入输出/附件形状，但gate字段仅可引用Runtime内建检查ID（如_tl.schema@1），不能解析到HostBindings.gates里的任意DomainGate。OrchestrationRegistry在注册时拒绝自定义成员/节点Gate及对内建ID的覆盖；Goal路径绝不调用任意DomainGate.check。领域检查必须是受控checker Run/显式评价节点。HostBindings.gates只供旧Flow使用，旧Flow语义保持不变。DAG入口的旧Flow.requires必须为空；跨节点依赖只由Plan连接与Artifact作用域提供，不能混入旧state/visit历史选择。新的stage_input封装由注册Schema明确验证，普通Worker的ToolContext.inputs保留冻结Goal输入，accepted仅含本次绑定允许的上游/导入产物和自身允许事实；所有checker例外按§6.3.3同时投影Invocation.inputs/ToolContext.inputs、artifacts/accepted及signal_facts，不把完整Goal副本旁路给模型或工具。内部ManagedRun管线通过归属适配器读写Goal或Flow记录，不直接复用写死单active/current_state的Bridge实现。Invocation仍有唯一execution_id/run_id、stage_input、skills、schemas、work_dir、budget；新工作归属通过新增可选context字段或内部上下文传递，保留旧序列化字段含义，不要求Milkie理解DAG。领域ToolContext增加只读节点归属和确切授权Artifact视图，工具不能由归属字段获得新权限。
+EntryContract、公共端口、成员映射及Gate约束统一见§6.3；checker的Invocation/ToolContext只读投影也只按§6.3.3定义。HostBindings.gates继续服务旧Flow，新Goal的领域检查通过显式受控checker执行。
+
+内部Managed Run通过归属适配器读写Goal或Flow，复用执行机制。Invocation保留execution_id/run_id、stage_input、skills、schemas、work_dir、budget等既有字段含义，新增Goal归属上下文不要求Milkie理解DAG。普通Worker的ToolContext.inputs保留冻结Goal输入，accepted仅含本次绑定允许的上游/导入产物和自身允许事实；只读归属信息不扩大权限。
 
 ### 8.2 CLI命令、配置与输出
 
@@ -773,7 +773,7 @@ taskloop goal trace     GOAL_ID --store DIR --after CURSOR --limit N [--json]
 
 run/resume是前台宿主，持有Store独占锁；第二个宿主得到already_running且不重启工作。get/plan/artifact/budget/trace为只读Client；signal/cancel/stop为在线命令Client，不获得宿主锁、无模型或Worker生命周期。CLI可在等待时显示另一终端的具体补充命令；不要求用户打开SQLite或编辑内部状态。
 
-HOST.json指定store_dir、已编译的Profile/能力工厂ID、现有Skill/Schema资源根、显式Milkie配置、GoalGrant、宿主容量/TracePolicy。解析不执行安装脚本，不自动发现用户凭据，不允许Agent输入任意本地模块路径。通用CLI提供随包的最小文档审阅Profile；应用自定义Rust能力由应用打包注册，可复用同一CliDriver或SDK（Inquiry Web仍是应用入口），不会声称一个JSON配置能加载任意未编译Rust工具。
+HOST.json指定store_dir、已编译的Profile/能力工厂ID、现有Skill/Schema资源根、显式Milkie配置、GoalGrant、宿主容量/TracePolicy。解析不执行安装脚本，不自动发现用户凭据，不允许Agent输入任意本地模块路径。通用CLI使用[HOST配置示例](../../examples/goal/host.example.json)，只选择已编译document-review@1工厂；goal_grants.profile_refs来自可信配置，在注册后转换为GoalGrant的冻结摘要，Caller固定为当前UID且grants来自caller_grants，不接受请求自报身份。CLI Trace配置为元数据模式；应用SDK仍可提供内容过滤器。通用CLI提供随包的最小文档审阅Profile；应用自定义Rust能力由应用打包注册，可复用同一CliDriver或SDK（Inquiry Web仍是应用入口），不会声称一个JSON配置能加载任意未编译Rust工具。
 
 客户端仅在同一OS用户的0700Store目录工作；GoalClient按本地UID映射可信身份，不能从请求JSON指定principal。嵌入应用继续由宿主提供Caller与授权；首版不承诺跨OS用户/远程客户端。持锁前台宿主创建`owner.sock`并处理在线命令；这是该进程内的本地控制入口，不是独立后台服务。客户端不打开可写数据库、不写收件表。宿主使用OS peer UID与Store所有者核对身份，并以宿主配置映射Caller/Grant，不接纳请求自报的授权。
 
@@ -924,7 +924,7 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 本版已给出可评审的技术选择，不再将状态、图格式、字段连接、并发/事务、停止恢复、预算、CLI或兼容性留给实现者自行发明。以下是必须通过实现证据解除的技术风险，不是允许降低产品要求的出口：
 
 1. 共享Run管线重构可能影响旧Flow。须按§11保持旧协议/授权/预算/Trace回归；不能为避免重构在应用里另写状态机。
-2. petgraph与现有Rust1.91构建兼容，JSON Schema支持子集应以锁定版本实测；若依赖不满足，应等价替换算法或限定解析实现，不改变无环/连接校验合同。当前只核对文档，未宣称安装或编译通过。
+2. petgraph及JSON Schema子集按锁定依赖验证，不改变无环/连接校验合同。构建和受控测试证据见实现计划；它们不代替真实Harness及应用验收。
 3. Milkie/目标Harness在多Run并发下的独立工作目录、会话与停止隔离须真实验证。若存在串扰，不把并发上限静默降到1然后声称并行验收通过。
 4. SQLite单行GoalRecord在本版容量上限内的更新与预算事务需验证，不承诺分布式吞吐。必要优化不能弱化单一revision接纳和原子预留。
 5. 自定义规则/转换通过受控Executor运行；须验证错误返回和停止未知。Runtime内建检查/汇合不提供任意用户闭包入口，不能将回调强杀能力留待实现者发明。

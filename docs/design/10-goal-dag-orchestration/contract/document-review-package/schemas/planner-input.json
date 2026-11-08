@@ -66,6 +66,84 @@
         "check_results"
       ],
       "additionalProperties": false
+    },
+    "effective_limits": {
+      "type": "object",
+      "properties": {
+        "max_wall_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_active_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_runs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_transitions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_total_candidate_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_concurrent_runs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "max_wall_ms",
+        "max_active_ms",
+        "max_runs",
+        "max_transitions",
+        "max_tool_calls",
+        "max_total_candidate_bytes",
+        "max_concurrent_runs"
+      ],
+      "additionalProperties": false
+    },
+    "imports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "schema_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "sha256",
+          "schema_digest"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 256
     }
   },
   "required": [
@@ -76,7 +154,9 @@
     "planning_mode",
     "capability_catalog",
     "profile",
-    "planning_feedback"
+    "planning_feedback",
+    "effective_limits",
+    "imports"
   ],
   "additionalProperties": false
 }

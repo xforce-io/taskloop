@@ -28,7 +28,7 @@ pub(crate) trait ManagedRunOwner: Send + Sync {
     }
 }
 pub(crate) enum RunResources {
-    Flow(Definition),
+    Flow(Box<Definition>),
     Goal(Arc<crate::orchestration::FrozenRegistry>),
 }
 impl RunResources {

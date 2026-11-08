@@ -52,29 +52,28 @@ impl GoalCore {
                             .depends_on
                             .iter()
                             .all(|dep| next.nodes[dep].view.status == GoalNodeStatus::Succeeded)
-                    {
-                        if let Err(error) = self.ready_node(
+                        && let Err(error) = self.ready_node(
                             &row,
                             &mut next,
                             node_id,
                             node,
                             &mut effects,
                             observed.utc_ms,
-                        ) {
-                            let state = next.nodes.get_mut(node_id).expect("locked node");
-                            state.view.status = GoalNodeStatus::Failed;
-                            state.view.error = Some(error.clone());
-                            set_terminal(
-                                &mut next,
-                                GoalOutcome::Failed,
-                                &error.code,
-                                node_id,
-                                row.revision + 1,
-                                observed.utc_ms,
-                            );
-                            next.error = Some(error);
-                            break;
-                        }
+                        )
+                    {
+                        let state = next.nodes.get_mut(node_id).expect("locked node");
+                        state.view.status = GoalNodeStatus::Failed;
+                        state.view.error = Some(error.clone());
+                        set_terminal(
+                            &mut next,
+                            GoalOutcome::Failed,
+                            &error.code,
+                            node_id,
+                            row.revision + 1,
+                            observed.utc_ms,
+                        );
+                        next.error = Some(error);
+                        break;
                     }
                     if next.nodes[node_id].view.status == GoalNodeStatus::Running
                         && next.nodes[node_id]
@@ -82,28 +81,26 @@ impl GoalCore {
                             .members
                             .values()
                             .all(|m| m.status == GoalMemberStatus::Succeeded)
-                    {
-                        if let Err(error) =
+                        && let Err(error) =
                             self.begin_node_check(&mut next, node_id, observed.utc_ms)
-                        {
-                            next.nodes
-                                .get_mut(node_id)
-                                .expect("locked node")
-                                .view
-                                .status = GoalNodeStatus::Failed;
-                            next.nodes.get_mut(node_id).expect("locked node").view.error =
-                                Some(error.clone());
-                            set_terminal(
-                                &mut next,
-                                GoalOutcome::Failed,
-                                &error.code,
-                                node_id,
-                                row.revision + 1,
-                                observed.utc_ms,
-                            );
-                            next.error = Some(error);
-                            break;
-                        }
+                    {
+                        next.nodes
+                            .get_mut(node_id)
+                            .expect("locked node")
+                            .view
+                            .status = GoalNodeStatus::Failed;
+                        next.nodes.get_mut(node_id).expect("locked node").view.error =
+                            Some(error.clone());
+                        set_terminal(
+                            &mut next,
+                            GoalOutcome::Failed,
+                            &error.code,
+                            node_id,
+                            row.revision + 1,
+                            observed.utc_ms,
+                        );
+                        next.error = Some(error);
+                        break;
                     }
                 }
                 if next.terminal_intent.is_none()
@@ -557,7 +554,6 @@ impl GoalCore {
                         &next,
                         node_id,
                         &port,
-                        &contract.outputs[&port].schema_ref,
                         &value,
                         "node_projection",
                     )?;
@@ -690,10 +686,12 @@ impl GoalCore {
         next: &GoalRecord,
         node: &str,
         port: &str,
-        schema: &str,
         value: &Value,
         producer: &str,
     ) -> Result<GoalArtifact> {
+        let schema = &self.registry.capabilities[&next.nodes[node].view.capability_ref].outputs
+            [port]
+            .schema_ref;
         self.registry.schemas.validate(schema, value)?;
         let sha = self
             .inner
@@ -712,7 +710,7 @@ impl GoalCore {
             node_id: Some(node.into()),
             member_id: None,
             plan_digest: next.plan.as_ref().map(|p| p.plan_digest.clone()),
-            schema_ref: Some(schema.into()),
+            schema_ref: Some(schema.clone()),
             schema_digest: Some(self.registry.schemas.sources[schema].digest.clone()),
             attachment_policy_digest: None,
             accepted: true,

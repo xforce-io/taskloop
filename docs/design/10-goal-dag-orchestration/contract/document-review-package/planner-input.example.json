@@ -111,5 +111,15 @@
     "previous_candidate_sha": null,
     "errors": [],
     "check_results": []
-  }
+  },
+  "effective_limits": {
+    "max_wall_ms": 600000,
+    "max_active_ms": 480000,
+    "max_runs": 12,
+    "max_transitions": 64,
+    "max_tool_calls": 200,
+    "max_total_candidate_bytes": 1048576,
+    "max_concurrent_runs": 2
+  },
+  "imports": []
 }
