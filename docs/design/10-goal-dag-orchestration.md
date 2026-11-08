@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.8.2；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.8.3；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -416,6 +416,10 @@ Run阶段：`reserved → started → execution_returned → checking → settle
 
 G05/G06/G07/G08/G09/G10/G13/G14等在主事实接纳后可作为**归并规则**命中；表中明确作为主规则的分支除外。归并只作用于当前拟更新快照，不重复接纳同一事实。以CheckValidated为例，先R04落一份receipt，即使尚未全部通过或已pause也有合法接纳入口；全部pass及当前允许继续时才G05/G08，pause时仅存干净receipt并G14，不因暂不能终态拒收结果。节点checkpoint的receipt则与N05/N11公共接纳绑定，不在成员候选阶段提前产生。
 
+**规划结果在pause中的接续：**在原epoch/期限内已启动Planner的干净结果可接纳，不把“暂停禁止推进”误作“结果无主规则”。合法proposal由G02保存并标plan_checking，但pause下不创建plan CheckRequest、不执行首次检查、不锁定Plan；没有检查要求也先G14 stopped。已经发出的plan检查由R04接纳干净receipt，G05在pause下仅O3，不锁定/初始化节点。显式G15 resume清pause后，由保存提案创建尚不存在的请求，或直接用已齐receipt执行G05；请求存在则不重建nonce，不重跑Planner或已完成检查。plan_checking中“提案已验证、检查尚未建立”是明确的暂停接续事实，不是丢失执行接纳或恢复时需要重算的checking结果。
+
+非法提案在pause内按G03保存缺陷和已用尝试；有剩余尝试只保留后续pending请求、不启动，无剩余则G10真实失败优先于pause。Planner needs_input的结果分支按G04保存有效等待身份和已接受事实，再按pause归并G14，不把Goal从stopping改回可执行waiting；客户端signal分支仍严格拒绝pause。以上均要求原Run干净结果完整持久化，未提交的执行/内建检查在崩溃后仍依§6.9为interrupted，不以保存了原始候选冒充已验证事实。
+
 **排队与再次准入：**RunRequest是同GoalRecord内的持久调用请求，含request_id、role、节点/成员或check_id、输入/入口摘要、epoch、规划尝试序号（若适用）及pending/materialized(run_id)事实。G01/G03/G04/G07分别与其后续调用请求原子提交；Plan锁定及节点ready可由冻结成员规格稳定导出尚未物化请求，首次物化身份同事务保存。每个调用请求最多映射一个Run；请求不是Run，不占槽、不消耗max_runs，R01首次物化时才计次数/预留，重入不二计。请求与Run对应关系、尝试序号和预算必须一起检查，不能靠创建重复请求突破上限。
 
 SharedDispatcher启动后及每次新请求、可信释放容量、resume时，为所有允许推进的Goal按轮转规则产生本Goal的ScheduleRequested事件；容量不足保留pending，等下一次容量/资源事实变化再试，不忙循环。跨Goal释放只唤醒对方，不能在释放方事务内写另一Goal。宿主重开后从持久请求/节点事实重建准入候选，但暂停/blocked Goal必须先显式合法resume；不丢请求，也不盲启动已started Run。ScheduleRequested本身不授予执行权限，R01/R06/R02仍逐次校验。只有pending请求、无Run的planning/goal_checking是合法running排队态，公开queue_reason，仍受固定期限约束。
@@ -431,10 +435,10 @@ SharedDispatcher启动后及每次新请求、可信释放容量、resume时，�
 | ID / 事件 | 前态与附加条件 | writes / 新状态 | actions与原子边界 | otherwise |
 |---|---|---|---|---|
 | G01 submit | 不存在；Spec/Profile/Grant/期限合法且幂等键未用 | 创建冻结记录、running/planning、创建回执及Planner pending RunRequest | 同事务保存请求；R01可在本事务准入，容量不足仍保存请求并排队，后续ScheduleRequested再准入 | O1；同键异参拒绝；输入非法O2 |
-| G02 proposal有效 | running/planning；对应Planner结果有效，结构合法 | 保存本提案及摘要，stage=plan_checking；建立本提案plan检查请求 | 内建检查或预留受控检查Run；请求及阶段共同提交 | O1/O2；必需检查未齐O3 |
+| G02 proposal有效 | stage=planning；status为running，或stopping且仅有pause；对应在途Planner结果有效、原epoch/期限及结构合法、无terminal | 保存本提案及摘要、已验证事实和producer业务处置，stage=plan_checking；非pause时建立本提案plan检查请求 | pause只保存事实，不建检查请求/Run、不锁计划；G14先收束stopped。resume按保存提案首次建立缺失检查请求，不重跑Planner | O1/O2；pause/未齐检查O3；终结后只诊断/结算 |
 | G03 proposal非法或plan verdict=fail | planning/plan_checking；尚可修正且无期限/资源拒绝 | 记录提案/缺陷，保留既有尝试计数，回planning并原子建下一Planner请求 | 新Planner尝试是新Run，经R01；无剩余尝试转G10；不能锁定非法计划 | O1/O2；次数/期限不足G10（O4） |
 | G04 Planner needs_input / 规划signal | 初次结果为planning且注册Schema/期限合法；补充分支仅status=running/waiting、stage=planning且无pause/terminal、等待身份有效 | 持久化规划等待身份；无其他执行时waiting，stage保留planning | 无业务Worker；补充接纳原子消费nonce、写SignalFact及下一Planner pending请求，回running/planning；无剩余尝试则同事务G10；槽位不足不丢请求 | O1；补充在stopping/stopped/blocked/finished或有pause/terminal时O2，nonce及请求不变；无剩余尝试G10；请求等槽O3 |
-| G05 全部本提案plan检查pass | plan_checking；proposal摘要及全部必需receipt确切匹配 | 同事务写唯一PlanVersion、初始化节点，stage=executing | 重算根节点就绪；无plan检查要求时G02可同事务满足此规则，不强造中间Run | O1；未齐pass O3；fail/error由G03/G10 |
+| G05 全部本提案plan检查pass | plan_checking；status=running且无pause/terminal/blocker；proposal摘要及全部必需receipt确切匹配 | 同事务写唯一PlanVersion、初始化节点，stage=executing | 重算根节点就绪；无plan检查要求时G02可同事务满足此规则，不强造中间Run | O1；pause/stopping/stopped或未齐pass O3，只存receipt；无锁定/初始化节点/成员请求；fail/error由G03/G10 |
 | G06 节点进展/就绪集改变 | executing；无更高优先意图/阻塞 | 有ready、reserved、在途或可首次汇合则running；仅有有效输入等待则waiting；未齐备节点保持其状态 | 按N/R规则推进；全节点成功才转G07；非终态却无任何推进/等待可能为contract_error，不能假装等待 | O1；其他stage不适用；死路G10 |
 | G07 所有DAG节点成功 | executing；公共输出全部存在、无在途业务Run，节点接纳完整 | stage=goal_checking，建立确切最终CheckRequest及各checker pending请求，running | 请求身份、阶段与受保护预算一起提交；R01不足则排队，ScheduleRequested重试准入，不直接achieved | O1；节点/Run未齐O3；已在goal_checking不重建请求 |
 | G08 最终必需检查全部pass | goal_checking；所有声明阶段receipt有效，无terminal/pause/blocker，所有自身Run确认并结算 | finished/achieved，保留最后stage，outcome与确切输出/receipt绑定 | 无新执行；所有成功证明与终态同事务；仍有待结算Run则只存receipt，结算后再归并 | O1；未齐/待结算/pause O3；有效fail/error O4 |
@@ -444,7 +448,7 @@ SharedDispatcher启动后及每次新请求、可信释放容量、resume时，�
 | G12 pause/stop/SIGINT/SIGTERM | running/waiting/stopping/blocked；stopped上的新stop为无变更回执；finished拒绝 | 无terminal且允许pause时记录pause及stopping，挂起仅本Goal未启动Run；已有terminal或故障blocker保持原意图/阻塞，不新造可恢复pause | 按15秒窗口处理在途干净接纳；已有terminal/blocked仅加速R08及收尾，不走G14、不改outcome | O1；stopped新stop回无变更；finished O2；已有terminal只加速 |
 | G13 收尾/结算/传播进展 | stopping/blocked；按原Run身份核对 | terminal_intent存在且全部自身Run停止结算、cleanup完成：finished及该outcome；否则保留stopping，未知超窗口blocked | 停止/结算/cleanup可持续；不因终态判断提前释放未知槽位 | O1；未结清O3；未确认不得终态 |
 | G14 pause收束 | pause有效、无terminal_intent | 已启动工作均干净接纳/结算且无未决checking：stopped；丢失接纳为blocked/interrupted；未知为blocked/stop_unknown | 保留成功成员/等待/挂起身份；无自动恢复；干净完成所有检查也先stopped | O1；未齐O3；terminal转G13；interrupted不清除 |
-| G15 resume | stopped；无未结算started Run，绑定一致、期限有效、无blocker/terminal | 清pause，按既有事实归并running/waiting或已具全部证明的finished；不清历史预算 | pending RunRequest经R01、挂起Run经R06重新准入；未开始汇合可首次汇合；未提交旧checking/已启动丢失工作不可重算 | O1；非法恢复O2；无容量O3保留请求 |
+| G15 resume | stopped；无未结算started Run，绑定一致、期限有效、无blocker/terminal | 清pause，按既有事实归并running/waiting或已具全部证明的finished；不清历史预算 | 先按保存的合法提案为缺失plan检查首次建立CheckRequest/RunRequest，再以已有receipt归并G05（全部pass才锁定，无检查要求亦需此时）；pending请求经R01、挂起Run经R06准入；未开始汇合可首次汇合；未提交旧checking/已启动丢失工作不可重算 | O1；非法恢复O2；无容量O3保留请求 |
 | G16 持锁打开/时钟变化 | 依§6.9.1逐Goal分类；不能借其他owner状态决策 | interrupted/stop_unknown/clock_untrusted等blocker；仅从未启动工作可安全stopped；可信恢复时只移除对应时钟blocker | 依§6.9对账；确认停止不使丢失工作ready；时钟恢复亦须显式resume | O1；未知绑定保持blocker；无新事实不写revision |
 
 G06/G08/G13/G14是当前接纳事务末尾的状态归并规则，不依赖一个可能丢失的“再tick一次”才能收束；纯已接受事实也可在恢复时幂等归并。stage仅在G01/G02/G03/G05/G07改变，输入等待、暂停、失败及终态保留最后stage。已有阻塞和终结意图优先于普通running/waiting推导；未到停止窗口的pending Run不得被“无业务可派发”误归为waiting。
@@ -806,7 +810,7 @@ retryable只表示同一只读/幂等命令可重读或安全重提，不授权�
 | S3.A3 | 一支input等待，另一支推进；等待到期与signal并发及离线跨期限；上游失败后相关后继dependency_failed，无永久pending | Integration：公开ready/waiting/依赖状态和容量 |
 | S4.A1/A2 | pass/fail/error组合、缺必需receipt、跨Goal证据、旧规则/旧摘要/错producer_run拒绝 | Integration：CheckRequest/EvaluationReceipt和最终状态 |
 | S4.A2/A3 | checkpoint keys/targets/checker精确覆盖；before_outputs保护D漏依赖拒绝、A→B后联合检查A/B无反插环；checkpoint fail停并行分支后收束；评价Worker成功但verdict fail；初稿pass不能接纳最终稿；取消与结果同刻竞争 | Integration/E2E：worker outcome、quality verdict、revision各自证据 |
-| S5.A1 | G01–G16/N01–N11/R01–R10逐规则命中、部分检查pass/pause中pass接纳、pending请求跨崩溃/跨Goal释放容量再准入、signal原子保存后续请求、StopUnknown及晚到确认清理、非法前态、重复/失效事件；多命中拒绝及归并顺序；同键同参、同键异参；崩溃后的同键run必须先恢复对账；响应丢失后重试；完成事件重复/迟到/乱序 | Integration：命令回执唯一性、Run/接纳计数不增加 |
+| S5.A1 | G01–G16/N01–N11/R01–R10逐规则命中、部分检查pass/pause中pass接纳、pause中合法提案保存而不建检查/锁计划、resume补建缺失检查且不重跑、pending请求跨崩溃/跨Goal释放容量再准入、signal原子保存后续请求、StopUnknown及晚到确认清理、非法前态、重复/失效事件；多命中拒绝及归并顺序；同键同参、同键异参；崩溃后的同键run必须先恢复对账；响应丢失后重试；完成事件重复/迟到/乱序 | Integration：命令回执唯一性、Run/接纳计数不增加 |
 | S5.A2 | 业务候选与可信结算同消息分项验证、期限到达但定时事件未出队、最后成员与pause/cancel/checkpoint竞争；内建检查不启动Harness，停止请求定位原Run且不新增Run；在§6.9每个崩溃窗口注入；取消递增epoch后旧Run停止/消耗仍可结算；wall/transition耗尽仍可收尾；stop确认/未知/旧绑定缺失；数据库写失败 | Integration：停止/epoch/持久化对照，不仅内存断言 |
 | S5.A3 | Flow与Goal同时争唯一宿主槽位及v1 active原子迁移，旧构造函数不得绕账本；两Run同时争最后工具调用/时间/候选额度；业务状态边/失败传播cleanup的transition精确计数；准备与规则check也消耗；未知停止不归还reserved | Integration：used/reserved/available不变量及拒绝原因 |
 | S5.A3 | 两Goal同能力不同输入；owner越权；一个Goal未知停止占槽时另一排队Goal仍按自身墙钟到期收束，不伪成功 | Integration：隔离产物和授权；全局容量确实受占用 |
