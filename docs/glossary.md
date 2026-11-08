@@ -104,3 +104,7 @@
 | TransitionRule | Runtime内建的状态转移契约，固定事件、前态、条件、变更、动作及原子边界。 | — |
 | TransitionDecision | 针对当前快照计算的待提交变更与动作，CAS失败后须丢弃并重新求值。 | — |
 | RunRequest | 同Goal内持久保存的待执行调用请求，不占槽位且最多物化为一个Run。 | — |
+| CapabilityPackage | 可信宿主加载并冻结的应用能力注册清单及其Schema、Skill和领域规则资源。 | — |
+| CheckInput | Runtime以冻结检查请求、规则和授权目标构造的只读checker执行输入。 | — |
+| RuleSet | 应用声明的版本化领域检查项、通过条件及证据要求集合。 | — |
+| RegistrationReceipt | 能力包全部验证并注册后返回的锁定摘要和已注册引用回执。 | — |

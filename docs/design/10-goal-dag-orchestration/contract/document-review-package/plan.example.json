@@ -1,0 +1,37 @@
+{
+  "protocol_version": 1,
+  "goal_spec_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "profile_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "planning_mode": "autonomous",
+  "nodes": {
+    "review": {
+      "capability_ref": "review@1",
+      "depends_on": [],
+      "inputs": {
+        "question": {
+          "kind": "goal",
+          "pointer": "/goal"
+        },
+        "document": {
+          "kind": "goal",
+          "pointer": "/inputs/document_text"
+        }
+      }
+    }
+  },
+  "outputs": {
+    "report": {
+      "node_id": "review",
+      "port": "report"
+    }
+  },
+  "checks": {
+    "quality": {
+      "phase": "goal_final",
+      "checker_ref": "quality@1",
+      "targets": [
+        "report"
+      ]
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "properties": {
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "inputs": {
+      "type": "object"
+    },
+    "goal_spec_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "profile_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "planning_mode": {
+      "enum": [
+        "autonomous",
+        "workflow"
+      ]
+    },
+    "capability_catalog": {
+      "type": "array",
+      "items": {
+        "$ref": "taskloop:node-contract:v1"
+      },
+      "maxItems": 256
+    }
+  },
+  "required": [
+    "goal",
+    "inputs",
+    "goal_spec_digest",
+    "profile_digest",
+    "planning_mode",
+    "capability_catalog"
+  ],
+  "additionalProperties": false
+}

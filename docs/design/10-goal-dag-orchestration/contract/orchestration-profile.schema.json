@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "taskloop:orchestration-profile:v1",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "maxLength": 16
+    },
+    "goal_input_schema": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "planner_entry_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    "planning_input_schemas": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "minItems": 0,
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "templates": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "minItems": 0,
+      "maxItems": 64,
+      "uniqueItems": true
+    },
+    "outputs": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "minProperties": 1,
+      "maxProperties": 256,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "schema_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "allowed_capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_ref",
+          "allowed_capabilities"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "final_outputs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    "checks": {
+      "$ref": "taskloop:check-requirements:v1"
+    },
+    "allowed_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      },
+      "minItems": 0,
+      "maxItems": 64,
+      "uniqueItems": true
+    },
+    "goal_selectors": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^(?:/(?:[^~/]|~[01])*)+$",
+        "maxLength": 512
+      },
+      "maxProperties": 256,
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 160
+      }
+    }
+  },
+  "required": [
+    "id",
+    "version",
+    "goal_input_schema",
+    "planner_entry_ref",
+    "capabilities",
+    "planning_input_schemas",
+    "templates",
+    "outputs",
+    "final_outputs",
+    "checks",
+    "allowed_tools",
+    "goal_selectors"
+  ],
+  "additionalProperties": false
+}

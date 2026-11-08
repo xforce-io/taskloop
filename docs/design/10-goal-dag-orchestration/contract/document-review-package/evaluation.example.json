@@ -1,0 +1,20 @@
+{
+  "protocol_version": 1,
+  "verdict": "pass",
+  "results": [
+    {
+      "id": "grounded",
+      "verdict": "pass",
+      "message": "示例：发现可由原文支持。",
+      "evidence_refs": [
+        "example-report",
+        "goal-input:document_text"
+      ]
+    }
+  ],
+  "evidence_refs": [
+    "example-report",
+    "goal-input:document_text"
+  ],
+  "violations": []
+}

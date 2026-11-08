@@ -1,0 +1,243 @@
+{
+  "protocol_version": 1,
+  "id": "document-review-package",
+  "version": "1",
+  "schemas": {
+    "goal-input": {
+      "path": "schemas/goal-input.json",
+      "sha256": "e42de72f79a01566054de2878f9481e2e3c42580f28484f48ad91917d210bab9"
+    },
+    "text": {
+      "path": "schemas/text.json",
+      "sha256": "e44f29147cb0898acea625b02a2ecaec4f3ac8454494b33254cedb411c20ed9f"
+    },
+    "review-input": {
+      "path": "schemas/review-input.json",
+      "sha256": "36ad07eb3953a86331dbb747658a0a707fcb296f0c69f196488d76f305a33666"
+    },
+    "report": {
+      "path": "schemas/report.json",
+      "sha256": "d1c2a382d5bc237d566bfb1219dd7689d478486e9d2ddafd810af5c7830b6752"
+    },
+    "planner-input": {
+      "path": "schemas/planner-input.json",
+      "sha256": "505634fbb2cf14dbaf84944b34e2d5d379a4d9c2d168c80434f7105723aa95b5"
+    },
+    "goal-text": {
+      "path": "schemas/goal-text.json",
+      "sha256": "1c2afa1e12dc05d86a8874c8499df6a696cbd42778952669b5e2b000d6cf4899"
+    }
+  },
+  "skills": {
+    "document-review": {
+      "path": "skills/document-review",
+      "sha256": "4b9033088e9530476982290dfb031fb45a1517c58ad02662b5f0c01e2bb21f9e"
+    }
+  },
+  "rule_sets": {
+    "document-quality": {
+      "path": "rules/document-quality.json",
+      "sha256": "fac2ce77dd4989da96fad0d93737c86618e30b9c7e6ec52d57141d9c49363829"
+    }
+  },
+  "entries": {
+    "planner@1": {
+      "instruction": "根据冻结目录与目标生成符合PlanProposal的计划，不增加目录外能力、权限或检查。",
+      "executor": "milkie",
+      "skills": [],
+      "tools": [],
+      "input_schema": "planner-input",
+      "requires": [],
+      "outputs": {
+        "proposal": {
+          "schema": "_tl.planner-result@1",
+          "required": true
+        }
+      },
+      "gate": "_tl.schema@1",
+      "outcomes": [
+        "completed"
+      ]
+    },
+    "review@1": {
+      "instruction": "按document-review方法审阅document，回答question并提交报告。",
+      "executor": "milkie",
+      "skills": [
+        "document-review"
+      ],
+      "tools": [],
+      "input_schema": "review-input",
+      "requires": [],
+      "outputs": {
+        "report": {
+          "schema": "report",
+          "required": true
+        }
+      },
+      "gate": "_tl.schema@1",
+      "outcomes": [
+        "completed"
+      ]
+    },
+    "quality@1": {
+      "instruction": "严格按只读CheckInput中的规则核对目标报告。仅返回Evaluation候选；不要生成或修改请求身份。",
+      "executor": "milkie",
+      "skills": [],
+      "tools": [],
+      "input_schema": "_tl.check-input@1",
+      "requires": [],
+      "outputs": {
+        "evaluation": {
+          "schema": "_tl.evaluation-candidate@1",
+          "required": true
+        }
+      },
+      "gate": "_tl.schema@1",
+      "outcomes": [
+        "completed"
+      ]
+    }
+  },
+  "entry_budgets": {
+    "planner@1": {
+      "policy_id": "example-bounded",
+      "max_run_ms": 120000,
+      "max_check_ms": 1000,
+      "max_tool_calls": 8,
+      "submission_reserve": 2,
+      "finalize_before_ms": 1000,
+      "max_model_iterations": null,
+      "max_candidate_bytes": 262144
+    },
+    "review@1": {
+      "policy_id": "example-bounded",
+      "max_run_ms": 120000,
+      "max_check_ms": 1000,
+      "max_tool_calls": 8,
+      "submission_reserve": 2,
+      "finalize_before_ms": 1000,
+      "max_model_iterations": null,
+      "max_candidate_bytes": 262144
+    },
+    "quality@1": {
+      "policy_id": "example-bounded",
+      "max_run_ms": 120000,
+      "max_check_ms": 1000,
+      "max_tool_calls": 8,
+      "submission_reserve": 2,
+      "finalize_before_ms": 1000,
+      "max_model_iterations": null,
+      "max_candidate_bytes": 262144
+    }
+  },
+  "capabilities": {
+    "review@1": {
+      "protocol_version": 1,
+      "id": "review",
+      "version": "1",
+      "kind": "work",
+      "inputs": {
+        "question": {
+          "schema_ref": "goal-text",
+          "required": true,
+          "source_policy": {
+            "kind": "goal",
+            "pointer": "/goal"
+          }
+        },
+        "document": {
+          "schema_ref": "text",
+          "required": true,
+          "source_policy": {
+            "kind": "goal",
+            "pointer": "/inputs/document_text"
+          }
+        }
+      },
+      "outputs": {
+        "report": {
+          "schema_ref": "report"
+        }
+      },
+      "gate": "_tl.schema@1",
+      "max_rule_check_ms": 1000,
+      "members": {
+        "reviewer": {
+          "entry_ref": "review@1",
+          "input_bindings": {
+            "question": {
+              "port": "question",
+              "pointer": ""
+            },
+            "document": {
+              "port": "document",
+              "pointer": ""
+            }
+          }
+        }
+      },
+      "join": {
+        "kind": "object-by-worker",
+        "outputs": {
+          "report": {
+            "kind": "member",
+            "member_id": "reviewer",
+            "slot": "report"
+          }
+        }
+      }
+    }
+  },
+  "checkers": {
+    "quality@1": {
+      "entry_ref": "quality@1",
+      "rules_ref": "document-quality",
+      "result_slot": "evaluation",
+      "fresh_context": true,
+      "goal_input_fields": [
+        "document_text"
+      ]
+    }
+  },
+  "profiles": {
+    "document-review@1": {
+      "id": "document-review",
+      "version": "1",
+      "goal_input_schema": "goal-input",
+      "planner_entry_ref": "planner@1",
+      "capabilities": [
+        "review@1"
+      ],
+      "planning_input_schemas": [],
+      "templates": [],
+      "outputs": {
+        "report": {
+          "schema_ref": "report",
+          "allowed_capabilities": [
+            "review@1"
+          ]
+        }
+      },
+      "final_outputs": [
+        "report"
+      ],
+      "checks": [
+        {
+          "id": "quality",
+          "phase": "goal_final",
+          "checker_ref": "quality@1",
+          "rules_digest": "fac2ce77dd4989da96fad0d93737c86618e30b9c7e6ec52d57141d9c49363829",
+          "target_outputs": [
+            "report"
+          ],
+          "required": true
+        }
+      ],
+      "allowed_tools": [],
+      "goal_selectors": {
+        "/goal": "goal-text",
+        "/inputs/document_text": "text"
+      }
+    }
+  }
+}
