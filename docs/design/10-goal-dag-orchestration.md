@@ -1,6 +1,6 @@
 # TaskLoop #10：Goal Spec 与受检 DAG 编排
 
-版本：L2 v0.6.1；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
+版本：L2 v0.6.2；状态：Draft，供技术评审，未实现、未自批。[Issue #10](https://github.com/xforce-io/taskloop/issues/10)。
 
 L1 依据：[概要提案与归属修订](https://github.com/xforce-io/taskloop/issues/10#issuecomment-6715457806)；产品路径与验收冻结依据为提交 `16a68d48abb829dc14f13d0e0f4d3ed8c754558c` 的 v0.2 草稿。用户在确认该文档只有 L1 深度后明确要求“go L2”，本次据此完成技术规格，不重复索要 L2 编写许可，也不视为未来实现候选的人审批准。
 
@@ -362,7 +362,7 @@ state.sqlite v2在同一库新增Goal相关存储，旧executions/commands/artif
 
 首次以cancel建立终结意图时使Goal epoch递增一次、持久化intent、阻止新派发，再取消在途Token并请求native stop。每个Run确认后分别释放容量/结算，不能等一个全局bool覆盖全部。收尾窗口沿用现有15秒上限，并对剩余工作明确pending；超过窗口返回停止未确认，原始槽位保留。取消后的旧Run停止回报按其原始执行身份结算，不因Goal新epoch或期限而丢弃。之后仅允许对同一未知Run进行有界stop_or_confirm探测，不是再执行；不清零预算或主动重放。
 
-前台stop/SIGINT的intent为pause，按§6.5.1允许原期限内的干净完成、禁止新派发。等待节点的wait_id/nonce/expires_at及补充事实原样持久化；暂停不延长期限、不重建nonce，暂停期间拒绝signal。pause事务同时释放所有started=false Run的槽位及未消费时间/字节预留，将其标suspended；任何start CAS看到pause意图必须拒绝。计量过的准备成本及已计入max_runs的次数不退款。resume为同一RunId重新取得预留/槽位，不再增加max_runs，随后仍只允许首次启动。pause必须在15秒窗口内完成已进入checking的节点内建汇合/节点Gate并接纳公共输出；任何checking节点尚未接纳则blocked/interrupted，保留成员结果，resume不得重算该未提交汇合冒充成功。已齐员但尚未进入checking的节点可在显式resume后首次汇合。全部已启动Run结算且无未决checking节点，或原本只有等待/未启动工作，才stopped；未接纳的已启动工作不能恢复成ready，确认停止后仍blocked/interrupted，需显式新Goal关联已接受产物。SIGKILL后同类处理；旧绑定缺失不能用新适配器清除未知。
+前台stop/SIGINT的intent为pause，按§6.5.1允许原期限内的干净完成、禁止新派发。等待节点的wait_id/nonce/expires_at及补充事实原样持久化；暂停不延长期限、不重建nonce，暂停期间拒绝signal。pause事务仅处理所选Goal G所属（owner_kind=goal且owner_id=G.goal_id）的started=false Run，释放这些Run的槽位及未消费时间/字节预留并标suspended；其他Goal和Flow的reserved不在此事务修改。每个start CAS只检查该Run所属Goal的pause意图，命中时必须拒绝；一个Goal的pause不阻止其他owner通过共享账本正常准入。计量过的准备成本及已计入max_runs的次数不退款。resume为同一RunId重新取得预留/槽位，不再增加max_runs，随后仍只允许首次启动。pause必须在15秒窗口内完成已进入checking的节点内建汇合/节点Gate并接纳公共输出；任何checking节点尚未接纳则blocked/interrupted，保留成员结果，resume不得重算该未提交汇合冒充成功。已齐员但尚未进入checking的节点可在显式resume后首次汇合。全部已启动Run结算且无未决checking节点，或原本只有等待/未启动工作，才stopped；未接纳的已启动工作不能恢复成ready，确认停止后仍blocked/interrupted，需显式新Goal关联已接受产物。SIGKILL后同类处理；旧绑定缺失不能用新适配器清除未知。
 
 resume的合法前置为stopped、无未结算的started Run、绑定一致且wall/规划/等待期限仍有效；恢复从未启动的成员、尚未进入checking的首次汇合及未过期waiting_input，保留既有成员成功结果及同一等待身份。finished、stopping、blocked/interrupted不能以resume变成running，明确返回not_resumable或stop_unknown；blocked只做可信停止对账，不能重放。suspended的Run不占物理槽位，started/stop_unknown仍占，取消/终结中从未启动的Run直接cleanup/settled。崩溃时没有started工作、只有reserved/等待的目标，重开恢复步骤将其标stopped/host_interrupted，先处理期限，再等显式resume；不隐式重启模型。
 
