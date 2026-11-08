@@ -80,3 +80,17 @@
 | Planner | 在能力与约束内生成计划提案、不拥有执行派发或状态提交权的 Agent。 | — |
 | DAG | 在锁定后不含回边、以明确依赖连接工作节点的有向无环计划。 | — |
 | 节点 | DAG 内具有公共输入输出契约、由一个或多个 Worker 完成的工作单元。 | — |
+| Capability | 宿主注册并锁定输入输出、执行方式、权限、预算和检查要求的可用节点能力。 | — |
+| GoalSnapshot | 通过公开接口读取的目标、计划、节点、评价、预算及停止事实的版本化视图。 | — |
+| PlanProposal | Planner 返回且尚未经 Runtime 接纳的结构化 DAG 候选。 | — |
+| NodeContract | 规定节点公共端口、Worker成员、汇合和接纳要求的不可变能力契约。 | — |
+| EvaluationReceipt | Runtime 将评价结果与检查身份、规则版本及确切对象摘要绑定后形成的接纳事实。 | — |
+| GoalBudget | 目标下规划、检查和业务执行共享且以预留和结算约束的预算账目。 | — |
+| GoalRequest | 携带幂等键、授权引用与Goal Spec的提交请求信封。 | — |
+| GoalGrant | 宿主授予调用方使用指定Profile、能力与目标预算的授权契约。 | — |
+| CheckRequirement | 冻结在Profile中的必需检查身份、阶段、规则及目标输出声明。 | — |
+| CheckRequest | Runtime为一次检查生成、绑定确切对象与授权证据范围的不可复用请求。 | — |
+| GoalClient | 不取得执行所有权、仅查询公开事实或递交本地命令的客户端。 | — |
+| GoalSignalRequest | 绑定等待身份、版本和幂等键的目标补充输入请求。 | — |
+| OrchestrationRegistry | 宿主显式注册并锁定Profile、能力、模板、检查和汇合实现的目录。 | — |
+| OrchestrationOptions | 宿主显式启用编排并规定容量及协议限制的配置。 | — |
