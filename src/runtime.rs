@@ -1358,8 +1358,11 @@ async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestra
                     }
                 }
                 if let Ok(current) = inner.store.goal_load(&row.id) {
+                    let pending_evaluations = core.pending_evaluation_nodes(&current.record);
                     for (node, state) in &current.record.nodes {
-                        if state.view.status == crate::GoalNodeStatus::Checking {
+                        if state.view.status == crate::GoalNodeStatus::Checking
+                            || pending_evaluations.contains(node)
+                        {
                             let _ = core.finish_node_check(&row.id, node);
                         }
                     }

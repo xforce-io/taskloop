@@ -331,6 +331,11 @@ impl GoalCore {
         }
         let observed = self.inner.store.observe_goal_clock(&self.clock)?;
         let mut next = row.record.clone();
+        if observed.trusted {
+            self.apply_due_deadlines(&mut next, row.revision + 1, observed.utc_ms);
+            self.cleanup_terminal(&mut next)?;
+        }
+        let control_base = next.clone();
         let apply = (|| -> Result<()> {
             if row.revision != expected_revision {
                 return Err(Error::new(
@@ -339,7 +344,7 @@ impl GoalCore {
                     "refresh the Goal before submitting a different command",
                 ));
             }
-            if row.record.status == GoalStatus::Finished {
+            if next.status == GoalStatus::Finished {
                 return Err(Error::new("not_resumable", "/goal", "Goal is finished"));
             }
             match command {
@@ -420,7 +425,7 @@ impl GoalCore {
                 },
             },
             Err(error) => {
-                next = row.record.clone();
+                next = control_base;
                 CommandResponse::Rejected { error }
             }
         };
@@ -450,7 +455,9 @@ impl GoalCore {
         )?;
         match saved {
             GoalCommit::Saved(saved) => {
-                if !matches!(command, GoalControlCommand::Resume) {
+                if !matches!(command, GoalControlCommand::Resume)
+                    || saved.record.terminal_intent.is_some()
+                {
                     self.cancel_goal_handles(&saved.record);
                 }
                 self.inner.notify.notify_one();
@@ -607,6 +614,7 @@ impl GoalCore {
                     .nodes
                     .values()
                     .all(|n| n.view.status != GoalNodeStatus::Checking)
+                && self.pending_evaluation_nodes(record).is_empty()
             {
                 record.status = GoalStatus::Stopped;
             } else if now.saturating_sub(pause) >= 15_000 {
@@ -2709,5 +2717,390 @@ mod tests {
             ended.revision
         );
         runtime.shutdown().await.unwrap();
+    }
+    struct RecoveringStorageFault {
+        stage: &'static str,
+        inner: Mutex<Option<Arc<Inner>>>,
+    }
+    #[async_trait::async_trait]
+    impl Executor for RecoveringStorageFault {
+        fn capabilities(&self) -> ExecutorCapabilities {
+            ExecutorCapabilities::MANAGED
+        }
+        fn enforces_json_candidate_limit(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            invocation: Invocation,
+            tools: Arc<dyn ToolBridge>,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> ExecutionOutcome {
+            let role = tools.goal_context().unwrap().role;
+            let target = matches!(
+                (self.stage, &role),
+                ("planner", GoalRunRole::Planner { .. })
+                    | ("worker", GoalRunRole::NodeMember { .. })
+                    | ("checker", GoalRunRole::FinalCheck { .. })
+            );
+            if target {
+                let (slot, value) = match &role {
+                    GoalRunRole::Planner { .. } => (
+                        "proposal",
+                        json!({"protocol_version":1,"kind":"needs_input","input_schema_ref":"text","reason":"probe"}),
+                    ),
+                    GoalRunRole::NodeMember { .. } => {
+                        ("report", json!({"summary":"failed attempt","findings":[]}))
+                    }
+                    _ => {
+                        let input: CheckInput =
+                            serde_json::from_value(invocation.stage_input.clone()).unwrap();
+                        let results = input.rules.rules.iter().map(|rule| json!({"id":rule.id,"verdict":"pass","message":"probe","evidence_refs":input.evidence_refs})).collect::<Vec<_>>();
+                        (
+                            "evaluation",
+                            json!({"protocol_version":1,"verdict":"pass","results":results,"evidence_refs":input.evidence_refs,"violations":[]}),
+                        )
+                    }
+                };
+                let inner = self.inner.lock().unwrap().clone().unwrap();
+                rusqlite::Connection::open(inner.options.store_dir.join("state.sqlite")).unwrap().execute_batch("CREATE TRIGGER reject_once BEFORE INSERT ON goal_artifacts BEGIN SELECT RAISE(ABORT, 'review regression storage fault'); END;").unwrap();
+                let error = tools
+                    .call("artifact.write", json!({"slot":slot,"value":value}))
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code, "storage_error");
+                rusqlite::Connection::open(inner.options.store_dir.join("state.sqlite"))
+                    .unwrap()
+                    .execute_batch("DROP TRIGGER reject_once")
+                    .unwrap();
+            }
+            CompleteGoal(EvaluationVerdict::Pass)
+                .execute(invocation, tools, cancel)
+                .await
+        }
+    }
+    #[tokio::test]
+    async fn review_regression_storage_failure_survives_successful_candidate_retry() {
+        for stage in ["planner", "worker", "checker"] {
+            let executor = Arc::new(RecoveringStorageFault {
+                stage,
+                inner: Mutex::new(None),
+            });
+            let (_dir, runtime, goals, caller, mut request) = setup(Some(executor.clone())).await;
+            *executor.inner.lock().unwrap() = Some(runtime.inner.clone());
+            request.spec.planning.max_revisions = 0;
+            let id = goals.submit(request, &caller).await.unwrap().goal_id;
+            for _ in 0..12 {
+                goals.core.advance(&id).unwrap();
+                if let Some(run) = goals.core.materialize(&id).unwrap() {
+                    goals
+                        .core
+                        .prepare_execution(&id, &run)
+                        .unwrap()
+                        .unwrap()
+                        .execute()
+                        .await
+                        .unwrap();
+                    goals.core.consume_return(&id, &run).unwrap();
+                }
+                let snapshot = goals.get(&id, &caller).await.unwrap();
+                for (node, state) in &snapshot.nodes {
+                    if state.status == GoalNodeStatus::Checking {
+                        goals.core.finish_node_check(&id, node).unwrap();
+                    }
+                }
+                if goals.get(&id, &caller).await.unwrap().status == GoalStatus::Finished {
+                    break;
+                }
+            }
+            let ended = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(
+                ended.outcome,
+                Some(GoalOutcome::Failed),
+                "storage failure cannot become achieved"
+            );
+            assert!(ended.runs.values().any(|run| {
+                run.error
+                    .as_ref()
+                    .is_some_and(|error| error.code == "storage_error")
+            }));
+            if stage == "worker" {
+                assert!(ended.nodes["review"].outputs.is_empty());
+            }
+            assert!(ended.artifacts.iter().any(|a| !a.accepted
+                && a.producer_run_id.as_ref().is_some_and(|id| {
+                    ended.runs[id]
+                        .error
+                        .as_ref()
+                        .is_some_and(|e| e.code == "storage_error")
+                })));
+            assert!(ended.budget.reserved.is_empty());
+            assert_eq!(ended.progress.goal_occupied_slots, 0);
+            assert!(goals.evaluations(&id, &caller).await.unwrap().is_empty());
+            runtime.shutdown().await.unwrap();
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn review_regression_cancel_cannot_replace_an_already_due_deadline() {
+        for kind in ["wall", "planning", "input"] {
+            let (_dir, runtime, goals, caller, mut request) =
+                setup_custom(Some(Arc::new(RequestPlanningInput)), false, |registry| {
+                    registry
+                        .profiles
+                        .get_mut("document-review@1")
+                        .unwrap()
+                        .planning_input_schemas = vec!["text".into()];
+                })
+                .await;
+            if kind == "wall" {
+                request.spec.limits.max_wall_ms = 50;
+            }
+            if kind == "planning" {
+                request.spec.planning.max_planning_ms = 50;
+            }
+            let id = goals.submit(request, &caller).await.unwrap().goal_id;
+            if kind == "input" {
+                let run = goals.core.materialize(&id).unwrap().unwrap();
+                goals
+                    .core
+                    .prepare_execution(&id, &run)
+                    .unwrap()
+                    .unwrap()
+                    .execute()
+                    .await
+                    .unwrap();
+                goals.core.consume_return(&id, &run).unwrap();
+                let row = goals.core.inner.store.goal_load(&id).unwrap();
+                let mut next = row.record.clone();
+                next.waiting.values_mut().next().unwrap().expires_at_utc_ms =
+                    goals.core.clock.observe().unwrap().utc_ms + 50;
+                goals
+                    .core
+                    .commit_goal(
+                        &row,
+                        &next,
+                        GoalWriteGuard::Cleanup,
+                        None,
+                        &Default::default(),
+                        &goals.core.clock,
+                    )
+                    .unwrap();
+            }
+            let before = goals.get(&id, &caller).await.unwrap();
+            tokio::time::advance(std::time::Duration::from_millis(51)).await;
+            let _ = goals
+                .cancel(&id, "cancel-at-expiry", before.revision, &caller)
+                .await;
+            let after = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(after.outcome, Some(GoalOutcome::Failed), "{kind}");
+            let expected = match kind {
+                "wall" => "wall_timeout",
+                "planning" => "planning_timeout",
+                _ => "input_timeout",
+            };
+            assert_eq!(after.terminal_intent.as_ref().unwrap().reason, expected);
+            let _ = goals
+                .cancel(&id, "cancel-at-expiry", before.revision, &caller)
+                .await;
+            assert_eq!(
+                goals.get(&id, &caller).await.unwrap().revision,
+                after.revision
+            );
+            runtime.shutdown().await.unwrap();
+        }
+    }
+
+    struct DeferredCheckpoint(EvaluationVerdict);
+    #[async_trait::async_trait]
+    impl Executor for DeferredCheckpoint {
+        fn capabilities(&self) -> ExecutorCapabilities {
+            ExecutorCapabilities::MANAGED
+        }
+        fn enforces_json_candidate_limit(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            invocation: Invocation,
+            tools: Arc<dyn ToolBridge>,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> ExecutionOutcome {
+            match tools.goal_context().unwrap().role {
+                GoalRunRole::Planner { .. } => {
+                    let mut plan: Value = serde_json::from_str(include_str!("../../docs/design/10-goal-dag-orchestration/contract/document-review-package/plan.example.json")).unwrap();
+                    plan["goal_spec_digest"] = invocation.stage_input["goal_spec_digest"].clone();
+                    plan["profile_digest"] = invocation.stage_input["profile_digest"].clone();
+                    plan["nodes"]["draft"] = plan["nodes"]["review"].clone();
+                    plan["nodes"]["check"] = json!({"capability_ref":"checkpoint@1","depends_on":["draft"],"inputs":{"report":{"kind":"node","node_id":"draft","port":"report","pointer":""}}});
+                    plan["nodes"]["review"]["depends_on"] = json!(["check"]);
+                    plan["outputs"]["draft"] = json!({"node_id":"draft","port":"report"});
+                    plan["checks"]["draft-check"] = json!({"phase":"node_checkpoint","checker_ref":"quality@1","targets":["draft"],"evaluation_node_id":"check"});
+                    tools.call("artifact.write", json!({"slot":"proposal","value":{"protocol_version":1,"kind":"proposal","proposal":plan}})).await.unwrap();
+                }
+                GoalRunRole::NodeMember { node_id, .. } if node_id == "check" => {
+                    let input: CheckInput = serde_json::from_value(invocation.stage_input).unwrap();
+                    let verdict = self.0.clone();
+                    let results = input.rules.rules.iter().map(|rule| json!({"id":rule.id,"verdict":verdict,"message":"Deferred checkpoint","evidence_refs":input.evidence_refs})).collect::<Vec<_>>();
+                    tools.call("artifact.write", json!({"slot":"evaluation","value":{"protocol_version":1,"verdict":verdict,"results":results,"evidence_refs":input.evidence_refs,"violations":[]}})).await.unwrap();
+                }
+                _ => {
+                    return CompleteGoal(EvaluationVerdict::Pass)
+                        .execute(invocation, tools, cancel)
+                        .await;
+                }
+            }
+            ExecutionOutcome::Completed { usage: json!({}) }
+        }
+    }
+    #[tokio::test]
+    async fn review_regression_paused_checkpoint_retries_projection_after_budget_release() {
+        for verdict in [
+            EvaluationVerdict::Pass,
+            EvaluationVerdict::Fail,
+            EvaluationVerdict::Error,
+        ] {
+            let (_dir, runtime, goals, caller, request) = setup_custom(Some(Arc::new(DeferredCheckpoint(verdict.clone()))), false, |registry| {
+                registry.entries.get_mut("quality@1").unwrap().budget.max_run_ms = Some(500);
+                registry.register_capability(serde_json::from_value(json!({"protocol_version":1,"id":"checkpoint","version":"1","kind":"work","inputs":{"report":{"schema_ref":"report","required":true,"source_policy":{"kind":"artifact"}}},"outputs":{"evaluation":{"schema_ref":"_tl.evaluation-candidate@1"}},"gate":"_tl.schema@1","max_rule_check_ms":2000,"members":{"checker":{"entry_ref":"quality@1","input_mode":"check_request"}},"join":{"kind":"object-by-worker","outputs":{"evaluation":{"kind":"member","member_id":"checker","slot":"evaluation"}}},"evaluation":{"purpose":"checkpoint","checker_ref":"quality@1","target_ports":{"draft":"report"}}})).unwrap()).unwrap();
+                let profile = registry.profiles.get_mut("document-review@1").unwrap();
+                profile.capabilities.push("checkpoint@1".into());
+                profile.outputs.insert("draft".into(), profile.outputs["report"].clone());
+                let mut check = profile.checks[0].clone();
+                check.id = "draft-check".into(); check.phase = CheckPhase::NodeCheckpoint;
+                check.target_outputs = vec!["draft".into()]; check.before_outputs = Some(vec!["report".into()]);
+                profile.checks.push(check);
+            }).await;
+            let id = goals.submit(request, &caller).await.unwrap().goal_id;
+            let checkpoint_run = loop {
+                goals.core.advance(&id).unwrap();
+                let run = goals.core.materialize(&id).unwrap().unwrap();
+                goals
+                    .core
+                    .prepare_execution(&id, &run)
+                    .unwrap()
+                    .unwrap()
+                    .execute()
+                    .await
+                    .unwrap();
+                let returned = goals.get(&id, &caller).await.unwrap();
+                if matches!(&returned.runs[&run].role, GoalRunRole::NodeMember { node_id, .. } if node_id == "check")
+                {
+                    break run;
+                }
+                goals.core.consume_return(&id, &run).unwrap();
+                for (node, state) in &goals.get(&id, &caller).await.unwrap().nodes {
+                    if state.status == GoalNodeStatus::Checking {
+                        goals.core.finish_node_check(&id, node).unwrap();
+                    }
+                }
+            };
+            let returned = goals.get(&id, &caller).await.unwrap();
+            goals
+                .stop(&id, "pause-checkpoint", returned.revision, &caller)
+                .await
+                .unwrap();
+            // Hold the same active-time ledger capacity as a sibling Run. No native sibling is claimed.
+            let row = goals.core.inner.store.goal_load(&id).unwrap();
+            let mut next = row.record.clone();
+            let amount = GoalBudgetAmount {
+                active_ms: next
+                    .budget
+                    .available(&next.prepared.effective_limits)
+                    .active_ms,
+                tool_calls: 0,
+                candidate_bytes: 0,
+            };
+            assert_eq!(
+                next.budget
+                    .reserve(
+                        "held-sibling-reservation",
+                        amount,
+                        None,
+                        false,
+                        &next.prepared.effective_limits
+                    )
+                    .unwrap(),
+                BudgetAdmission::Granted
+            );
+            goals
+                .core
+                .commit_goal(
+                    &row,
+                    &next,
+                    GoalWriteGuard::Cleanup,
+                    None,
+                    &Default::default(),
+                    &goals.core.clock,
+                )
+                .unwrap();
+            goals.core.consume_return(&id, &checkpoint_run).unwrap();
+            let pending = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(pending.nodes["check"].status, GoalNodeStatus::Running);
+            assert_eq!(
+                pending.status,
+                GoalStatus::Stopping,
+                "pending evaluation must stay in pause cleanup"
+            );
+            assert!(
+                pending.nodes["check"]
+                    .members
+                    .values()
+                    .all(|m| m.status == GoalMemberStatus::Succeeded)
+            );
+            let row = goals.core.inner.store.goal_load(&id).unwrap();
+            let mut next = row.record.clone();
+            next.budget
+                .settle(
+                    "held-sibling-reservation",
+                    1,
+                    0,
+                    true,
+                    &next.prepared.effective_limits,
+                )
+                .unwrap();
+            goals
+                .core
+                .commit_goal(
+                    &row,
+                    &next,
+                    GoalWriteGuard::Cleanup,
+                    None,
+                    &Default::default(),
+                    &goals.core.clock,
+                )
+                .unwrap();
+            goals.core.maintain(&id).unwrap();
+            goals.core.finish_node_check(&id, "check").unwrap();
+            assert_eq!(
+                goals.get(&id, &caller).await.unwrap().nodes["check"].status,
+                GoalNodeStatus::Checking
+            );
+            goals.core.finish_node_check(&id, "check").unwrap();
+            goals.core.maintain(&id).unwrap();
+            let ended = goals.get(&id, &caller).await.unwrap();
+            assert_eq!(
+                ended.outcome,
+                match verdict {
+                    EvaluationVerdict::Pass => None,
+                    EvaluationVerdict::Fail => Some(GoalOutcome::NotMet),
+                    EvaluationVerdict::Error => Some(GoalOutcome::Failed),
+                }
+            );
+            assert_eq!(
+                ended.status,
+                if verdict == EvaluationVerdict::Pass {
+                    GoalStatus::Stopped
+                } else {
+                    GoalStatus::Finished
+                }
+            );
+            assert_eq!(goals.evaluations(&id, &caller).await.unwrap().len(), 1);
+            assert_eq!(ended.budget.runs_used, 3);
+            assert!(ended.nodes["review"].outputs.is_empty());
+            let revision = ended.revision;
+            goals.core.maintain(&id).unwrap();
+            assert_eq!(goals.get(&id, &caller).await.unwrap().revision, revision);
+            runtime.shutdown().await.unwrap();
+        }
     }
 }

@@ -200,3 +200,12 @@
 - 核对S5.A1时发现，原规划signal用例证明正常补充/暂停/重放，但没有直接覆盖“signal已持久化、后续调用请求尚未物化”的恢复窗口。本轮仅补该测试，不改生产代码：恢复保留1个pending请求/原输入摘要、1个SignalFact及原回执，零新Run/占槽；重复恢复和旧revision命令重放均不升revision，显式resume后仅为原请求首次创建第二个Planner Run并锁定计划。
 - 新测试最初误用不存在的GoalCommandReceipt.replayed字段导致编译失败（planning-signal-pending-recovery.log）；按实际公开协议改为整份回执逐值相等，未新增API或弱化幂等断言。聚焦复验通过（planning-signal-pending-recovery-retest.log）。该例使用实际Store持久化/恢复入口，不声称做了OS进程崩溃或真实模型调用。
 - 冻结套件、S5机制明细核对与新候选CI继续保存各自SHA；formal verify/preflight、独立代码review、合入及适用release仍未完成。历史接入选择未答复，本轮真实模型调用数仍为0。
+
+## 实现检查点二十一（2026-11-10）
+
+- 148ff77完成正式受控回归225通过；真实Workflow、Inquiry正例/未达标例及CLI闭环完成，原18项绑定的preflight通过。真实正例12条引用、负例6条引用均回溯保存原文；Rust Run的Trace internal_unavailable按原样保留，不能据业务通过声称完整Trace。专用登录失效及negative-3写作超时均保留原Goal失败，不改判。
+- 首轮独立原生Codex代码审查覆盖完整合并差异，实际模型按本机绑定为gpt-6.1-sol、上下文独立且只读；结果CHANGES_REQUESTED、human required，发现4个P2，尚未进入发布。累计48/50次模型调用，历史及审查原文保存在target/verify-taskloop/10-reverify/resume-148ff77，不将设计审查计为代码审查。
+- 修复前分别复现：工具写库失败后Executor重试成功导致achieved；预算延后评价投影时暂停提前Stopped；到期维护前cancel覆盖timeout；CliDriver拒绝恢复另一Goal但该Goal已被修改。前两项由受控Executor/实际SQLite故障及持久预算账本驱动，不冒充真实Harness故障。
+- 工具管线已记录的存储错误优先于Executor成功结果，仍保留物理停止和实际计量；期限处理由maintain与控制命令共用，拒绝或重放命令不能抹去已到期事实；前台选择在resume副作用前校验。
+- 已成功评价成员因预留不足尚未开始公共投影时，暂停收尾保持未决；协调循环可重试预留，经NodeCheckStart存储权限与revision CAS进入Checking，仍须原成员/epoch、可信时钟和15秒暂停窗口，不借cleanup放宽业务提交。未派发后继、不重跑评价成员。
+- 四项聚焦回归通过，包含Planner/业务/最终检查存储故障、三类期限、checkpoint pass/fail/error及跨Goal拒绝副作用；原18项产品验收和L2 v0.10.17不变。新候选完整套件、真实路径复验及再次独立审查仍待完成；旧SHA通过证据不改挂到新候选。

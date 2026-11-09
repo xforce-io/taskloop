@@ -37,7 +37,7 @@ impl CliDriver {
             selected: None,
         })
     }
-    fn select(&mut self, id: &str) -> Result<()> {
+    fn check_selection(&self, id: &str) -> Result<()> {
         if self
             .selected
             .as_ref()
@@ -49,6 +49,10 @@ impl CliDriver {
                 "a foreground driver owns one selected Goal",
             ));
         }
+        Ok(())
+    }
+    fn select(&mut self, id: &str) -> Result<()> {
+        self.check_selection(id)?;
         self.runtime.goals()?.core.authorized(id, &self.caller)?;
         *self
             .runtime
@@ -78,6 +82,7 @@ impl CliDriver {
         key: &str,
         revision: u64,
     ) -> Result<GoalCommandReceipt> {
+        self.check_selection(id)?;
         let receipt = self
             .runtime
             .goals()?
@@ -120,5 +125,105 @@ impl CliDriver {
             endpoint.close().await;
         }
         self.runtime.shutdown().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn review_regression_rejected_second_goal_resume_has_no_side_effects() {
+        let directory = tempfile::Builder::new()
+            .prefix("tl10-resume-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let (mut registry, mut bindings) = super::super::tests::fixture();
+        let prepared = super::super::tests::prepared_fixture();
+        let limits = prepared.effective_limits.clone();
+        bindings.grants.insert(
+            "test".into(),
+            Grant {
+                definitions: vec![],
+                tools: vec!["artifact.write".into()],
+                limits: ResourceLimits {
+                    max_wall_ms: limits.max_wall_ms,
+                    max_active_ms: limits.max_active_ms,
+                    max_runs: limits.max_runs,
+                    max_transitions: limits.max_transitions,
+                },
+            },
+        );
+        registry.validate_and_freeze(&bindings).unwrap();
+        let options = OrchestrationOptions {
+            grants: std::collections::BTreeMap::from([(
+                "test".into(),
+                GoalGrant {
+                    profile_digests: vec![registry.profile_digest("document-review@1").unwrap()],
+                    capabilities: vec!["review@1".into()],
+                    tools: vec!["artifact.write".into()],
+                    limits: limits.clone(),
+                },
+            )]),
+            limits,
+            max_admitted_goals: 8,
+            max_spec_bytes: 1048576,
+            max_plan_bytes: 4194304,
+            max_nodes: 256,
+            max_edges: 4096,
+            max_workers_per_node: 32,
+            max_json_candidate_bytes: 4194304,
+        };
+        let caller = Caller {
+            principal: "alice".into(),
+            grants: vec!["test".into()],
+        };
+        let mut driver = CliDriver::open(
+            RuntimeOptions::new(directory.path().join("store")),
+            vec![],
+            bindings,
+            registry,
+            options,
+            None,
+            caller.clone(),
+        )
+        .await
+        .unwrap();
+        let goals = driver.runtime.goals().unwrap();
+        let first = goals
+            .submit(prepared.request.clone(), &caller)
+            .await
+            .unwrap()
+            .goal_id;
+        let mut other_request = prepared.request;
+        other_request.request_key = "other-goal".into();
+        let second = goals.submit(other_request, &caller).await.unwrap().goal_id;
+        let second_view = goals.get(&second, &caller).await.unwrap();
+        goals
+            .stop(&second, "pause-second", second_view.revision, &caller)
+            .await
+            .unwrap();
+        let before = goals.get(&second, &caller).await.unwrap();
+        driver.select(&first).unwrap();
+        let error = driver
+            .resume(&second, "must-not-resume", before.revision)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "input_invalid");
+        let after = goals.get(&second, &caller).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&after).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        assert_eq!(driver.selected.as_deref(), Some(first.as_str()));
+        let first_view = goals.get(&first, &caller).await.unwrap();
+        goals
+            .cancel(&first, "close-first", first_view.revision, &caller)
+            .await
+            .unwrap();
+        goals
+            .cancel(&second, "close-second", after.revision, &caller)
+            .await
+            .unwrap();
+        driver.shutdown().await.unwrap();
     }
 }

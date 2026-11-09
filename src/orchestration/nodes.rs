@@ -21,6 +21,30 @@ thread_local! {
 }
 
 impl GoalCore {
+    pub(crate) fn pending_evaluation_nodes(&self, record: &GoalRecord) -> Vec<String> {
+        record
+            .nodes
+            .iter()
+            .filter(|(_, node)| {
+                node.view.status == GoalNodeStatus::Running
+                    && self.registry.capabilities[&node.view.capability_ref]
+                        .evaluation
+                        .is_some()
+                    && node.view.members.values().all(|member| {
+                        member.status == GoalMemberStatus::Succeeded
+                            && member
+                                .run_id
+                                .as_ref()
+                                .and_then(|id| record.runs.get(id))
+                                .is_some_and(|run| {
+                                    run.view.epoch == record.epoch
+                                        && run.view.phase == GoalRunPhase::Settled
+                                })
+                    })
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
     /// G05/G06/G07/G08: one durable coordination transaction, independent of native slot capacity.
     pub(crate) fn advance(&self, id: &str) -> Result<bool> {
         let _coordinator = self.coordinator.lock().map_err(Error::io)?;
@@ -448,6 +472,43 @@ impl GoalCore {
             .nodes
             .get(node_id)
             .ok_or_else(|| Error::io("node missing"))?;
+        if self
+            .pending_evaluation_nodes(&row.record)
+            .iter()
+            .any(|id| id == node_id)
+        {
+            let observed = self.inner.store.observe_goal_clock(&self.clock)?;
+            let mut next = row.record.clone();
+            match self.begin_node_check(&mut next, node_id, observed.utc_ms) {
+                Ok(false) => return Ok(false),
+                Ok(true) => {}
+                Err(error) => {
+                    let node = next.nodes.get_mut(node_id).expect("pending evaluation");
+                    node.view.status = GoalNodeStatus::Failed;
+                    node.view.error = Some(error.clone());
+                    set_terminal(
+                        &mut next,
+                        GoalOutcome::Failed,
+                        &error.code,
+                        node_id,
+                        row.revision + 1,
+                        observed.utc_ms,
+                    );
+                    next.error = Some(error);
+                    self.cleanup_terminal(&mut next)?;
+                }
+            }
+            self.commit_goal(
+                &row,
+                &next,
+                GoalWriteGuard::NodeCheckStart { node_id },
+                None,
+                &Default::default(),
+                &self.clock,
+            )?;
+            self.cancel_goal_handles(&next);
+            return Ok(true);
+        }
         if node.view.status != GoalNodeStatus::Checking {
             return Ok(false);
         }

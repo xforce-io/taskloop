@@ -32,6 +32,9 @@ pub(crate) enum GoalWriteGuard<'a> {
         node_id: &'a str,
         nonce: &'a str,
     },
+    NodeCheckStart {
+        node_id: &'a str,
+    },
     Signal {
         wait_id: &'a str,
         nonce: &'a str,
@@ -556,6 +559,26 @@ fn check_guard(
         GoalWriteGuard::Advance => facts.advance_allowed(),
         GoalWriteGuard::Result { run_id, binding } => {
             facts.result_allowed(&before.result_authority(run_id, binding))
+        }
+        GoalWriteGuard::NodeCheckStart { node_id } => {
+            before.nodes.get(*node_id).is_some_and(|node| {
+                facts.result_allowed(&ResultAuthority {
+                    original_source_valid: node.check_request_id.is_some(),
+                    ownership_and_digests_valid: node.view.members.values().all(|member| {
+                        member.status == GoalMemberStatus::Succeeded
+                            && member
+                                .run_id
+                                .as_ref()
+                                .and_then(|id| before.runs.get(id))
+                                .is_some_and(|run| {
+                                    run.view.epoch == before.epoch
+                                        && run.view.phase == GoalRunPhase::Settled
+                                })
+                    }),
+                    epoch: before.epoch,
+                    predecessor_valid: node.view.status == GoalNodeStatus::Running,
+                })
+            })
         }
         GoalWriteGuard::NodeResult { node_id, nonce } => {
             before.nodes.get(*node_id).is_some_and(|node| {

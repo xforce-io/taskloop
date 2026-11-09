@@ -55,3 +55,9 @@ cargo clippy --locked --offline --all-targets -- -D warnings
 - `a_projection_panic_fails_the_node_without_poisoning_coordination_or_losing_members`：实际推进到节点checking后，以仅测试编译的线程局部钩子注入内建投影panic。必须失败为contract_error，保留成员产物、零公共输出/评价、不增加Run，预算/槽位归零，协调器仍可调用且重复检查不再推进；不把该注入描述为已发现自然可触发的业务输入。
 
 版本重开路径使用明确的60秒未到期前置，并断言deadline_expired=false；等待过期由独立200毫秒用例验证。两条路径分别证明版本冻结与期限，不互相替代。
+
+独立审查发现的边界另执行以下回归，原四项修改前失败记录分别保留：
+
+- `review_regression_storage_failure_survives_successful_candidate_retry`：Planner、业务成员、最终检查分别在真实候选INSERT上注入一次SQLite故障；恢复后同一Executor成功补交候选仍不能抹去storage_error，不接纳为achieved；原生停止、候选保留及预算释放分别核对。
+- `review_regression_cancel_cannot_replace_an_already_due_deadline`：墙钟、规划、输入等待三种期限已到但maintain尚未执行时提交cancel，首个终结意图仍为相应timeout；同键重放不增revision。输入等待期限用内部记录缩短以固定竞态窗口，不冒称系统时钟或原生进程故障。
+- `review_regression_paused_checkpoint_retries_projection_after_budget_release`：checkpoint成员已成功，持久预算账本另保留活动时间预留，使公共评价投影首次Pending；暂停不得提前Stopped，释放预留后经相同协调循环和存储权限校验重试投影，pass保持暂停、fail/error在暂停收尾窗口内终结。该例用账本预留模拟容量竞争，不声称启动了额外真实原生Worker。

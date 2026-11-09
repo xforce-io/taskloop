@@ -34,3 +34,5 @@ S2.A1真实模板入口：按`tests/inquiry_consumer/README.md`配置固定Milki
 六类非法提案须经公开Goals提交后验证：`six_invalid_plan_categories_have_public_locations_and_zero_business_dispatch`逐类检查原始分类/位置、单Planner Run、业务节点与派发数0、槽位/预留释放。格式反例使用合法JSON但超过宿主节点容量的提案；字节格式/重复键等另由既有注册与验证器反例覆盖。
 
 S3.A2的非法整体汇合另执行`individually_valid_member_outputs_cannot_accept_a_schema_invalid_join`：两成员各自Schema合法且均succeeded，联合对象违反整体Schema时节点failed，成员产物保留但无公共输出/最终检查。不能只用非法成员输出代替这一反例。
+
+前台SDK的单目标选择另执行`review_regression_rejected_second_goal_resume_has_no_side_effects`：同一CliDriver已选择A后尝试恢复暂停的B，必须在提交B恢复之前拒绝；B的公开快照、revision、暂停状态和预算完全不变，驱动器仍选择A。

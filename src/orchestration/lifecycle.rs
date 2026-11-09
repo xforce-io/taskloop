@@ -27,54 +27,7 @@ impl GoalCore {
             if next.status == GoalStatus::Blocked && next.blockers.is_empty() {
                 next.status = GoalStatus::Stopped;
             }
-            let mut deadlines = vec![(
-                next.prepared.wall_deadline_utc_ms,
-                0,
-                "wall_timeout",
-                "goal".to_owned(),
-            )];
-            if matches!(next.stage, GoalStage::Planning | GoalStage::PlanChecking) {
-                deadlines.push((
-                    next.prepared.planning_deadline_utc_ms,
-                    1,
-                    "planning_timeout",
-                    "planner".to_owned(),
-                ));
-            }
-            for wait in next.waiting.values().filter(|w| !w.consumed) {
-                deadlines.push((
-                    wait.expires_at_utc_ms,
-                    2,
-                    "input_timeout",
-                    wait.node_id.clone().unwrap_or_else(|| "planner".into()),
-                ));
-            }
-            deadlines.sort();
-            if let Some((deadline, _, reason, subject)) = deadlines
-                .first()
-                .filter(|(d, _, _, _)| observed.utc_ms >= *d)
-            {
-                let _ = deadline;
-                if let Some(node) = next.nodes.get_mut(subject) {
-                    node.view.status = GoalNodeStatus::Failed;
-                    node.view.error = Some(Error::new(
-                        reason,
-                        "/deadline",
-                        "fixed Goal/input deadline expired",
-                    ));
-                }
-                set_terminal(
-                    &mut next,
-                    GoalOutcome::Failed,
-                    reason,
-                    subject,
-                    row.revision + 1,
-                    observed.utc_ms,
-                );
-                next.error.get_or_insert_with(|| {
-                    Error::new(reason, "/deadline", "fixed Goal/input deadline expired")
-                });
-            }
+            self.apply_due_deadlines(&mut next, row.revision + 1, observed.utc_ms);
         }
         self.cleanup_terminal(&mut next)?;
         self.close_stopping(&mut next, observed.utc_ms)?;
@@ -92,6 +45,51 @@ impl GoalCore {
         }
         self.cancel_goal_handles(&next);
         Ok(changed)
+    }
+    pub(crate) fn apply_due_deadlines(&self, next: &mut GoalRecord, revision: u64, now: u64) {
+        if next.terminal_intent.is_some() || next.status == GoalStatus::Finished {
+            return;
+        }
+        let mut deadlines = vec![(
+            next.prepared.wall_deadline_utc_ms,
+            0,
+            "wall_timeout",
+            "goal".to_owned(),
+        )];
+        if matches!(next.stage, GoalStage::Planning | GoalStage::PlanChecking) {
+            deadlines.push((
+                next.prepared.planning_deadline_utc_ms,
+                1,
+                "planning_timeout",
+                "planner".to_owned(),
+            ));
+        }
+        for wait in next.waiting.values().filter(|w| !w.consumed) {
+            deadlines.push((
+                wait.expires_at_utc_ms,
+                2,
+                "input_timeout",
+                wait.node_id.clone().unwrap_or_else(|| "planner".into()),
+            ));
+        }
+        deadlines.sort();
+        if let Some((deadline, _, reason, subject)) =
+            deadlines.first().filter(|(d, _, _, _)| now >= *d)
+        {
+            let _ = deadline;
+            if let Some(node) = next.nodes.get_mut(subject) {
+                node.view.status = GoalNodeStatus::Failed;
+                node.view.error = Some(Error::new(
+                    reason,
+                    "/deadline",
+                    "fixed Goal/input deadline expired",
+                ));
+            }
+            set_terminal(next, GoalOutcome::Failed, reason, subject, revision, now);
+            next.error.get_or_insert_with(|| {
+                Error::new(reason, "/deadline", "fixed Goal/input deadline expired")
+            });
+        }
     }
     /// Recovery classifies all records before any business admission or stop probe.
     pub(crate) fn recover(&self) -> Result<()> {

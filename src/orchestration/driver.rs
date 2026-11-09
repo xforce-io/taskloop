@@ -417,7 +417,21 @@ impl GoalExecution {
         run.view.stop_unknown = !returned.native_stop_confirmed;
         run.view.phase = GoalRunPhase::ExecutionReturned;
         run.returned_at_utc_ms = Some(self.core.clock.observe()?.utc_ms);
-        run.execution_outcome = Some(returned.outcome);
+        run.execution_outcome = Some(
+            match self
+                .bridge
+                .storage_failure
+                .lock()
+                .map_err(Error::io)?
+                .clone()
+            {
+                Some(error) => ExecutionOutcome::Failed {
+                    code: error.code,
+                    message: error.message,
+                },
+                None => returned.outcome,
+            },
+        );
         run.view.budget = Some(self.budget.snapshot());
         run.active_ms = self
             .preparation_ms
