@@ -54,7 +54,7 @@ cargo clippy --locked --offline --all-targets -- -D warnings
 - `failed_output_insertion_rolls_back_goal_budget_and_revision`：先写有效blob，测试库触发器在goal_artifacts的真实INSERT上注入故障；必须观察到注入错误，Goal状态/revision/账本/公共产物均回滚。保留的孤立blob不成为已接纳Artifact。
 - `a_projection_panic_fails_the_node_without_poisoning_coordination_or_losing_members`：实际推进到节点checking后，以仅测试编译的线程局部钩子注入内建投影panic。必须失败为contract_error，保留成员产物、零公共输出/评价、不增加Run，预算/槽位归零，协调器仍可调用且重复检查不再推进；不把该注入描述为已发现自然可触发的业务输入。
 
-版本重开路径使用明确的60秒未到期前置，并断言deadline_expired=false；等待过期由独立200毫秒用例验证。两条路径分别证明版本冻结与期限，不互相替代。
+版本重开路径使用明确的60秒未到期前置，并断言deadline_expired=false；等待过期由独立2秒用例验证，进入等待时明确断言尚未到期，离线等待按原公开deadline计算。两条路径分别证明版本冻结与期限，不互相替代。
 
 独立审查发现的边界另执行以下回归，原四项修改前失败记录分别保留：
 

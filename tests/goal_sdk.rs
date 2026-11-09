@@ -714,7 +714,7 @@ async fn an_unknown_run_keeps_its_slot_without_blocking_another_queued_goals_dea
     .await
     .unwrap();
     let mut waiting = request("expires", "queued");
-    waiting.spec.limits.max_wall_ms = 200;
+    waiting.spec.limits.max_wall_ms = 2000;
     let queued = goals.submit(waiting, &caller).await.unwrap().goal_id;
     let progress = goals.get(&queued, &caller).await.unwrap().progress;
     assert_eq!(progress.pending_requests, 1);
@@ -1068,7 +1068,10 @@ async fn plan_reviews_distinguish_pass_revisable_fail_and_unavailable_error_befo
         let id = goals.submit(req, &caller).await.unwrap().goal_id;
         let snapshot = finished(&goals, &id, &caller).await;
         assert_eq!(snapshot.outcome, Some(expected), "{verdict}: {snapshot:?}");
-        assert_eq!(snapshot.budget.runs_used, run_count, "{verdict}");
+        assert_eq!(
+            snapshot.budget.runs_used, run_count,
+            "{verdict}: {snapshot:?}"
+        );
         assert_eq!(
             serde_json::to_value(&snapshot.spec).unwrap(),
             serde_json::to_value(original).unwrap()
@@ -1489,7 +1492,7 @@ async fn input_deadlines_expire_online_or_after_reopen_without_accepting_a_late_
         let root = tempfile::tempdir().unwrap();
         let store = root.path().join("store");
         let mut stats = Arc::new(Stats {
-            input_wait_ms: Some(200),
+            input_wait_ms: Some(2000),
             ..Default::default()
         });
         let (mut runtime, caller) = host_variant(&store, stats.clone(), 2, false, None, true).await;
@@ -1512,6 +1515,14 @@ async fn input_deadlines_expire_online_or_after_reopen_without_accepting_a_late_
         .await
         .unwrap();
         let wait = waiting.waiting[0].clone();
+        assert!(
+            wait.expires_at_utc_ms
+                > std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+            "waiting must be observed before its fixed deadline"
+        );
         assert_eq!(waiting.progress.goal_occupied_slots, 0);
         if reopen {
             goals
@@ -1521,9 +1532,16 @@ async fn input_deadlines_expire_online_or_after_reopen_without_accepting_a_late_
             runtime.shutdown().await.unwrap();
             drop(goals);
             drop(runtime);
-            tokio::time::sleep(Duration::from_millis(240)).await;
+            let utc_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            tokio::time::sleep(Duration::from_millis(
+                wait.expires_at_utc_ms.saturating_sub(utc_ms) + 100,
+            ))
+            .await;
             stats = Arc::new(Stats {
-                input_wait_ms: Some(200),
+                input_wait_ms: Some(2000),
                 ..Default::default()
             });
             let fresh = host_variant(&store, stats.clone(), 2, false, None, true).await;
