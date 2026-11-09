@@ -429,7 +429,7 @@ async fn host_composed(
     let policy = RunBudgetPolicy {
         policy_id: "sdk-fixture".into(),
         max_run_ms: Some(1000),
-        max_check_ms: Some(100),
+        max_check_ms: Some(1000),
         max_tool_calls: 2,
         submission_reserve: 1,
         finalize_before_ms: 0,

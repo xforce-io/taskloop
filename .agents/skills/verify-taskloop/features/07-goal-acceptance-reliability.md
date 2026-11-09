@@ -61,3 +61,5 @@ cargo clippy --locked --offline --all-targets -- -D warnings
 - `review_regression_storage_failure_survives_successful_candidate_retry`：Planner、业务成员、最终检查分别在真实候选INSERT上注入一次SQLite故障；恢复后同一Executor成功补交候选仍不能抹去storage_error，不接纳为achieved；原生停止、候选保留及预算释放分别核对。
 - `review_regression_cancel_cannot_replace_an_already_due_deadline`：墙钟、规划、输入等待三种期限已到但maintain尚未执行时提交cancel，首个终结意图仍为相应timeout；同键重放不增revision。输入等待期限用内部记录缩短以固定竞态窗口，不冒称系统时钟或原生进程故障。
 - `review_regression_paused_checkpoint_retries_projection_after_budget_release`：checkpoint成员已成功，持久预算账本另保留活动时间预留，使公共评价投影首次Pending；暂停不得提前Stopped，释放预留后经相同协调循环和存储权限校验重试投影，pass保持暂停、fail/error在暂停收尾窗口内终结。该例用账本预留模拟容量竞争，不声称启动了额外真实原生Worker。
+
+SDK受控夹具的普通结果校验预留为1000毫秒，避免低配CI的存储调度耗时先耗尽非目标阶段。工具/字节反例上限不变，执行时间反例仍显式覆盖为1毫秒；检查用例必须实际到达所声明的目标角色，不能用更早Planner的check_timeout冒充Worker预算拒绝。此值不修改真实Harness业务配额。
