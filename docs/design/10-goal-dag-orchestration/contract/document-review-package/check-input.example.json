@@ -1,0 +1,49 @@
+{
+  "protocol_version": 1,
+  "goal_id": "goal-00000000-0000-4000-8000-000000000000",
+  "goal": "审阅文档并给出有依据的发现。",
+  "goal_spec_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "check_id": "quality",
+  "rules_digest": "fac2ce77dd4989da96fad0d93737c86618e30b9c7e6ec52d57141d9c49363829",
+  "phase": "goal_final",
+  "epoch": 0,
+  "nonce": "illustrative-only",
+  "issued_revision": 1,
+  "subject": {
+    "kind": "artifacts",
+    "plan_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "targets": {
+      "report": {
+        "artifact_id": "example-report",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "schema_digest": "d1c2a382d5bc237d566bfb1219dd7689d478486e9d2ddafd810af5c7830b6752",
+        "value": {
+          "summary": "文档说明示例接口。",
+          "findings": [
+            "接口采用JSON交换。"
+          ]
+        }
+      }
+    }
+  },
+  "rules": {
+    "protocol_version": 1,
+    "id": "document-quality",
+    "version": "1",
+    "rules": [
+      {
+        "id": "grounded",
+        "instruction": "核对报告中的结论是否能由给定文档支持；不自行补充外部事实。",
+        "pass_condition": "所有结论均能定位到文档内容；证据不足或发现臆造时返回fail并说明缺口。",
+        "evidence_required": true
+      }
+    ]
+  },
+  "goal_inputs": {
+    "document_text": "示例接口采用JSON交换。"
+  },
+  "evidence_refs": [
+    "example-report",
+    "goal-input:document_text"
+  ]
+}

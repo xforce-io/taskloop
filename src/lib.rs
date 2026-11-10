@@ -4,7 +4,8 @@ mod definition;
 mod error;
 mod json;
 pub use definition::{
-    Bundle, Definition, EntryContract, Flow, Requirement, SkillPackage, State, ValidationReport,
+    AttachmentPolicy, Bundle, Definition, EntryContract, Flow, OutputSlot, Requirement,
+    SkillPackage, State, ValidationReport,
 };
 pub use error::{Error, Result};
 pub use json::parse_unique;
@@ -20,9 +21,10 @@ pub use skill::{SkillValidationReport, validate_skill};
 mod execution;
 pub use execution::*;
 
+mod managed;
 mod phase;
 mod runtime;
-pub use runtime::{Runtime, RuntimeOptions, validate};
+pub use runtime::{Runtime, RuntimeOptions, TraceSetup, validate};
 
 mod codex;
 pub use codex::CodexExecutor;
@@ -50,3 +52,6 @@ pub use budget::{
     BudgetHint, BudgetLimit, BudgetView, ExecutorBudgetLimits, ModelIterationSupport,
     RunBudgetPolicy, RunBudgetSnapshot, TaskLimitSources,
 };
+
+mod orchestration;
+pub use orchestration::*;

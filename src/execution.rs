@@ -65,8 +65,39 @@ pub struct ToolContext {
     pub accepted: Vec<ArtifactData>,
     pub signal_facts: Vec<SignalFact>,
     pub(crate) cancellation: CancellationToken,
+    pub(crate) goal: Option<GoalRunContext>,
+}
+/// Runtime-assigned attribution. These values identify work; they do not grant access.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GoalRunContext {
+    pub goal_id: String,
+    pub plan_digest: Option<String>,
+    pub role: crate::GoalRunRole,
+    pub evaluation_id: Option<String>,
+    pub epoch: u64,
+}
+impl GoalRunContext {
+    pub(crate) fn state_id(&self) -> String {
+        match &self.role {
+            crate::GoalRunRole::Planner { .. } => "_tl.planner".into(),
+            crate::GoalRunRole::NodeMember { node_id, member_id } => {
+                format!("_tl.node.{node_id}.member.{member_id}")
+            }
+            crate::GoalRunRole::PlanCheck { check_id, .. }
+            | crate::GoalRunRole::FinalCheck { check_id } => format!("_tl.check.{check_id}"),
+        }
+    }
+    pub(crate) fn visit(&self) -> u64 {
+        match self.role {
+            crate::GoalRunRole::Planner { attempt } => attempt,
+            _ => 1,
+        }
+    }
 }
 impl ToolContext {
+    pub fn goal(&self) -> Option<&GoalRunContext> {
+        self.goal.as_ref()
+    }
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
@@ -188,6 +219,25 @@ impl ExecutorCapabilities {
 #[async_trait]
 pub trait ToolBridge: Send + Sync {
     fn specs(&self) -> Vec<ToolSpec>;
+    fn goal_context(&self) -> Option<GoalRunContext> {
+        None
+    }
+    /// A dynamic upper bound for an external JSON candidate, before constructing its Value.
+    fn json_candidate_limit(&self) -> Option<usize> {
+        None
+    }
+    /// Reject the original correlated call without constructing or forwarding its candidate Value.
+    async fn reject_json_candidate(
+        &self,
+        _bytes: u64,
+        _metadata: crate::ToolCallMetadata,
+    ) -> Result<Value> {
+        Err(crate::Error::new(
+            "limit_reached",
+            "/candidate",
+            "external JSON candidate exceeds the admitted limit",
+        ))
+    }
     fn budget_hint(&self) -> Option<crate::BudgetHint> {
         None
     }
@@ -212,6 +262,11 @@ pub enum ObservationCleanup {
 }
 #[async_trait]
 pub trait Executor: Send + Sync {
+    /// External adapters must check ToolBridge::json_candidate_limit before decoding a candidate.
+    /// A trusted in-process executor may explicitly attest that it has no external decoding boundary.
+    fn enforces_json_candidate_limit(&self) -> bool {
+        false
+    }
     fn budget_limits(&self) -> crate::ExecutorBudgetLimits {
         crate::ExecutorBudgetLimits::default()
     }

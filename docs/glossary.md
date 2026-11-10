@@ -76,3 +76,40 @@
 | SourceCleanup | 单个 Run 的源观测缓冲清理状态及其执行器绑定，不代表业务终态。 | — |
 | RunBudgetPolicy | 宿主为 EntryContract 显式配置的执行期限、工具准入、模型迭代和候选容量策略。 | — |
 | RunBudgetSnapshot | 某次 Run 生效限制、来源、消耗及触发原因的持久化公开视图，不是费用估算。 | — |
+| Goal Spec | 用户提交的目标、输入、验收要求与执行约束组成的不可变目标规格。 | — |
+| Planner | 在能力与约束内生成计划提案、不拥有执行派发或状态提交权的 Agent。 | — |
+| DAG | 在锁定后不含回边、以明确依赖连接工作节点的有向无环计划。 | — |
+| 节点 | DAG 内具有公共输入输出契约、由一个或多个 Worker 完成的工作单元。 | — |
+| Capability | 宿主注册并锁定输入输出、执行方式、权限、预算和检查要求的可用节点能力。 | — |
+| GoalSnapshot | 通过公开接口读取的目标、计划、节点、评价、预算及停止事实的版本化视图。 | — |
+| PlanProposal | Planner 返回且尚未经 Runtime 接纳的结构化 DAG 候选。 | — |
+| NodeContract | 规定节点公共端口、Worker成员、汇合和接纳要求的不可变能力契约。 | — |
+| EvaluationReceipt | Runtime 将评价结果与检查身份、规则版本及确切对象摘要绑定后形成的接纳事实。 | — |
+| GoalBudget | 目标下规划、检查和业务执行共享且以预留和结算约束的预算账目。 | — |
+| GoalRequest | 携带幂等键、授权引用与Goal Spec的提交请求信封。 | — |
+| GoalGrant | 宿主授予调用方使用指定Profile、能力与目标预算的授权契约。 | — |
+| CheckRequirement | 冻结在Profile中的必需检查身份、阶段、规则及目标输出声明。 | — |
+| CheckRequest | Runtime为一次检查生成、绑定确切对象与授权证据范围的不可复用请求。 | — |
+| GoalClient | 不取得执行所有权、仅查询公开事实或向在线宿主提交命令的客户端。 | — |
+| GoalSignalRequest | 绑定等待身份、版本和幂等键的目标补充输入请求。 | — |
+| OrchestrationRegistry | 宿主显式注册并锁定Profile、能力、模板、检查和汇合实现的目录。 | — |
+| OrchestrationOptions | 宿主显式启用编排并规定容量及协议限制的配置。 | — |
+| 状态转移器 | 根据当前快照、已验证事件与转移规则计算状态变更和待执行动作，并由事务接纳后生效的Runtime组件。 | — |
+| PlannerResult | Planner一次调用返回的计划提案或结构化补充输入请求，不授予状态提交权。 | — |
+| terminal_intent | 首个决定性事件持久化的待终结业务结果与原因，在停止结算完成后提交为最终outcome。 | — |
+| 节点执行成员 | 节点内部对某Worker的一次具名调用规格，具有member_id和EntryContract，最多产生一次Run，不等同于L4 Worker组件。 | — |
+| 阻塞原因 | 目标不能继续业务执行的独立条件及对象定位，解除一项不自动解除其他条件。 | — |
+| SharedDispatcher | 全宿主唯一的受控Run启动入口，通过共享账本完成物理准入并防止重复启动。 | — |
+| Managed Run | 复用输入校验、预算、工具约束、Executor调用、候选及停止事实处理的受控执行管线。 | — |
+| TransitionRule | Runtime内建的状态转移契约，固定事件、前态、条件、变更、动作及原子边界。 | — |
+| TransitionDecision | 针对当前快照计算的待提交变更与动作，CAS失败后须丢弃并重新求值。 | — |
+| RunRequest | 同Goal内持久保存的待执行调用请求，不占槽位且最多物化为一个Run。 | — |
+| CapabilityPackage | 应用能力定义的离线清单表示及资源示例，首版不作为运行时文件加载协议。 | — |
+| CheckInput | Runtime以冻结检查请求、规则和授权目标构造的只读checker执行输入。 | — |
+| RuleSet | 应用声明的版本化领域检查项、通过条件及证据要求集合。 | — |
+| RegistrationReceipt | 类型注册目录完成验证并封存后返回的锁定摘要和已注册引用回执。 | — |
+| EvaluationSubject | 评价回执绑定的提案摘要或确切产物引用集合，不重复保存目标正文。 | — |
+| GoalRunContext | Runtime指定的Goal执行归属，只标识Goal、角色、计划和检查身份，不授予访问权限。 | — |
+| CliDriver | 持有前台宿主所有权、仅派发所选Goal并提供本地控制入口的应用驱动器。 | — |
+| GoalCommandResult | 在线目标命令的固定回执与当前状态、待停止Run及阻塞原因摘要。 | — |
+| GoalProgress | 从同一只读快照派生的待准入请求、排队原因及目标和宿主占槽计数，不公开其他目标身份。 | — |

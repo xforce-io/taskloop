@@ -1,0 +1,45 @@
+{
+  "protocol_version": 1,
+  "id": "quality-node",
+  "version": "1",
+  "kind": "work",
+  "inputs": {
+    "report": {
+      "schema_ref": "report",
+      "required": true,
+      "source_policy": {
+        "kind": "artifact"
+      }
+    }
+  },
+  "outputs": {
+    "evaluation": {
+      "schema_ref": "_tl.evaluation-candidate@1"
+    }
+  },
+  "gate": "_tl.schema@1",
+  "max_rule_check_ms": 1000,
+  "members": {
+    "checker": {
+      "entry_ref": "quality@1",
+      "input_mode": "check_request"
+    }
+  },
+  "join": {
+    "kind": "object-by-worker",
+    "outputs": {
+      "evaluation": {
+        "kind": "member",
+        "member_id": "checker",
+        "slot": "evaluation"
+      }
+    }
+  },
+  "evaluation": {
+    "purpose": "checkpoint",
+    "checker_ref": "quality@1",
+    "target_ports": {
+      "report": "report"
+    }
+  }
+}

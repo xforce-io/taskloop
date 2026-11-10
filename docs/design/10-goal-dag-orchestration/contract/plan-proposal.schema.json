@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "taskloop:plan-proposal:v1",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "const": 1
+    },
+    "goal_spec_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "profile_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "template_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "nodes": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 256,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "capability_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            },
+            "maxItems": 255,
+            "uniqueItems": true
+          },
+          "inputs": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            },
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "goal"
+                    },
+                    "pointer": {
+                      "type": "string",
+                      "maxLength": 2048,
+                      "pattern": "^(?:/(?:[^~]|~[01])*)*$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "pointer"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "node"
+                    },
+                    "node_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                    },
+                    "port": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                    },
+                    "pointer": {
+                      "type": "string",
+                      "maxLength": 2048,
+                      "pattern": "^(?:/(?:[^~]|~[01])*)*$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "node_id",
+                    "port",
+                    "pointer"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "literal"
+                    },
+                    "value": {}
+                  },
+                  "required": [
+                    "kind",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "import"
+                    },
+                    "artifact_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "pointer": {
+                      "type": "string",
+                      "maxLength": 2048,
+                      "pattern": "^(?:/(?:[^~]|~[01])*)*$"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "artifact_id",
+                    "pointer"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "capability_ref",
+          "depends_on",
+          "inputs"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 256,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "port": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          }
+        },
+        "required": [
+          "node_id",
+          "port"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "checks": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 256,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "checker_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            },
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true
+          },
+          "evaluation_node_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "phase": {
+            "enum": [
+              "node_checkpoint",
+              "goal_final"
+            ]
+          }
+        },
+        "required": [
+          "phase",
+          "checker_ref",
+          "targets"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "phase": {
+                  "const": "node_checkpoint"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "evaluation_node_id"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "evaluation_node_id"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "planning_mode": {
+      "enum": [
+        "autonomous",
+        "workflow"
+      ]
+    }
+  },
+  "required": [
+    "protocol_version",
+    "goal_spec_digest",
+    "profile_digest",
+    "planning_mode",
+    "nodes",
+    "outputs",
+    "checks"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "planning_mode": {
+            "const": "workflow"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "template_digest"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "template_digest"
+          ]
+        }
+      }
+    }
+  ]
+}

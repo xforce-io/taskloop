@@ -1,0 +1,127 @@
+{
+  "goal": "审阅文档并给出有依据的发现。",
+  "inputs": {
+    "document_text": "示例接口采用JSON交换。"
+  },
+  "goal_spec_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "profile_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+  "planning_mode": "autonomous",
+  "capability_catalog": [
+    {
+      "protocol_version": 1,
+      "id": "review",
+      "version": "1",
+      "kind": "work",
+      "inputs": {
+        "question": {
+          "schema_ref": "goal-text",
+          "required": true,
+          "source_policy": {
+            "kind": "goal",
+            "pointer": "/goal"
+          }
+        },
+        "document": {
+          "schema_ref": "text",
+          "required": true,
+          "source_policy": {
+            "kind": "goal",
+            "pointer": "/inputs/document_text"
+          }
+        }
+      },
+      "outputs": {
+        "report": {
+          "schema_ref": "report"
+        }
+      },
+      "gate": "_tl.schema@1",
+      "max_rule_check_ms": 1000,
+      "members": {
+        "reviewer": {
+          "entry_ref": "review@1",
+          "input_bindings": {
+            "question": {
+              "port": "question",
+              "pointer": ""
+            },
+            "document": {
+              "port": "document",
+              "pointer": ""
+            }
+          },
+          "input_mode": "node_ports"
+        }
+      },
+      "join": {
+        "kind": "object-by-worker",
+        "outputs": {
+          "report": {
+            "kind": "member",
+            "member_id": "reviewer",
+            "slot": "report"
+          }
+        }
+      }
+    }
+  ],
+  "profile": {
+    "id": "document-review",
+    "version": "1",
+    "goal_input_schema": "goal-input",
+    "planner_entry_ref": "planner@1",
+    "capabilities": [
+      "review@1"
+    ],
+    "planning_input_schemas": [
+      "text"
+    ],
+    "templates": [],
+    "outputs": {
+      "report": {
+        "schema_ref": "report",
+        "allowed_capabilities": [
+          "review@1"
+        ]
+      }
+    },
+    "final_outputs": [
+      "report"
+    ],
+    "checks": [
+      {
+        "id": "quality",
+        "phase": "goal_final",
+        "checker_ref": "quality@1",
+        "rules_digest": "fac2ce77dd4989da96fad0d93737c86618e30b9c7e6ec52d57141d9c49363829",
+        "target_outputs": [
+          "report"
+        ],
+        "required": true
+      }
+    ],
+    "allowed_tools": [
+      "artifact.write"
+    ],
+    "goal_selectors": {
+      "/goal": "goal-text",
+      "/inputs/document_text": "text"
+    }
+  },
+  "planning_feedback": {
+    "attempt": 1,
+    "previous_candidate_sha": null,
+    "errors": [],
+    "check_results": []
+  },
+  "effective_limits": {
+    "max_wall_ms": 600000,
+    "max_active_ms": 480000,
+    "max_runs": 12,
+    "max_transitions": 64,
+    "max_tool_calls": 200,
+    "max_total_candidate_bytes": 1048576,
+    "max_concurrent_runs": 2
+  },
+  "imports": []
+}

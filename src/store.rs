@@ -8,12 +8,18 @@ use std::{
     sync::Mutex,
 };
 
+pub(crate) mod goals;
+mod leases;
+mod migration;
+pub(crate) use migration::validate_readonly;
+
 pub(crate) const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
 pub(crate) struct Store {
     conn: Mutex<Connection>,
     root: PathBuf,
     _lock: File,
+    global_slots: std::sync::atomic::AtomicUsize,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct Row {
@@ -37,6 +43,16 @@ pub(crate) enum Commit {
 }
 impl Store {
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_mode(root, false, 1)
+    }
+    pub(crate) fn open_mode(root: &Path, orchestrated: bool, global_slots: usize) -> Result<Self> {
+        if global_slots == 0 || global_slots > i64::MAX as usize {
+            return Err(Error::new(
+                "input_invalid",
+                "/max_concurrent_runs",
+                "invalid global slot capacity",
+            ));
+        }
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -65,29 +81,14 @@ impl Store {
         })?;
         std::fs::create_dir_all(root.join("blobs"))?;
         std::fs::create_dir_all(root.join("runs"))?;
-        let conn = Connection::open(root.join("state.sqlite"))?;
+        let mut conn = Connection::open(root.join("state.sqlite"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 1 {
-            return Err(Error::new(
-                "storage_incompatible",
-                "/store",
-                "newer schema version; refusing to guess migration",
-            ));
-        }
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY,owner TEXT NOT NULL,request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,revision INTEGER NOT NULL,queue_order INTEGER NOT NULL,body TEXT NOT NULL,UNIQUE(owner,request_key));
-            CREATE INDEX IF NOT EXISTS active_queue ON executions(queue_order,id) WHERE json_extract(body,'$.status') NOT IN ('completed','failed','cancelled');
-            CREATE TABLE IF NOT EXISTS commands(execution_id TEXT NOT NULL,kind TEXT NOT NULL,request_key TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL,PRIMARY KEY(execution_id,kind,request_key));
-            CREATE TABLE IF NOT EXISTS artifacts(id TEXT PRIMARY KEY,execution_id TEXT NOT NULL,sha256 TEXT NOT NULL,metadata TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS definitions(digest TEXT PRIMARY KEY,body TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value INTEGER NOT NULL);
-            INSERT OR IGNORE INTO meta(key,value) VALUES('queue',0);
-            PRAGMA user_version=1;")?;
+        migration::initialize(&mut conn, orchestrated)?;
         Ok(Self {
             conn: Mutex::new(conn),
             root,
             _lock: lock,
+            global_slots: std::sync::atomic::AtomicUsize::new(global_slots),
         })
     }
     fn connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -191,6 +192,7 @@ impl Store {
                 serde_json::to_string(body)?
             ],
         )?;
+        leases::sync_flow(&tx, id, body)?;
         tx.commit()?;
         Ok((
             Row {
@@ -279,6 +281,7 @@ impl Store {
                 "instance changed; refresh snapshot",
             ));
         }
+        leases::sync_flow(&tx, &row.id, body)?;
         for a in artifacts {
             tx.execute(
                 "INSERT INTO artifacts VALUES(?1,?2,?3,?4)",

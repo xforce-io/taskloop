@@ -217,6 +217,13 @@ impl TraceStore {
         run: Option<&str>,
     ) -> Result<(BTreeMap<String, TracePolicySnapshot>, Vec<String>)> {
         let conn = self.conn.lock().map_err(Error::io)?;
+        Self::query_policies_from(&conn, execution, run)
+    }
+    pub(super) fn query_policies_from(
+        conn: &Connection,
+        execution: &str,
+        run: Option<&str>,
+    ) -> Result<(BTreeMap<String, TracePolicySnapshot>, Vec<String>)> {
         let mut stmt=conn.prepare("SELECT run_id,policy,status,expires_ms FROM trace_runs WHERE execution_id=?1 AND (?2 IS NULL OR run_id=?2)")?;
         let mut policies = BTreeMap::new();
         let mut expired = Vec::new();

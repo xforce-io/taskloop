@@ -12,7 +12,7 @@
 - [历史总体 RFC](docs/RFC-0001-architecture.md)：更宽的架构方向，Python/CLI/动态规划等未作为一期依赖。
 - [名词表](docs/glossary.md)
 
-当前有可构建的 Rust 0.1.0 开发版本，尚未冻结验收、独立审查或正式发布。
+当前源码候选为 Rust 0.2.0，新增 Goal/DAG 编排；尚未完成本版本验收、独立审查或正式发布。
 
 - [实现 Issue #3](https://github.com/xforce-io/taskloop/issues/3)
 - [实际集成契约与验收](docs/design/3-minimal-runtime-mvp.md)
@@ -73,3 +73,24 @@ Milkie 依赖固定于上游 #277/#278 的契约与提交，基础兼容候选�
 中央到期后，独立后台通过 Executor 调用 Milkie 的公开 `observation.purge`。`source_cleanup` 单列 scheduled/pending/deferred/unsupported/failed/purged/not_applicable 等状态；未确认清理记录不因容量而淘汰。绑定变化或旧记录缺绑定时明确不可确认，不猜测已清理。中央观测接纳失败会关闭本次源采集，业务继续；普通未托管入口保留原 observer 行为。源清理不删除认证、原生功能会话、业务执行或工具记录。
 
 Trace 的业务结果和观测收尾分别发布。MilkieObserver 的失败/超时回调可按原事件 ID 重试，观察者须按 ID 幂等；宿主业务工具不会因观测重试而重放。最终 adapter.summary 给出交付确认序号、源最新序号和分项原因，早期业务 usage 中的 pending 不代表最终完整性。见 [尾部恢复契约](docs/design/15-trace-tail-recovery-diagnostics.md)。
+
+
+### Goal 编排与前台 CLI（#10 候选）
+
+Goal 路径使用显式 Profile、能力、权限和预算。`Runtime::open_orchestrated`/`Runtime::goals` 由宿主持续推进；`GoalClient`只读投影或向在线宿主提交命令。原有 Flow API 保留。
+
+```sh
+cargo build --locked --bin taskloop
+mkdir -p .taskloop
+chmod 700 .taskloop
+cp examples/goal/host.example.json .taskloop/HOST.json
+# 按实际环境填写 .taskloop/HOST.json 中的绝对路径，使用已安装的 Milkie、连接文件和专用原生存储。
+target/debug/taskloop goal run --config .taskloop/HOST.json \
+  --spec docs/design/10-goal-dag-orchestration/contract/goal-request.example.json --json
+```
+
+内置 `document-review@1` 由 Rust 工厂注册；资源目录只提供明确命名的 Schema、Skill 和规则，不加载 `package.json` 或外部代码。HOST 的 `goal_grants.profile_refs` 在注册完成后转成冻结摘要；调用身份固定映射到当前 OS 用户，命令 JSON 不能指定 principal。内置 CLI Trace 使用元数据模式，应用 SDK 可继续注册自己的内容过滤器。
+
+run/resume 前台持有 Store 锁，`--json` 输出 NDJSON。SIGINT/SIGTERM 请求暂停；只有确认干净暂停才退出130/143。使用 `get/plan/budget/trace` 查询，`stop/cancel/signal` 要求在线宿主，离线返回6且不排队。暂停后显式 `resume --request-key KEY --revision REV`；同键 run 不隐式恢复。产物导出指定 `artifact ID --output FILE`，不同内容覆盖须加 `--overwrite`。
+
+完整命令、状态及退出码见[协议规格](docs/design/10-goal-dag-orchestration.md#82-cli命令配置与输出)。`cargo test --locked --test goal_cli` 驱动真实 CLI 进程及受控协议对端；它不代表真实 Agent 或 Inquiry 应用验收。

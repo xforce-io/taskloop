@@ -1,0 +1,21 @@
+[package]
+name = "taskloop-inquiry-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+taskloop = { path = "../.." }
+inquiry = { git = "https://github.com/xforce-io/inquiry.git", rev = "d4b05750a60b2158b325b468d51b53d0c2dca3ca" }
+async-trait = "0.1"
+base64 = "0.22"
+serde_json = "1"
+serde = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-util = "0.7"
+
+[patch."https://github.com/xforce-io/taskloop.git"]
+taskloop = { path = "../.." }

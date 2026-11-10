@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "taskloop:check-requirements:v1",
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 256,
+  "items": {
+    "$ref": "taskloop:check-requirement:v1"
+  },
+  "contains": {
+    "type": "object",
+    "properties": {
+      "phase": {
+        "const": "goal_final"
+      }
+    },
+    "required": [
+      "phase"
+    ]
+  },
+  "minContains": 1
+}

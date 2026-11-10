@@ -1,0 +1,13 @@
+{
+  "protocol_version": 1,
+  "id": "document-quality",
+  "version": "1",
+  "rules": [
+    {
+      "id": "grounded",
+      "instruction": "核对报告中的结论是否能由给定文档支持；不自行补充外部事实。",
+      "pass_condition": "所有结论均能定位到文档内容；证据不足或发现臆造时返回fail并说明缺口。",
+      "evidence_required": true
+    }
+  ]
+}

@@ -1,0 +1,475 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "taskloop:node-contract:v1",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "maxLength": 16
+    },
+    "kind": {
+      "enum": [
+        "work",
+        "input"
+      ]
+    },
+    "inputs": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "minProperties": 0,
+      "maxProperties": 256,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "schema_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "source_policy": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "goal"
+                  },
+                  "pointer": {
+                    "type": "string",
+                    "maxLength": 512,
+                    "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "pointer"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "artifact"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "constant"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "default": {}
+        },
+        "required": [
+          "schema_ref",
+          "required",
+          "source_policy"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "default"
+              ]
+            },
+            "then": {
+              "properties": {
+                "source_policy": {
+                  "properties": {
+                    "kind": {
+                      "const": "constant"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "minProperties": 1,
+      "maxProperties": 256,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "schema_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "required": [
+          "schema_ref"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "gate": {
+      "const": "_tl.schema@1"
+    },
+    "max_rule_check_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "members": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      },
+      "minProperties": 1,
+      "maxProperties": 32,
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "entry_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "input_bindings": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                },
+                "minProperties": 0,
+                "maxProperties": 256,
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "port": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                    },
+                    "pointer": {
+                      "type": "string",
+                      "maxLength": 512,
+                      "pattern": "^(?:/(?:[^~/]|~[01])*)*$"
+                    }
+                  },
+                  "required": [
+                    "port",
+                    "pointer"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "input_mode": {
+                "const": "node_ports"
+              }
+            },
+            "required": [
+              "entry_ref",
+              "input_bindings",
+              "input_mode"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "entry_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "input_mode": {
+                "const": "check_request"
+              }
+            },
+            "required": [
+              "entry_ref",
+              "input_mode"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "join": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "object-by-worker"
+        },
+        "outputs": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "minProperties": 1,
+          "maxProperties": 256,
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "member"
+                  },
+                  "member_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                  },
+                  "slot": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "member_id",
+                  "slot"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "members"
+                  },
+                  "slots": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                    },
+                    "minProperties": 1,
+                    "maxProperties": 256,
+                    "additionalProperties": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "slots"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "outputs"
+      ],
+      "additionalProperties": false
+    },
+    "signal_schema_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "max_wait_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "evaluation": {
+      "type": "object",
+      "properties": {
+        "purpose": {
+          "enum": [
+            "checkpoint",
+            "data"
+          ]
+        },
+        "checker_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "target_ports": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "minProperties": 1,
+          "maxProperties": 256,
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          }
+        }
+      },
+      "required": [
+        "purpose",
+        "checker_ref",
+        "target_ports"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "protocol_version",
+    "id",
+    "version",
+    "kind",
+    "inputs",
+    "outputs",
+    "gate",
+    "max_rule_check_ms"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "work"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "members",
+          "join"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "signal_schema_ref"
+              ]
+            },
+            {
+              "required": [
+                "max_wait_ms"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "signal_schema_ref",
+          "max_wait_ms"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "members"
+              ]
+            },
+            {
+              "required": [
+                "join"
+              ]
+            },
+            {
+              "required": [
+                "evaluation"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "evaluation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "kind": {
+            "const": "work"
+          },
+          "members": {
+            "maxProperties": 1,
+            "additionalProperties": {
+              "properties": {
+                "input_mode": {
+                  "const": "check_request"
+                }
+              }
+            }
+          },
+          "outputs": {
+            "maxProperties": 1,
+            "propertyNames": {
+              "const": "evaluation"
+            }
+          },
+          "join": {
+            "properties": {
+              "outputs": {
+                "maxProperties": 1,
+                "propertyNames": {
+                  "const": "evaluation"
+                },
+                "additionalProperties": {
+                  "properties": {
+                    "kind": {
+                      "const": "member"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "members": {
+            "additionalProperties": {
+              "properties": {
+                "input_mode": {
+                  "const": "node_ports"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

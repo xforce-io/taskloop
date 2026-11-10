@@ -1,0 +1,26 @@
+{
+  "protocol_version": 1,
+  "request_key": "example-goal-1",
+  "grant_ref": "local-review",
+  "spec": {
+    "goal": "审阅所给文档并给出有依据的检查结果。",
+    "inputs": {
+      "document_text": "example only"
+    },
+    "profile_ref": "document-review@1",
+    "planning": {
+      "mode": "autonomous",
+      "max_revisions": 2,
+      "max_planning_ms": 120000
+    },
+    "limits": {
+      "max_wall_ms": 600000,
+      "max_active_ms": 480000,
+      "max_runs": 12,
+      "max_transitions": 64,
+      "max_tool_calls": 200,
+      "max_total_candidate_bytes": 1048576,
+      "max_concurrent_runs": 2
+    }
+  }
+}

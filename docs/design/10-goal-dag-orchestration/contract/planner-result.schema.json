@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "taskloop:planner-result:v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "proposal"
+        },
+        "proposal": {
+          "$ref": "taskloop:plan-proposal:v1"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "kind",
+        "proposal"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "needs_input"
+        },
+        "input_schema_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        }
+      },
+      "required": [
+        "protocol_version",
+        "kind",
+        "input_schema_ref",
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

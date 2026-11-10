@@ -37,6 +37,11 @@ pub struct Runtime {
     task: Mutex<Option<JoinHandle<()>>>,
     trace_task: Mutex<Option<JoinHandle<()>>>,
     shutdown_lock: tokio::sync::Mutex<()>,
+    goals: Option<Arc<crate::orchestration::GoalCore>>,
+}
+pub struct TraceSetup {
+    pub options: crate::TraceOptions,
+    pub policy: crate::TracePolicy,
 }
 pub(crate) struct Inner {
     pub store: Store,
@@ -47,7 +52,13 @@ pub(crate) struct Inner {
     pub stop: CancellationToken,
     pub notify: Notify,
     pub handles: Mutex<BTreeMap<String, CancellationToken>>,
+    pub goal_run_handles: Mutex<BTreeMap<String, CancellationToken>>,
     pub live_budgets: Mutex<BTreeMap<String, Arc<crate::budget::BudgetState>>>,
+    pub dispatch_scope: Mutex<DispatchScope>,
+}
+pub(crate) enum DispatchScope {
+    All,
+    Goal(Option<String>),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ActiveRun {
@@ -196,7 +207,7 @@ impl Runtime {
         definitions: Vec<Definition>,
         bindings: HostBindings,
     ) -> Result<Self> {
-        Self::open_impl(options, definitions, bindings, None, None).await
+        Self::open_impl(options, definitions, bindings, None, None, None, false).await
     }
     pub async fn open_with_trace(
         options: RuntimeOptions,
@@ -204,7 +215,16 @@ impl Runtime {
         bindings: HostBindings,
         trace: crate::TraceOptions,
     ) -> Result<Self> {
-        Self::open_impl(options, definitions, bindings, Some(trace), None).await
+        Self::open_impl(
+            options,
+            definitions,
+            bindings,
+            Some(trace),
+            None,
+            None,
+            false,
+        )
+        .await
     }
     pub async fn open_with_trace_policy(
         options: RuntimeOptions,
@@ -213,7 +233,85 @@ impl Runtime {
         trace: crate::TraceOptions,
         policy: crate::TracePolicy,
     ) -> Result<Self> {
-        Self::open_impl(options, definitions, bindings, Some(trace), Some(policy)).await
+        Self::open_impl(
+            options,
+            definitions,
+            bindings,
+            Some(trace),
+            Some(policy),
+            None,
+            false,
+        )
+        .await
+    }
+    pub async fn open_orchestrated(
+        options: RuntimeOptions,
+        definitions: Vec<Definition>,
+        bindings: HostBindings,
+        registry: crate::OrchestrationRegistry,
+        orchestration: crate::OrchestrationOptions,
+        trace: Option<TraceSetup>,
+    ) -> Result<Self> {
+        Self::open_orchestrated_mode(
+            options,
+            definitions,
+            bindings,
+            registry,
+            orchestration,
+            trace,
+            false,
+        )
+        .await
+    }
+    pub(crate) async fn open_orchestrated_mode(
+        options: RuntimeOptions,
+        definitions: Vec<Definition>,
+        bindings: HostBindings,
+        registry: crate::OrchestrationRegistry,
+        orchestration: crate::OrchestrationOptions,
+        trace: Option<TraceSetup>,
+        selected_only: bool,
+    ) -> Result<Self> {
+        orchestration.validate()?;
+        let frozen = registry.frozen()?;
+        if frozen.bindings_digest != crate::orchestration::bindings_digest(&bindings)? {
+            return Err(Error::new(
+                "binding_mismatch",
+                "/registry",
+                "registry was frozen with different HostBindings",
+            ));
+        }
+        for entry in frozen.entries.values() {
+            entry
+                .budget
+                .validate(options.max_tool_calls_per_run, options.max_candidate_bytes)?;
+        }
+        let (trace_options, trace_policy) = match trace {
+            Some(t) => (Some(t.options), Some(t.policy)),
+            None => (None, None),
+        };
+        Self::open_impl(
+            options,
+            definitions,
+            bindings,
+            trace_options,
+            trace_policy,
+            Some((frozen, orchestration)),
+            selected_only,
+        )
+        .await
+    }
+    pub fn goals(&self) -> Result<crate::Goals> {
+        self.goals
+            .as_ref()
+            .map(|core| crate::Goals { core: core.clone() })
+            .ok_or_else(|| {
+                Error::new(
+                    "unsupported_store_mode",
+                    "/goals",
+                    "open_orchestrated is required",
+                )
+            })
     }
     async fn open_impl(
         options: RuntimeOptions,
@@ -221,6 +319,11 @@ impl Runtime {
         bindings: HostBindings,
         trace_options: Option<crate::TraceOptions>,
         trace_policy: Option<crate::TracePolicy>,
+        orchestration: Option<(
+            Arc<crate::orchestration::FrozenRegistry>,
+            crate::OrchestrationOptions,
+        )>,
+        selected_only: bool,
     ) -> Result<Self> {
         if options.max_admitted_instances == 0 || options.max_admitted_instances > 1024 {
             return Err(Error::new(
@@ -246,7 +349,19 @@ impl Runtime {
         let fingerprint = digest(&serde_json::to_vec(
             &json!({"host_binary":digest(&std::fs::read(std::env::current_exe()?)?),"configuration_version":bindings.configuration_version,"entry_budgets":options.entry_budgets,"host_tool_limit":options.max_tool_calls_per_run,"host_candidate_limit":options.max_candidate_bytes,"tools":bindings.tools.iter().map(|(id,t)|(id,t.spec())).collect::<BTreeMap<_,_>>(),"executors":bindings.executors.iter().map(|(id,e)|(id,e.identity())).collect::<BTreeMap<_,_>>(),"executor_budget_limits":bindings.executors.iter().map(|(id,e)|(id,e.budget_limits())).collect::<BTreeMap<_,_>>(),"gates":bindings.gates.keys().collect::<Vec<_>>(),"grants":bindings.grants}),
         )?);
-        let store = Store::open(&options.store_dir)?;
+        let slots = orchestration
+            .as_ref()
+            .map(|(_, o)| o.limits.max_concurrent_runs)
+            .unwrap_or(1);
+        let store = if orchestration.is_some() {
+            Store::open_mode(
+                &options.store_dir,
+                true,
+                usize::try_from(slots).map_err(Error::io)?,
+            )?
+        } else {
+            Store::open(&options.store_dir)?
+        };
         for d in &definitions {
             store.save_definition(d)?;
         }
@@ -267,7 +382,13 @@ impl Runtime {
             stop: CancellationToken::new(),
             notify: Notify::new(),
             handles: Mutex::new(BTreeMap::new()),
+            goal_run_handles: Mutex::new(BTreeMap::new()),
             live_budgets: Mutex::new(BTreeMap::new()),
+            dispatch_scope: Mutex::new(if selected_only {
+                DispatchScope::Goal(None)
+            } else {
+                DispatchScope::All
+            }),
         });
         for row in inner.store.all()? {
             let mut r = decode(&row)?;
@@ -285,9 +406,17 @@ impl Runtime {
                 inner.save(&row, &r, false, None, &[])?;
             }
         }
+        let goals = orchestration.map(|(registry, options)| {
+            let binding = digest(&serde_json::to_vec(&json!({"host":inner.binding_fingerprint,"registry":registry.digest,"orchestration":options}))?);
+            crate::orchestration::GoalCore::new(inner.clone(), registry, options, binding)
+        }).transpose()?;
+        if let Some(core) = &goals {
+            core.recover()?;
+        }
         let work = inner.clone();
+        let coordination = goals.clone();
         let task = tokio::spawn(async move {
-            worker_loop(work).await;
+            shared_dispatcher(work, coordination).await;
         });
         let trace_task = if inner.trace.is_some() {
             let gc = inner.clone();
@@ -302,6 +431,7 @@ impl Runtime {
             task: Mutex::new(Some(task)),
             trace_task: Mutex::new(trace_task),
             shutdown_lock: tokio::sync::Mutex::new(()),
+            goals,
         })
     }
     pub async fn start(&self, request: StartRequest, caller: &Caller) -> Result<String> {
@@ -693,8 +823,20 @@ impl Runtime {
                     "another shutdown has not completed",
                 )
             })?;
+        if let Some(core) = &self.goals {
+            core.pause_for_shutdown()?;
+        }
         self.inner.stop.cancel();
         for token in self.inner.handles.lock().map_err(Error::io)?.values() {
+            token.cancel();
+        }
+        for token in self
+            .inner
+            .goal_run_handles
+            .lock()
+            .map_err(Error::io)?
+            .values()
+        {
             token.cancel();
         }
         self.inner.notify.notify_waiters();
@@ -746,6 +888,20 @@ impl Runtime {
                 self.inner.save(&row, &record, false, None, &[])?;
             }
         }
+        if self.goals.is_some()
+            && self.inner.store.goal_all_active()?.iter().any(|row| {
+                row.record
+                    .runs
+                    .values()
+                    .any(|run| run.view.started && !run.view.native_stop_confirmed)
+            })
+        {
+            return Err(Error::new(
+                "stop_unconfirmed",
+                "/shutdown",
+                "a Goal native invocation has not confirmed stopping",
+            ));
+        }
         for executor in self.inner.bindings.executors.values() {
             tokio::time::timeout_at(deadline, executor.finish_observations())
                 .await
@@ -767,6 +923,9 @@ impl Runtime {
                         "content collectors have not finished",
                     )
                 })??;
+            if let Some(core) = &self.goals {
+                core.close_observation_streams();
+            }
             let _ = trace.finish_observation();
         }
         Ok(())
@@ -785,6 +944,11 @@ impl Drop for Runtime {
                 t.cancel();
             }
         }
+        if let Ok(tokens) = self.inner.goal_run_handles.lock() {
+            for token in tokens.values() {
+                token.cancel();
+            }
+        }
         self.inner.notify.notify_waiters();
     }
 }
@@ -801,7 +965,7 @@ impl Inner {
         let Some(executor) = self.bindings.executors.get(&active.executor) else {
             return StopState::Unknown;
         };
-        executor.stop_or_confirm(&active.id).await
+        crate::managed::confirm_stop(executor, &active.id).await
     }
     pub fn authorized(&self, id: &str, caller: &Caller) -> Result<Row> {
         let row = self.store.load(id)?;
@@ -859,6 +1023,24 @@ impl Inner {
     pub fn expire(&self, id: &str) -> Result<()> {
         let row = self.store.load(id)?;
         let mut r = decode(&row)?;
+        if r.status == Status::Running
+            && r.active.as_ref().is_some_and(|a| !a.started)
+            && (now_ms() >= r.deadline_ms || r.active_ms >= r.limits.max_active_ms)
+        {
+            r.status = Status::Blocked;
+            r.active = None;
+            r.error = Some(Error::new(
+                "limit_reached",
+                "/dispatch",
+                "queued execution exhausted its budget before dispatch",
+            ));
+            match self.save(&row, &r, false, None, &[]) {
+                Ok(_) => {}
+                Err(e) if e.code == "revision_conflict" => {}
+                Err(e) => return Err(e),
+            }
+            return Ok(());
+        }
         if r.status == Status::Waiting && r.wait_deadline_ms.is_some_and(|x| now_ms() >= x) {
             let d = self.store.definition(&r.definition_digest)?;
             if let State::Wait { timeout_target, .. } =
@@ -1047,91 +1229,250 @@ pub(crate) fn enter(r: &mut Record, d: &Definition, target: &str, transition: bo
     }
     Ok(())
 }
-async fn worker_loop(inner: Arc<Inner>) {
-    while !inner.stop.is_cancelled() {
+async fn recover_flow(inner: Arc<Inner>, row: Row) -> Result<()> {
+    let mut record = decode(&row)?;
+    let started = record.active.as_ref().is_some_and(|a| a.started);
+    if started {
+        if !record.stop_unknown {
+            record.epoch += 1;
+        }
+        record.stop_unknown = true;
+        if record.status == Status::Running {
+            record.status = Status::Blocked;
+            record.business_outcome = None;
+            record.error.get_or_insert_with(|| {
+                Error::new(
+                    "interrupted",
+                    "/execution",
+                    "prior run has no committed final state; it will not be replayed",
+                )
+            });
+        }
+    }
+    let confirmed = if record.active.is_some() {
+        if !record.stop_unknown && !started {
+            true
+        } else {
+            inner.confirm_stop(&record).await == StopState::Confirmed
+        }
+    } else {
+        record.status == Status::Cancelling && !record.stop_unknown
+    };
+    if confirmed {
+        record.stop_unknown = false;
+        record.active = None;
+        if record.status == Status::Cancelling {
+            record.status = Status::Cancelled;
+            record.error = None;
+            record.business_outcome = None;
+            record.progress = json!({"phase":"cancelled"});
+        }
+    }
+    inner.save(&row, &record, false, None, &[])?;
+    Ok(())
+}
+
+/// The only caller that starts Flow phases or Goal native invocations.
+async fn shared_dispatcher(inner: Arc<Inner>, goals: Option<Arc<crate::orchestration::GoalCore>>) {
+    use futures_util::FutureExt;
+    use std::{collections::BTreeSet, panic::AssertUnwindSafe};
+    let mut work = tokio::task::JoinSet::<(String, Result<()>)>::new();
+    let mut live = BTreeSet::<String>::new();
+    let mut cursor = None::<(u64, String)>;
+    loop {
+        while let Some(joined) = work.try_join_next() {
+            if let Ok((key, _result)) = joined {
+                live.remove(&key);
+            }
+        }
+        if inner.stop.is_cancelled() {
+            break;
+        }
         if let Some(trace) = &inner.trace {
             trace.background_maintenance();
         }
-        let rows = match inner.store.all() {
-            Ok(rows) => rows,
-            Err(_) => {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                continue;
-            }
-        };
-        let mut blocked_capacity = false;
-        let mut next = None;
-        for row in rows {
-            let Ok(mut r) = decode(&row) else {
-                continue;
-            };
-            if r.status == Status::Waiting {
-                let _ = inner.expire(&row.id);
-            }
-            let started = r.active.as_ref().is_some_and(|a| a.started);
-            if r.stop_unknown || r.status == Status::Cancelling || started {
-                // This loop is serial with phase execution: any started Run
-                // seen here has returned without a durable final state. Failed
-                // stop-state writes must not make it disappear from capacity.
-                let recovery_changed = started && (!r.stop_unknown || r.status == Status::Running);
-                if recovery_changed {
-                    if !r.stop_unknown {
-                        r.epoch += 1;
-                    }
-                    r.stop_unknown = true;
-                    if r.status == Status::Running {
-                        r.status = Status::Blocked;
-                        r.business_outcome = None;
-                        r.error.get_or_insert_with(|| {
-                            Error::new(
-                                "interrupted",
-                                "/execution",
-                                "prior run has no committed final state; it will not be replayed",
-                            )
-                        });
-                        r.progress = json!({"phase":"blocked"});
-                    }
-                }
-                let confirmed = if let Some(active) = &r.active {
-                    if !r.stop_unknown && !active.started {
-                        true
-                    } else {
-                        inner.confirm_stop(&r).await == StopState::Confirmed
-                    }
-                } else {
-                    r.status == Status::Cancelling && !r.stop_unknown
+        let mut owners = Vec::<(u64, String, bool)>::new();
+        if let Ok(rows) = inner.store.all() {
+            for row in rows {
+                let Ok(record) = decode(&row) else {
+                    continue;
                 };
-                if confirmed {
-                    r.stop_unknown = false;
-                    r.active = None;
-                    if r.status == Status::Cancelling {
-                        r.status = Status::Cancelled;
-                        r.error = None;
-                        r.business_outcome = None;
-                        r.progress = json!({"phase":"cancelled"});
-                    }
-                    if inner.save(&row, &r, false, None, &[]).is_err() {
-                        blocked_capacity = true;
-                    }
-                } else {
-                    blocked_capacity = true;
-                    if recovery_changed {
-                        // Keep capacity blocked even if storage is still faulty.
-                        let _ = inner.save(&row, &r, false, None, &[]);
-                    }
+                if record.status == Status::Waiting
+                    || record.status == Status::Running
+                        && record.active.as_ref().is_some_and(|a| !a.started)
+                {
+                    let _ = inner.expire(&row.id);
                 }
-            }
-            if next.is_none()
-                && r.status == Status::Running
-                && r.active.as_ref().is_some_and(|a| !a.started)
-            {
-                next = Some(row);
+                let active_key = record.active.as_ref().map(|a| format!("flow:{}", a.id));
+                if active_key.as_ref().is_some_and(|key| live.contains(key)) {
+                    continue;
+                }
+                if record.stop_unknown
+                    || record.status == Status::Cancelling
+                    || record.active.as_ref().is_some_and(|a| a.started)
+                {
+                    let key = format!("flow-recovery:{}", row.id);
+                    if live.insert(key.clone()) {
+                        let host = inner.clone();
+                        work.spawn(async move {
+                            let result = AssertUnwindSafe(recover_flow(host, row))
+                                .catch_unwind()
+                                .await
+                                .unwrap_or_else(|_| Err(Error::io("Flow stop probe panicked")));
+                            (key, result)
+                        });
+                    }
+                } else if record.status == Status::Running
+                    && record.active.as_ref().is_some_and(|a| !a.started)
+                {
+                    owners.push((row.queue_order, row.id, false));
+                }
             }
         }
-        if !blocked_capacity && let Some(row) = next {
-            crate::phase::run(inner.clone(), row).await;
+        if let Some(core) = &goals
+            && let Ok(rows) = inner.store.goal_all_active()
+        {
+            for row in rows {
+                let _ = core.maintain(&row.id);
+                for (run_id, run) in &row.record.runs {
+                    if live.contains(&format!("goal:{run_id}")) {
+                        continue;
+                    }
+                    if run.view.phase == crate::GoalRunPhase::ExecutionReturned {
+                        let _ = core.consume_return(&row.id, run_id);
+                    }
+                    if run.view.started && !run.view.native_stop_confirmed {
+                        let key = format!("goal-recovery:{run_id}");
+                        if live.insert(key.clone()) {
+                            let core = core.clone();
+                            let id = row.id.clone();
+                            let run_id = run_id.clone();
+                            work.spawn(async move {
+                                let result = AssertUnwindSafe(core.probe_stop(id, run_id))
+                                    .catch_unwind()
+                                    .await
+                                    .unwrap_or_else(|_| Err(Error::io("Goal stop probe panicked")));
+                                (key, result)
+                            });
+                        }
+                    }
+                }
+                if let Ok(current) = inner.store.goal_load(&row.id) {
+                    let pending_evaluations = core.pending_evaluation_nodes(&current.record);
+                    for (node, state) in &current.record.nodes {
+                        if state.view.status == crate::GoalNodeStatus::Checking
+                            || pending_evaluations.contains(node)
+                        {
+                            let _ = core.finish_node_check(&row.id, node);
+                        }
+                    }
+                }
+                let _ = core.advance(&row.id);
+                owners.push((row.queue_order, row.id, true));
+            }
+        }
+        owners.sort();
+        let split = cursor
+            .as_ref()
+            .map(|last| owners.partition_point(|(queue, id, _)| (*queue, id.clone()) <= *last))
+            .unwrap_or(0);
+        owners.rotate_left(split);
+        let mut dispatched = false;
+        for (queue, id, goal) in owners {
+            let allowed = inner
+                .dispatch_scope
+                .lock()
+                .map(|scope| match &*scope {
+                    DispatchScope::All => true,
+                    DispatchScope::Goal(selected) => {
+                        goal && selected.as_deref() == Some(id.as_str())
+                    }
+                })
+                .unwrap_or(false);
+            if !allowed {
+                continue;
+            }
+            if goal {
+                let Some(core) = &goals else {
+                    continue;
+                };
+                let Ok(Some(run_id)) = core.materialize(&id) else {
+                    continue;
+                };
+                let preparation_at = tokio::time::Instant::now();
+                match core.prepare_execution(&id, &run_id) {
+                    Ok(Some(execution)) => {
+                        let key = format!("goal:{run_id}");
+                        live.insert(key.clone());
+                        work.spawn(async move {
+                            let result = AssertUnwindSafe(execution.execute())
+                                .catch_unwind()
+                                .await
+                                .unwrap_or_else(|_| Err(Error::io("Goal driver panicked")));
+                            (key, result)
+                        });
+                        cursor = Some((queue, id));
+                        dispatched = true;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = core.fail_preparation(
+                            &id,
+                            &run_id,
+                            error,
+                            preparation_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        );
+                    }
+                }
+            } else {
+                let Ok(row) = inner.store.load(&id) else {
+                    continue;
+                };
+                if inner.store.reserve_flow(&row).unwrap_or(false) {
+                    let Ok(record) = decode(&row) else {
+                        continue;
+                    };
+                    let Some(active) = &record.active else {
+                        continue;
+                    };
+                    let key = format!("flow:{}", active.id);
+                    live.insert(key.clone());
+                    let host = inner.clone();
+                    work.spawn(async move {
+                        let result = AssertUnwindSafe(crate::phase::run(host, row))
+                            .catch_unwind()
+                            .await
+                            .map_err(|_| Error::io("Flow driver panicked"));
+                        (key, result)
+                    });
+                    cursor = Some((queue, id));
+                    dispatched = true;
+                }
+            }
+        }
+        if dispatched {
+            tokio::task::yield_now().await;
             continue;
         }
-        tokio::select! {_ = inner.stop.cancelled()=>break,_ = inner.notify.notified()=>{},_ = tokio::time::sleep(std::time::Duration::from_millis(500))=>{}}
+        tokio::select! {
+            _ = inner.stop.cancelled() => break,
+            _ = inner.notify.notified() => {},
+            Some(joined) = work.join_next(), if !work.is_empty() => { if let Ok((key, _)) = joined { live.remove(&key); } },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+        }
+    }
+    // shutdown keeps owning the dispatcher until all native futures return or report unknown.
+    while work.join_next().await.is_some() {}
+    if let Some(core) = goals
+        && let Ok(rows) = inner.store.goal_all_active()
+    {
+        for row in rows {
+            for (run, state) in &row.record.runs {
+                if state.view.phase == crate::GoalRunPhase::ExecutionReturned {
+                    let _ = core.consume_return(&row.id, run);
+                }
+            }
+            let _ = core.maintain(&row.id);
+        }
     }
 }
