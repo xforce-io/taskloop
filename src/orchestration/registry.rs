@@ -896,10 +896,13 @@ fn validate_profile(
             !input["properties"]
                 .as_object()
                 .is_some_and(|props| props.contains_key(field))
+                || !input["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|value| value == field))
         }) {
             return Err(invalid(
                 "/checkers/goal_input_fields",
-                "checker requests undeclared Goal input field",
+                "checker requires a declared, required Goal input field",
             ));
         }
     }

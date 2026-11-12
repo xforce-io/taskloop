@@ -63,3 +63,14 @@ cargo clippy --locked --offline --all-targets -- -D warnings
 - `review_regression_paused_checkpoint_retries_projection_after_budget_release`：checkpoint成员已成功，持久预算账本另保留活动时间预留，使公共评价投影首次Pending；暂停不得提前Stopped，释放预留后经相同协调循环和存储权限校验重试投影，pass保持暂停、fail/error在暂停收尾窗口内终结。该例用账本预留模拟容量竞争，不声称启动了额外真实原生Worker。
 
 SDK受控夹具的普通结果校验预留为1000毫秒，避免低配CI的存储调度耗时先耗尽非目标阶段。工具/字节反例上限不变，执行时间反例仍显式覆盖为1毫秒；检查用例必须实际到达所声明的目标角色，不能用更早Planner的check_timeout冒充Worker预算拒绝。此值不修改真实Harness业务配额。
+
+## Issue #20：评价输入与在线接纳恢复
+
+沿用 #10 必要输入、失败关闭与不重跑契约，标准见 `docs/design/20-goal-check-recovery.md` v0.1。
+
+| 验收 | 公开入口、操作与判定 |
+|---|---|
+| #20 S1 | OrchestrationRegistry 注册 checker 额外评价材料；字段可选、未声明、引用到可选对象均拒绝，声明且必填时成功。对应 `checker_goal_inputs_must_be_declared_and_required`。 |
+| #20 S2 | Runtime::open_orchestrated → Goals::submit/get：在 Planner、业务 Worker、最终检查接纳事务分别注入真实 SQLite 写失败，观察 Checking 后恢复存储；同宿主自动 failed/settled，无额外执行、无不当接纳、无预留或占槽泄漏，未知检查耗时保留 unknown。最终检查故障仍保留此前文章。对应 `runtime_reconciles_acceptance_failures_for_planner_worker_and_final_check`。 |
+
+`acceptance_write_failure_is_settled_online_without_reexecution` 另通过明确的事务错误断言和重复维护检验收束幂等。故障注入只作用于临时数据库；受控 Executor 不证明真实模型或原生 Harness 故障。保全检查包含上文重开恢复、期限/暂停、公开 Goal SDK 及旧 Flow。
