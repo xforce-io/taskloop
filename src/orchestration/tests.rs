@@ -930,3 +930,45 @@ fn executor_schema_bundle_is_closed_and_preserves_reference_scope() {
             .is_ok()
     );
 }
+
+#[test]
+fn checker_goal_inputs_must_be_declared_and_required() {
+    let (registry, bindings) = fixture();
+    registry.clone().validate_and_freeze(&bindings).unwrap();
+    for mode in ["optional", "undeclared", "referenced-optional", "required"] {
+        let mut changed = registry.clone();
+        for checker in changed.checkers.values_mut() {
+            checker.goal_input_fields.push("evaluation_context".into());
+        }
+        let mut schema = changed.schemas["goal-input"].value.clone();
+        if mode != "undeclared" {
+            schema["properties"]["evaluation_context"] = json!({"type":"string"});
+        }
+        if mode == "required" {
+            schema["required"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("evaluation_context"));
+        }
+        if mode == "referenced-optional" {
+            changed
+                .register_schema("optional-input", &serde_json::to_vec(&schema).unwrap())
+                .unwrap();
+            schema = json!({"$ref":"optional-input"});
+        }
+        changed.schemas.insert(
+            "goal-input".into(),
+            super::schema::SchemaSource::new(&serde_json::to_vec(&schema).unwrap()).unwrap(),
+        );
+        let result = changed.validate_and_freeze(&bindings);
+        if mode == "required" {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.path, "/checkers/goal_input_fields",
+                "{mode}: {error:?}"
+            );
+        }
+    }
+}

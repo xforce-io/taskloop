@@ -2565,6 +2565,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acceptance_write_failure_is_settled_online_without_reexecution() {
+        let (_directory, runtime, goals, caller, request) =
+            setup(Some(Arc::new(CompleteGoal(EvaluationVerdict::Pass)))).await;
+        let id = goals.submit(request, &caller).await.unwrap().goal_id;
+        let run = goals.core.materialize(&id).unwrap().unwrap();
+        goals
+            .core
+            .prepare_execution(&id, &run)
+            .unwrap()
+            .unwrap()
+            .execute()
+            .await
+            .unwrap();
+        let connection =
+            rusqlite::Connection::open(goals.core.inner.options.store_dir.join("state.sqlite"))
+                .unwrap();
+        connection.execute_batch(r#"CREATE TRIGGER reject_acceptance BEFORE UPDATE ON goals WHEN instr(OLD.body, '"phase":"checking"') > 0 AND instr(NEW.body, '"phase":"settled"') > 0 BEGIN SELECT RAISE(ABORT, 'injected acceptance failure'); END;"#).unwrap();
+        let error = goals.core.consume_return(&id, &run).unwrap_err();
+        assert!(
+            error.message.contains("injected acceptance failure"),
+            "{error:?}"
+        );
+        let before = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(before.runs[&run].phase, GoalRunPhase::Checking);
+        assert!(before.runs[&run].native_stop_confirmed);
+        connection
+            .execute_batch("DROP TRIGGER reject_acceptance")
+            .unwrap();
+        goals.core.maintain(&id).unwrap();
+        let after = goals.get(&id, &caller).await.unwrap();
+        assert_eq!(after.status, GoalStatus::Finished);
+        assert_eq!(after.outcome, Some(GoalOutcome::Failed));
+        assert_eq!(after.runs[&run].phase, GoalRunPhase::Settled);
+        assert_eq!(
+            after.runs[&run].error.as_ref().unwrap().code,
+            "storage_error"
+        );
+        assert_eq!(after.budget.runs_used, before.budget.runs_used);
+        assert_eq!(after.artifacts.len(), before.artifacts.len());
+        assert!(after.artifacts.iter().all(|a| !a.accepted));
+        assert!(after.budget.reserved.is_empty());
+        assert!(after.budget.incomplete_active_subjects.contains(&run));
+        assert_eq!(
+            after.runs[&run].budget.as_ref().unwrap().check_elapsed_ms,
+            None
+        );
+        assert_eq!(after.progress.goal_occupied_slots, 0);
+        assert!(goals.core.materialize(&id).unwrap().is_none());
+        assert!(!goals.core.maintain(&id).unwrap());
+        assert_eq!(
+            goals.get(&id, &caller).await.unwrap().revision,
+            after.revision
+        );
+        runtime.shutdown().await.unwrap();
+    }
+
+    struct AcceptanceWriteFault {
+        stage: &'static str,
+        inner: Mutex<std::sync::Weak<Inner>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Executor for AcceptanceWriteFault {
+        fn capabilities(&self) -> ExecutorCapabilities {
+            ExecutorCapabilities::MANAGED
+        }
+        fn enforces_json_candidate_limit(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            invocation: Invocation,
+            tools: Arc<dyn ToolBridge>,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> ExecutionOutcome {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let role = tools.goal_context().unwrap().role;
+            let inject = matches!(
+                (self.stage, role),
+                ("planner", GoalRunRole::Planner { .. })
+                    | ("worker", GoalRunRole::NodeMember { .. })
+                    | ("final", GoalRunRole::FinalCheck { .. })
+            );
+            let result = CompleteGoal(EvaluationVerdict::Pass)
+                .execute(invocation, tools, cancel)
+                .await;
+            if inject {
+                let inner = self.inner.lock().unwrap().upgrade().unwrap();
+                rusqlite::Connection::open(inner.options.store_dir.join("state.sqlite")).unwrap()
+                    .execute_batch(r#"CREATE TRIGGER reject_acceptance BEFORE UPDATE ON goals WHEN instr(OLD.body, '"phase":"checking"') > 0 AND instr(NEW.body, '"phase":"settled"') > 0 BEGIN SELECT RAISE(ABORT, 'injected acceptance failure'); END;"#).unwrap();
+            }
+            result
+        }
+    }
+    #[tokio::test]
+    async fn runtime_reconciles_acceptance_failures_for_planner_worker_and_final_check() {
+        for stage in ["planner", "worker", "final"] {
+            let executor = Arc::new(AcceptanceWriteFault {
+                stage,
+                inner: Mutex::new(std::sync::Weak::new()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let (_directory, runtime, goals, caller, request) =
+                setup_mode(Some(executor.clone()), true).await;
+            *executor.inner.lock().unwrap() = Arc::downgrade(&runtime.inner);
+            let id = goals.submit(request, &caller).await.unwrap().goal_id;
+            let before = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let snapshot = goals.get(&id, &caller).await.unwrap();
+                    if snapshot
+                        .runs
+                        .values()
+                        .any(|r| r.phase == GoalRunPhase::Checking)
+                    {
+                        break snapshot;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let failed_run = before
+                .runs
+                .values()
+                .find(|r| r.phase == GoalRunPhase::Checking)
+                .unwrap()
+                .run_id
+                .clone();
+            assert!(before.runs[&failed_run].native_stop_confirmed);
+            let calls = executor.calls.load(std::sync::atomic::Ordering::SeqCst);
+            rusqlite::Connection::open(runtime.inner.options.store_dir.join("state.sqlite"))
+                .unwrap()
+                .execute_batch("DROP TRIGGER reject_acceptance")
+                .unwrap();
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    let snapshot = goals.get(&id, &caller).await.unwrap();
+                    if snapshot.status == GoalStatus::Finished {
+                        break snapshot;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(ended.outcome, Some(GoalOutcome::Failed), "{stage}");
+            assert_eq!(
+                ended.runs[&failed_run].error.as_ref().unwrap().code,
+                "storage_error"
+            );
+            assert!(
+                ended
+                    .runs
+                    .values()
+                    .all(|r| r.phase == GoalRunPhase::Settled)
+            );
+            assert_eq!(
+                executor.calls.load(std::sync::atomic::Ordering::SeqCst),
+                calls
+            );
+            assert_eq!(ended.budget.runs_used, before.budget.runs_used);
+            assert!(ended.budget.reserved.is_empty());
+            assert_eq!(ended.progress.goal_occupied_slots, 0);
+            assert!(
+                ended
+                    .budget
+                    .incomplete_active_subjects
+                    .contains(&failed_run)
+            );
+            assert!(goals.evaluations(&id, &caller).await.unwrap().is_empty());
+            if stage == "final" {
+                assert!(ended.artifacts.iter().any(|a| a.accepted));
+            } else {
+                assert!(ended.artifacts.iter().all(|a| !a.accepted));
+            }
+            runtime.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn recovery_cannot_accept_completed_uncommitted_candidates_and_is_idempotent() {
         let (_directory, runtime, goals, caller, request) =
             setup(Some(Arc::new(CompleteGoal(EvaluationVerdict::Pass)))).await;

@@ -29,6 +29,51 @@ impl GoalCore {
             }
             self.apply_due_deadlines(&mut next, row.revision + 1, observed.utc_ms);
         }
+        // consume_return holds this same coordinator lock across validation and acceptance.
+        // A Checking Run observed here has lost its acceptance transaction, not a live checker.
+        // Dispose it without replaying business work or claiming an unknown check duration.
+        let interrupted_checks = next
+            .runs
+            .iter()
+            .filter(|(_, run)| run.view.phase == GoalRunPhase::Checking)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for run_id in interrupted_checks {
+            let error = Error::new(
+                "storage_error",
+                "/check",
+                "result acceptance did not commit; candidate retained without replay",
+            );
+            next.budget
+                .incomplete_active_subjects
+                .insert(run_id.clone());
+            super::coordinator::settle_run(&mut next, &run_id, 0)?;
+            let run = next.runs.get_mut(&run_id).expect("interrupted check");
+            run.view.interrupted = true;
+            run.view.error = Some(error.clone());
+            if let Some(budget) = &mut run.view.budget {
+                budget.check_elapsed_ms = None;
+            }
+            if let GoalRunRole::NodeMember { node_id, member_id } = &run.view.role {
+                let node = next.nodes.get_mut(node_id).expect("original node");
+                node.view.status = GoalNodeStatus::Failed;
+                node.view.error = Some(error.clone());
+                node.view
+                    .members
+                    .get_mut(member_id)
+                    .expect("original member")
+                    .status = GoalMemberStatus::Failed;
+            }
+            set_terminal(
+                &mut next,
+                GoalOutcome::Failed,
+                "storage_error",
+                &run_id,
+                row.revision + 1,
+                observed.utc_ms,
+            );
+            next.error.get_or_insert(error);
+        }
         self.cleanup_terminal(&mut next)?;
         self.close_stopping(&mut next, observed.utc_ms)?;
         let changed = serde_json::to_value(&row.record)? != serde_json::to_value(&next)?

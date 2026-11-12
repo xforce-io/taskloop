@@ -12,7 +12,7 @@
 - [历史总体 RFC](docs/RFC-0001-architecture.md)：更宽的架构方向，Python/CLI/动态规划等未作为一期依赖。
 - [名词表](docs/glossary.md)
 
-当前源码候选为 Rust 0.2.0，新增 Goal/DAG 编排；尚未完成本版本验收、独立审查或正式发布。
+当前 main 源码为 Rust 0.2.0，Goal/DAG 编排已于 2026-11-10 随 [PR #19](https://github.com/xforce-io/taskloop/pull/19) 合入；该候选验收、独立审查及 macOS/Ubuntu CI 已通过。尚未正式发布 crates.io 包。原 PR 保留的两项 P2 由 [Issue #20](https://github.com/xforce-io/taskloop/issues/20) 跟踪，不以源码版本代替发布制品。
 
 - [实现 Issue #3](https://github.com/xforce-io/taskloop/issues/3)
 - [实际集成契约与验收](docs/design/3-minimal-runtime-mvp.md)
@@ -75,7 +75,7 @@ Milkie 依赖固定于上游 #277/#278 的契约与提交，基础兼容候选�
 Trace 的业务结果和观测收尾分别发布。MilkieObserver 的失败/超时回调可按原事件 ID 重试，观察者须按 ID 幂等；宿主业务工具不会因观测重试而重放。最终 adapter.summary 给出交付确认序号、源最新序号和分项原因，早期业务 usage 中的 pending 不代表最终完整性。见 [尾部恢复契约](docs/design/15-trace-tail-recovery-diagnostics.md)。
 
 
-### Goal 编排与前台 CLI（#10 候选）
+### Goal 编排与前台 CLI（#10 已合入）
 
 Goal 路径使用显式 Profile、能力、权限和预算。`Runtime::open_orchestrated`/`Runtime::goals` 由宿主持续推进；`GoalClient`只读投影或向在线宿主提交命令。原有 Flow API 保留。
 
