@@ -12,7 +12,7 @@
 - [历史总体 RFC](docs/RFC-0001-architecture.md)：更宽的架构方向，Python/CLI/动态规划等未作为一期依赖。
 - [名词表](docs/glossary.md)
 
-当前 main 源码为 Rust 0.2.0，Goal/DAG 编排已于 2026-11-10 随 [PR #19](https://github.com/xforce-io/taskloop/pull/19) 合入；该候选验收、独立审查及 macOS/Ubuntu CI 已通过。尚未正式发布 crates.io 包。原 PR 保留的两项 P2 由 [Issue #20](https://github.com/xforce-io/taskloop/issues/20) 跟踪，不以源码版本代替发布制品。
+当前 main 源码为 Rust 0.2.0，Goal/DAG 编排已于 2026-11-10 随 [PR #19](https://github.com/xforce-io/taskloop/pull/19) 合入；该候选验收、独立审查及 macOS/Ubuntu CI 已通过。[Issue #20](https://github.com/xforce-io/taskloop/issues/20) 跟踪的两项 P2 已于 2026-11-12 随 [PR #21](https://github.com/xforce-io/taskloop/pull/21) 修复合入 main。尚未正式发布 crates.io 包，不以源码版本代替发布制品。
 
 - [实现 Issue #3](https://github.com/xforce-io/taskloop/issues/3)
 - [实际集成契约与验收](docs/design/3-minimal-runtime-mvp.md)
