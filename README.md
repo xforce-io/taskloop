@@ -32,7 +32,7 @@ cargo test --locked --test codex_live -- --ignored --nocapture --test-threads=1
 首版运行在 Unix。宿主使用自己的私有存储目录；TaskLoop 创建 0700 新目录，拒绝打开权限过宽的已有目录。业务输入不承载身份，Caller 由可信宿主构造。
 
 
-### Milkie 执行接入（#6 候选）
+### Milkie 执行接入（#6 已合入）
 
 `MilkieExecutor` 经 Milkie Sidecar 接入原生 Harness，TaskLoop 继续拥有工具授权、候选接纳与业务状态。宿主提供固定的 Milkie CLI、连接文件、专用原生存储和执行数据根；不复制登录材料、不自动回退 CodexExecutor。
 
@@ -48,7 +48,7 @@ let executor = std::sync::Arc::new(taskloop::MilkieExecutor::new(config)?);
 let bindings = taskloop::HostBindings::default().executor("research.agent", executor);
 ```
 
-Milkie 依赖固定于上游 #277/#278 的契约与提交，基础兼容候选为60b08f1，#8 源端治理需包含公开 purge 的275a917（或后续兼容提交）；从该提交构建/打包并记录宿主配置版本，不能把旧 registry 0.1.1 当作已包含 Sidecar。公开协议与能力在执行前核对。详情见 [设计](docs/design/6-milkie-executor-lifecycle.md) 和 [验收路径](.agents/skills/verify-taskloop/features/01-milkie-execution.md)。原生模型成功验收仍待补齐。
+Milkie 依赖固定于上游 #277/#278 的契约与提交，基础兼容候选为60b08f1，#8 源端治理需包含公开 purge 的275a917（或后续兼容提交）；从该提交构建/打包并记录宿主配置版本，不能把旧 registry 0.1.1 当作已包含 Sidecar。公开协议与能力在执行前核对。详情见 [设计](docs/design/6-milkie-executor-lifecycle.md) 和 [验收路径](.agents/skills/verify-taskloop/features/01-milkie-execution.md)。[PR #12](https://github.com/xforce-io/taskloop/pull/12) 已完成两类真实 Harness 的公共 SDK 验收并合入 main；原始版本、失败记录及停止未知边界保留在该 PR 中。
 
 ### 统一 Trace（显式启用）
 
