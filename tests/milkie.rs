@@ -14,6 +14,9 @@ use taskloop::*;
 use tokio_util::sync::CancellationToken;
 
 fn adapter(f: &Fixture, mode: &str) -> Arc<MilkieExecutor> {
+    adapter_search(f, mode, MilkieWebSearchMode::Disabled)
+}
+fn adapter_search(f: &Fixture, mode: &str, search: MilkieWebSearchMode) -> Arc<MilkieExecutor> {
     let root = f.root.path();
     for dir in ["config", "sessions", "milkie"] {
         std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -48,7 +51,7 @@ fn adapter(f: &Fixture, mode: &str) -> Arc<MilkieExecutor> {
         "MILKIE_FIXTURE_OBSERVATION_FILE",
         root.join("observation-reading.marker").into_os_string(),
     );
-    Arc::new(MilkieExecutor::new(config).unwrap())
+    Arc::new(MilkieExecutor::new(config.web_search(search)).unwrap())
 }
 async fn runtime(f: &Fixture, mode: &str, gate: &str) -> Runtime {
     let mut bindings = f.bindings(gate);
@@ -908,4 +911,118 @@ async fn native_stop_with_unknown_host_effects_can_have_a_complete_tail_but_neve
     assert_eq!(summary["delivered_sequence"], 126);
     assert_eq!(spy.0.load(Ordering::SeqCst), 1);
     assert_eq!(executor.stop_or_confirm(&run).await, StopState::Unknown);
+}
+
+#[tokio::test]
+async fn native_search_mode_is_explicit_negotiated_and_part_of_binding_identity() {
+    for (search, expected) in [
+        (MilkieWebSearchMode::Disabled, None),
+        (MilkieWebSearchMode::Cached, Some("cached")),
+        (MilkieWebSearchMode::Live, Some("live")),
+    ] {
+        let f = Fixture::new(false);
+        let a = adapter_search(&f, "normal", search);
+        let mut b = f.bindings("pass");
+        b.executors.insert("test.executor".into(), a.clone());
+        let rt = Runtime::open(
+            RuntimeOptions::new(f.root.path().join("store")),
+            vec![f.definition.clone()],
+            b,
+        )
+        .await
+        .unwrap();
+        let id = rt
+            .start(f.request("mode", "MODE", false), &Caller::local())
+            .await
+            .unwrap();
+        let done = wait_for(&rt, &id, |s| s.status.terminal()).await;
+        assert_eq!(done.status, Status::Completed, "{done:?}");
+        let config = f.root.path().join("milkie");
+        let files = walk_fixture_records(&config);
+        assert_eq!(files.len(), 1);
+        let record: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+        assert_eq!(record["constraints"]["webSearch"].as_str(), expected);
+        assert_eq!(record["stopped"], true);
+        rt.shutdown().await.unwrap();
+    }
+    let f = Fixture::new(false);
+    assert_eq!(
+        adapter(&f, "normal").identity(),
+        adapter_search(&f, "normal", MilkieWebSearchMode::Disabled).identity()
+    );
+    assert_ne!(
+        adapter(&f, "normal").identity(),
+        adapter_search(&f, "normal", MilkieWebSearchMode::Live).identity()
+    );
+    assert_ne!(
+        adapter_search(&f, "normal", MilkieWebSearchMode::Cached).identity(),
+        adapter_search(&f, "normal", MilkieWebSearchMode::Live).identity()
+    );
+}
+fn walk_fixture_records(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut result = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                result.extend(walk_fixture_records(&path));
+            } else if path.file_name().is_some_and(|n| n == "fixture-record.json") {
+                result.push(path);
+            }
+        }
+    }
+    result
+}
+#[tokio::test]
+async fn native_search_missing_capability_is_rejected_before_context_creation() {
+    let f = Fixture::new(false);
+    let a = adapter_search(&f, "no_search_capability", MilkieWebSearchMode::Live);
+    let result = a
+        .execute(
+            invocation(&f, false, 10000),
+            Arc::new(Spy::default()),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(result,ExecutionOutcome::Failed{ref code,..}if code=="capability_denied"));
+    assert!(walk_fixture_records(&f.root.path().join("milkie")).is_empty());
+    assert!(!f.root.path().join("started.log").exists());
+}
+
+#[tokio::test]
+async fn native_search_receipt_is_bound_to_completed_run_and_survives_adapter_reopen() {
+    for mode in ["normal", "search_wrong_context"] {
+        let f = Fixture::new(false);
+        let a = adapter_search(&f, mode, MilkieWebSearchMode::Live);
+        let inv = invocation(&f, false, 10000);
+        let run = inv.run_id.clone();
+        assert!(a.native_web_searches(&run).await.is_err());
+        let outcome = a
+            .execute(inv, Arc::new(Spy::default()), CancellationToken::new())
+            .await;
+        assert!(
+            matches!(outcome, ExecutionOutcome::Completed { .. }),
+            "{outcome:?}"
+        );
+        let reopened = adapter_search(&f, mode, MilkieWebSearchMode::Live);
+        let receipt = reopened.native_web_searches(&run).await;
+        if mode == "normal" {
+            let page = receipt.unwrap();
+            assert_eq!(page["complete"], true);
+            assert_eq!(
+                page["items"][0]["results"][0]["url"],
+                "https://example.com/source"
+            );
+            assert!(reopened.native_web_searches("unowned-run").await.is_err());
+            assert!(adapter(&f, mode).native_web_searches(&run).await.is_err());
+            assert!(
+                adapter_search(&f, mode, MilkieWebSearchMode::Cached)
+                    .native_web_searches(&run)
+                    .await
+                    .is_err()
+            );
+        } else {
+            assert_eq!(receipt.unwrap_err().code, "protocol_invalid");
+        }
+    }
 }

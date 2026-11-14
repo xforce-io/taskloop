@@ -75,6 +75,23 @@ pub struct MilkieStorage {
     pub config_dir: PathBuf,
     pub session_dir: PathBuf,
 }
+/// Explicit native-search authorization for a Milkie executor binding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MilkieWebSearchMode {
+    #[default]
+    Disabled,
+    Cached,
+    Live,
+}
+impl MilkieWebSearchMode {
+    fn enabled(self) -> Option<&'static str> {
+        match self {
+            Self::Disabled => None,
+            Self::Cached => Some("cached"),
+            Self::Live => Some("live"),
+        }
+    }
+}
 #[derive(Clone)]
 pub struct MilkieConfig {
     program: PathBuf,
@@ -83,6 +100,7 @@ pub struct MilkieConfig {
     data_dir: PathBuf,
     storage: MilkieStorage,
     env: BTreeMap<OsString, OsString>,
+    web_search: MilkieWebSearchMode,
 }
 impl MilkieConfig {
     pub fn new(
@@ -98,6 +116,7 @@ impl MilkieConfig {
             data_dir: data_dir.into(),
             storage,
             env: BTreeMap::new(),
+            web_search: MilkieWebSearchMode::Disabled,
         };
         for p in [
             &value.program,
@@ -128,6 +147,10 @@ impl MilkieConfig {
         std::fs::create_dir_all(&value.data_dir)?;
         value.data_dir = value.data_dir.canonicalize()?;
         Ok(value)
+    }
+    pub fn web_search(mut self, mode: MilkieWebSearchMode) -> Self {
+        self.web_search = mode;
+        self
     }
     pub fn args(mut self, args: impl IntoIterator<Item = impl Into<OsString>>) -> Self {
         self.args = args.into_iter().map(Into::into).collect();
@@ -235,6 +258,81 @@ impl MilkieExecutor {
         self.observer = Some(observer);
         self
     }
+    /// Read Milkie's public native-search receipt for this adapter's completed run.
+    /// Result payloads remain opaque; applications decide how to use search results.
+    pub async fn native_web_searches(&self, run_id: &str) -> Result<Value> {
+        let mode = self
+            .config
+            .web_search
+            .enabled()
+            .ok_or_else(|| failure("capability_denied"))?;
+        if let Some(control) = self
+            .runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(run_id)
+            && !control.finalized.is_cancelled()
+        {
+            return Err(failure("source_busy"));
+        }
+        let root = self.root(run_id);
+        let owner: Owner = serde_json::from_slice(&std::fs::read(root.join("owner.json"))?)?;
+        if owner.version != 1
+            || owner.taskloop_run_id != run_id
+            || !owner.start_sent
+            || !owner.stopped
+        {
+            return Err(failure("protocol_invalid"));
+        }
+        let source = owner
+            .milkie_run_id
+            .ok_or_else(|| failure("protocol_invalid"))?;
+        let context = owner
+            .context_id
+            .ok_or_else(|| failure("protocol_invalid"))?;
+        let operation = async {
+            let mut rpc = Rpc::spawn(&self.config, &root, None).await?;
+            let result = async {
+                rpc.handshake().await?;
+                let record = rpc
+                    .request("execution.query", json!({"runId":source}))
+                    .await?;
+                if record["runId"] != source
+                    || record["contextId"] != context
+                    || record["stopped"] != true
+                    || record["status"] != "succeeded"
+                    || record["webSearch"] != mode
+                {
+                    return Err(failure("protocol_invalid"));
+                }
+                let page = rpc
+                    .request("web_search.read", json!({"runId":source}))
+                    .await?;
+                if page["version"] != 1
+                    || page["runId"] != source
+                    || page["contextId"] != context
+                    || page["mode"] != mode
+                    || !page["complete"].is_boolean()
+                    || page["items"]
+                        .as_array()
+                        .is_none_or(|items| items.len() > 64)
+                    || serde_json::to_vec(&page)?.len() > 2 * 1024 * 1024
+                {
+                    return Err(failure("protocol_invalid"));
+                }
+                Ok(page)
+            }
+            .await;
+            let closed = rpc.close().await;
+            if !closed {
+                return Err(failure("harness_unavailable"));
+            }
+            result
+        };
+        tokio::time::timeout(Duration::from_secs(20), operation)
+            .await
+            .map_err(|_| failure("harness_unavailable"))?
+    }
     fn root(&self, run_id: &str) -> PathBuf {
         self.config
             .data_dir
@@ -281,6 +379,10 @@ impl Executor for MilkieExecutor {
             let bytes = path.as_os_str().as_encoded_bytes();
             material.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
             material.extend_from_slice(bytes);
+        }
+        if let Some(mode) = self.config.web_search.enabled() {
+            material.extend_from_slice(b"native-web-search:");
+            material.extend_from_slice(mode.as_bytes());
         }
         json!({"adapter":"milkie-sidecar@1","program":self.config.program,"connection_digest":self.connection_digest,"host_configuration_digest":crate::json::digest(&material)})
     }
@@ -1218,6 +1320,11 @@ async fn perform(
         let iterations=inv.budget.as_ref().and_then(|b|b.policy.max_model_iterations);
         if iterations.is_some() && capabilities["capabilities"]["modelIterations"]!=true {return Err(failure("unsupported_constraint"));}
 
+        if let Some(mode) = config.web_search.enabled()
+            && !capabilities["capabilities"]["webSearch"].as_array().is_some_and(|modes| modes.iter().any(|m| m == mode))
+        {
+            return Err(failure("capability_denied"));
+        }
         if control.cancel.is_cancelled() { return Ok(ExecutionOutcome::Cancelled); }
         let created = rpc.request("context.create", json!({"cwd":inv.work_dir,"storage":{"configDir":config.storage.config_dir,"sessionDir":config.storage.session_dir}})).await?;
         let source_context = created["contextId"].as_str().ok_or_else(|| failure("harness_protocol_invalid"))?.to_owned();
@@ -1226,6 +1333,7 @@ async fn perform(
         if remaining == 0 { return Ok(ExecutionOutcome::Failed { code: "limit_reached".into(), message: "Entry deadline expired before native start".into() }); }
         if control.cancel.is_cancelled() { return Ok(ExecutionOutcome::Cancelled); }
         let mut constraints = json!({"tools":catalog,"forwarding":"parallel","timeoutMs":remaining});
+        if let Some(mode) = config.web_search.enabled() {constraints["webSearch"]=json!(mode);}
         if let Some(options) = &observation_options { constraints["observation"] = serde_json::to_value(options)?; }
         if let Some(limit)=iterations {constraints["maxModelIterations"]=json!(limit);}
 

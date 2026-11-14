@@ -11,3 +11,14 @@
 每次证据注明实现/设计/依赖SHA和命令；模拟路径只证明协议、所有权与业务边界，不替代真实 Harness。
 
 确定性进程路径：`cargo test --locked --test milkie`。跨仓库路径：先构建固定 Milkie 版本，再显式提供 MILKIE_NODE、MILKIE_CLI，执行 `cargo test --locked --test milkie_actual_sidecar -- --ignored`。后者使用真实 Milkie worker 与工具分发器，但原生模型协议是本仓库夹具，不能替代 S1.A1/S2.A1 的真实模型验收。
+
+
+## Issue #23：显式原生搜索与回执
+
+[设计v0.2](../../../../docs/design/23-milkie-native-search-mode.md)；本功能为S1/S2主要入口，无新CLI或页面。
+
+- S1：通过MilkieConfig::web_search选择Disabled/Cached/Live，经公开Executor执行。默认/Disabled不发送新约束且身份相同；Cached/Live约束及身份不同。缺少匹配能力时，在context.create前失败capability_denied，不能回退或启动模型。
+- S2：通过MilkieExecutor::native_web_searches读取本次已结束运行，核对run/context/mode、complete及不透明结果；重开适配器仍能读取。禁用、未知运行、错模式、错context必须拒绝。原工具调用、停止与观测计量保持独立。
+- 确定性协议：`cargo test --locked --test milkie native_search -- --nocapture`；完整回归与公开消费者按上文执行。
+- 真实新版Milkie不支持的运行时：显式MILKIE_NODE/MILKIE_CLI，运行`cargo test --locked --test milkie_actual_sidecar real_milkie_refuses_native_search_before_context_on_unsupported_runtime -- --ignored --nocapture`，确认前置拒绝且无产物。该路径不消费模型，不能替代真实原生搜索。
+- 真实原生搜索来源：Milkie #283固定Codex0.166.0/Sol/high的一次登记实跑，Succeeded/Stopped，23条结构化结果。Inquiry消费真实回执、独立抓取及研究质量由Inquiry #7验收；本协议夹具不证明文章质量。

@@ -241,3 +241,55 @@ async fn real_milkie_enforces_model_iteration_policy_without_tool_count_substitu
     );
     rt.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires explicit Milkie CLI/Node; real Sidecar capability refusal, zero models"]
+async fn real_milkie_refuses_native_search_before_context_on_unsupported_runtime() {
+    let node = PathBuf::from(std::env::var_os("MILKIE_NODE").expect("MILKIE_NODE"));
+    let cli = PathBuf::from(std::env::var_os("MILKIE_CLI").expect("MILKIE_CLI"));
+    let f = Fixture::new(false);
+    let root = f.root.path();
+    for d in ["config", "sessions", "milkie"] {
+        std::fs::create_dir(root.join(d)).unwrap();
+    }
+    std::fs::write(root.join("connection.json"),br#"{"contractVersion":1,"fields":{"transport":"agent-cli","runtime":"pi","model":"fixture"}}"#).unwrap();
+    let config = MilkieConfig::new(
+        node,
+        root.join("connection.json"),
+        root.join("milkie"),
+        MilkieStorage {
+            config_dir: root.join("config"),
+            session_dir: root.join("sessions"),
+        },
+    )
+    .unwrap()
+    .args([cli.into_os_string()])
+    .web_search(MilkieWebSearchMode::Live);
+    let mut bindings = f.bindings("pass");
+    bindings.executors.insert(
+        "test.executor".into(),
+        Arc::new(MilkieExecutor::new(config).unwrap()),
+    );
+    let rt = Runtime::open(
+        RuntimeOptions::new(root.join("store")),
+        vec![f.definition.clone()],
+        bindings,
+    )
+    .await
+    .unwrap();
+    let id = rt
+        .start(
+            f.request("unsupported-search", "NO-MODEL", false),
+            &Caller::local(),
+        )
+        .await
+        .unwrap();
+    let done = wait_for(&rt, &id, |s| s.status.terminal()).await;
+    assert_eq!(done.status, Status::Failed);
+    assert_eq!(
+        done.error.as_ref().map(|e| e.code.as_str()),
+        Some("capability_denied")
+    );
+    assert!(done.accepted_artifacts.is_empty());
+    rt.shutdown().await.unwrap();
+}
