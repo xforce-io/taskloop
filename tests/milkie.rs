@@ -1004,6 +1004,9 @@ async fn native_search_receipt_is_bound_to_completed_run_and_survives_adapter_re
             matches!(outcome, ExecutionOutcome::Completed { .. }),
             "{outcome:?}"
         );
+        if mode == "normal" {
+            assert!(a.native_web_searches(&run).await.is_ok());
+        }
         let reopened = adapter_search(&f, mode, MilkieWebSearchMode::Live);
         let receipt = reopened.native_web_searches(&run).await;
         if mode == "normal" {

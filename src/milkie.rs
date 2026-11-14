@@ -266,14 +266,25 @@ impl MilkieExecutor {
             .web_search
             .enabled()
             .ok_or_else(|| failure("capability_denied"))?;
-        if let Some(control) = self
+        let control = self
             .runs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(run_id)
-            && !control.finalized.is_cancelled()
-        {
-            return Err(failure("source_busy"));
+            .cloned();
+        if let Some(control) = control {
+            if control
+                .outcome
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+            {
+                return Err(failure("source_busy"));
+            }
+            // execute may return just before the supervisor's drop guard settles.
+            tokio::time::timeout(Duration::from_secs(1), control.finalized.cancelled())
+                .await
+                .map_err(|_| failure("source_busy"))?;
         }
         let root = self.root(run_id);
         let owner: Owner = serde_json::from_slice(&std::fs::read(root.join("owner.json"))?)?;
