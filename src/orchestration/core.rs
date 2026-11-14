@@ -2413,8 +2413,8 @@ mod tests {
         let (_directory, runtime, mut goals, caller, request) = setup(None).await;
         let id = goals.submit(request, &caller).await.unwrap().goal_id;
         let original = goals.get(&id, &caller).await.unwrap();
-        Arc::get_mut(&mut goals.core).unwrap().clock =
-            Arc::new(GoalClock::new(crate::runtime::now_ms() + 400));
+        // Keep the untrusted phase independent of real I/O and CI scheduling latency.
+        Arc::get_mut(&mut goals.core).unwrap().clock = Arc::new(GoalClock::new(i64::MAX as u64));
         assert!(goals.core.maintain(&id).unwrap());
         let blocked = goals.get(&id, &caller).await.unwrap();
         assert_eq!(blocked.status, GoalStatus::Blocked);
@@ -2447,7 +2447,7 @@ mod tests {
             goals.get(&id, &caller).await.unwrap().revision,
             after_rejection.revision
         );
-        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        Arc::get_mut(&mut goals.core).unwrap().clock = Arc::new(GoalClock::new(0));
         assert!(goals.core.maintain(&id).unwrap());
         let stopped = goals.get(&id, &caller).await.unwrap();
         assert_eq!(stopped.status, GoalStatus::Stopped);

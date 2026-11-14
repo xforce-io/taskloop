@@ -79,4 +79,11 @@ mod tests {
         let clock = GoalClock::at(i64::MAX as u64 - 1, 1000);
         assert!(!clock.observe().unwrap().trusted);
     }
+    #[test]
+    fn an_untrusted_anchor_becomes_trusted_after_wall_time_catches_up() {
+        // A historical anchor avoids a short real-time scheduling window.
+        let clock = GoalClock::at(1, 0);
+        assert!(!clock.anchor.lock().unwrap().trusted);
+        assert!(clock.observe().unwrap().trusted);
+    }
 }
