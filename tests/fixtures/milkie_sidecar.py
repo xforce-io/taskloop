@@ -34,11 +34,13 @@ for line in sys.stdin:
   if mode=='slow_handshake':
    with open(os.environ['MILKIE_FIXTURE_HANDSHAKE_FILE'],'w') as marker:marker.write('waiting')
    time.sleep(1.2)
-  send({'id':m['id'],'result':{'protocolVersion':99 if mode=='bad_version' else 1,'capabilities':{'supported':True,'hostTools':True,'cancel':True,'timeout':True,'observation':{'version':1}}}})
+  send({'id':m['id'],'result':{'protocolVersion':99 if mode=='bad_version' else 1,'capabilities':{'supported':True,'hostTools':True,'cancel':True,'timeout':True,'observation':{'version':1},**({'webSearch':['disabled','cached','live']}if mode!='no_search_capability'else{})}}})
  elif method=='context.create':
   r['contextId']=str(uuid.uuid4());save();send({'id':m['id'],'result':{'contextId':r['contextId']}})
  elif method=='execution.start':
   payload=json.loads(params['input']);r.update(runId=str(uuid.uuid4()),status='running',stopped=False,nonce=payload['flow_input'].get('nonce','direct'),tool=next(t['name'] for t in params['constraints']['tools'] if payload['tool_mapping'][t['name']]=='artifact.write'))
+  r['constraints']=params['constraints']
+  r['webSearch']=params['constraints'].get('webSearch','disabled')
   r['traceparent']=params['constraints'].get('observation',{}).get('traceparent')
   r.pop('finishedAt',None)
   if os.environ.get('MILKIE_FIXTURE_STARTED_FILE'):
@@ -76,6 +78,8 @@ for line in sys.stdin:
   call(wrong=mode=='wrong_context')
   if mode=='duplicate':call(request_id='tool:2')
   if mode=='duplicate_wire':call(call_id='different-call',request_id='tool:1')
+ elif method=='web_search.read':
+  send({'id':m['id'],'result':{'version':1,'runId':r['runId'],'contextId':'wrong' if mode=='search_wrong_context' else r['contextId'],'mode':r['constraints'].get('webSearch','disabled'),'items':[{'nativeItemId':'search-1','phase':'completed','query':'fixture query','action':{'type':'search','query':'fixture query','queries':None},'results':[{'type':'text_result','url':'https://example.com/source','title':'Fixture source'}]}],'complete':True}})
  elif method=='execution.query':send({'id':m['id'],'result':r})
  elif method=='execution.cancel':
   finish('unknown' if mode=='stop_unknown' else 'cancelled',mode!='stop_unknown')

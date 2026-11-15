@@ -12,7 +12,7 @@
 - [历史总体 RFC](docs/RFC-0001-architecture.md)：更宽的架构方向，Python/CLI/动态规划等未作为一期依赖。
 - [名词表](docs/glossary.md)
 
-当前 main 源码为 Rust 0.2.0，Goal/DAG 编排已于 2026-11-10 随 [PR #19](https://github.com/xforce-io/taskloop/pull/19) 合入；该候选验收、独立审查及 macOS/Ubuntu CI 已通过。尚未正式发布 crates.io 包。原 PR 保留的两项 P2 由 [Issue #20](https://github.com/xforce-io/taskloop/issues/20) 跟踪，不以源码版本代替发布制品。
+当前 main 源码为 Rust 0.2.0，Goal/DAG 编排已于 2026-11-10 随 [PR #19](https://github.com/xforce-io/taskloop/pull/19) 合入；该候选验收、独立审查及 macOS/Ubuntu CI 已通过。[Issue #20](https://github.com/xforce-io/taskloop/issues/20) 跟踪的两项 P2 已于 2026-11-12 随 [PR #21](https://github.com/xforce-io/taskloop/pull/21) 修复合入 main。尚未正式发布 crates.io 包，不以源码版本代替发布制品。
 
 - [实现 Issue #3](https://github.com/xforce-io/taskloop/issues/3)
 - [实际集成契约与验收](docs/design/3-minimal-runtime-mvp.md)
@@ -32,7 +32,7 @@ cargo test --locked --test codex_live -- --ignored --nocapture --test-threads=1
 首版运行在 Unix。宿主使用自己的私有存储目录；TaskLoop 创建 0700 新目录，拒绝打开权限过宽的已有目录。业务输入不承载身份，Caller 由可信宿主构造。
 
 
-### Milkie 执行接入（#6 候选）
+### Milkie 执行接入（#6 已合入）
 
 `MilkieExecutor` 经 Milkie Sidecar 接入原生 Harness，TaskLoop 继续拥有工具授权、候选接纳与业务状态。宿主提供固定的 Milkie CLI、连接文件、专用原生存储和执行数据根；不复制登录材料、不自动回退 CodexExecutor。
 
@@ -48,7 +48,7 @@ let executor = std::sync::Arc::new(taskloop::MilkieExecutor::new(config)?);
 let bindings = taskloop::HostBindings::default().executor("research.agent", executor);
 ```
 
-Milkie 依赖固定于上游 #277/#278 的契约与提交，基础兼容候选为60b08f1，#8 源端治理需包含公开 purge 的275a917（或后续兼容提交）；从该提交构建/打包并记录宿主配置版本，不能把旧 registry 0.1.1 当作已包含 Sidecar。公开协议与能力在执行前核对。详情见 [设计](docs/design/6-milkie-executor-lifecycle.md) 和 [验收路径](.agents/skills/verify-taskloop/features/01-milkie-execution.md)。原生模型成功验收仍待补齐。
+Milkie 依赖固定于上游 #277/#278 的契约与提交，基础兼容候选为60b08f1，#8 源端治理需包含公开 purge 的275a917（或后续兼容提交）；从该提交构建/打包并记录宿主配置版本，不能把旧 registry 0.1.1 当作已包含 Sidecar。公开协议与能力在执行前核对。详情见 [设计](docs/design/6-milkie-executor-lifecycle.md) 和 [验收路径](.agents/skills/verify-taskloop/features/01-milkie-execution.md)。[PR #12](https://github.com/xforce-io/taskloop/pull/12) 已完成两类真实 Harness 的公共 SDK 验收并合入 main；原始版本、失败记录及停止未知边界保留在该 PR 中。
 
 ### 统一 Trace（显式启用）
 

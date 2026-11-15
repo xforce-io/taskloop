@@ -32,7 +32,7 @@ pub use codex::CodexExecutor;
 mod milkie;
 pub use milkie::{
     MilkieConfig, MilkieExecutor, MilkieObservationOptions, MilkieObserver, MilkieStorage,
-    ToolCallMetadata,
+    MilkieWebSearchMode, ToolCallMetadata,
 };
 
 mod trace;
